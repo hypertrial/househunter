@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+cd "$(dirname "$0")/.."
+uv run ruff check .
+uv run pytest
+npm --prefix web ci
+npm --prefix web test
+npm --prefix web run build
+git diff --exit-code -- web/dist
+npm --prefix web exec playwright install chromium
+npm --prefix web run test:e2e
