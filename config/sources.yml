@@ -1,0 +1,24 @@
+schema_version: 1
+fema:
+  name: FEMA National Risk Index Census Tracts
+  item_id: 9da4eeb936544335a6db0cd7a8448a51
+  layer_url: https://services.arcgis.com/XG15cJAlne2vxtgt/arcgis/rest/services/National_Risk_Index_Census_Tracts/FeatureServer/0
+  item_url: https://www.arcgis.com/home/item.html?id=9da4eeb936544335a6db0cd7a8448a51&sublayer=0
+  terms_url: https://hazards.fema.gov/nri/data-resources
+  version: December 2025
+  release: v1.20
+  item_modified_ms: 1766093148000
+  data_last_edit_ms: 1765870818438
+  layer_last_edit_ms: 1765872640702
+  expected_row_count: 85154
+  fields:
+    TRACTFIPS: esriFieldTypeString
+    ALR_NPCTL: esriFieldTypeDouble
+    NRI_VER: esriFieldTypeString
+  schema_fingerprint: fdbbc3313928b19a8334cf0883667b996c64e5fc33b956dc42bbff55adf7723e
+  canonical_sha256: 3bed225905e528ac3b5c4443f66e21a4585bdc553f84dd1edd35daefe930fed4
+census:
+  decennial_vintage: 2020
+  acs_vintage: 2024
+  acs_dataset: acs/acs5
+  terms_url: https://www.census.gov/about/policies/open-gov/open-data.html

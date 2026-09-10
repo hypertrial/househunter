@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "househunter"
+version = "1.0.0"
+description = "Rank U.S. Census Places by housing-weighted FEMA ALR_NPCTL"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+authors = [{ name = "HouseHunter contributors" }]
+dependencies = [
+  "duckdb>=1.4,<2",
+  "fastapi>=0.116,<1",
+  "httpx>=0.28,<1",
+  "polars>=1.32,<2",
+  "pydantic>=2.11,<3",
+  "pyyaml>=6.0,<7",
+  "typer>=0.16,<1",
+  "uvicorn>=0.35,<1",
+]
+
+[project.scripts]
+househunter = "househunter.cli:app"
+
+[dependency-groups]
+dev = [
+  "pytest>=8.4,<9",
+  "ruff>=0.12,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/househunter"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"config/sources.yml" = "househunter/assets/sources.yml"
+"web/dist" = "househunter/static"
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]

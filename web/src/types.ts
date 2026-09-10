@@ -1,0 +1,42 @@
+export type CoverageStatus = "complete" | "zero_housing" | "missing_fema" | "unmatched_geography";
+
+export interface PlaceSummary {
+  place_id: string;
+  name: string;
+  state: string;
+  place_type: string;
+  population_2020: number;
+  housing_units_2020: number;
+  population_2024: number | null;
+  housing_units_2024: number | null;
+  median_home_value_2024: number | null;
+  risk_score: number | null;
+  coverage_status: CoverageStatus;
+  fema_vintage: string;
+  census_vintage: string;
+  acs_vintage: string;
+}
+
+export interface TractContribution {
+  tract_id: string | null;
+  housing_units: number;
+  housing_weight: number;
+  fema_percentile: number | null;
+  weighted_contribution: number | null;
+}
+
+export interface PlaceDetail {
+  summary: PlaceSummary;
+  total_weighted_housing: number;
+  coverage_ratio: number;
+  methodology_notice: string;
+  tract_contributions: TractContribution[];
+}
+
+export interface JobStatus {
+  job_id: string;
+  state: "queued" | "running" | "succeeded" | "failed" | "cancelled";
+  progress: number;
+  message: string;
+  error: string | null;
+}
