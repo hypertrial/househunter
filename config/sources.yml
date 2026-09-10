@@ -19,6 +19,4 @@ fema:
   canonical_sha256: 3bed225905e528ac3b5c4443f66e21a4585bdc553f84dd1edd35daefe930fed4
 census:
   decennial_vintage: 2020
-  acs_vintage: 2024
-  acs_dataset: acs/acs5
   terms_url: https://www.census.gov/about/policies/open-gov/open-data.html

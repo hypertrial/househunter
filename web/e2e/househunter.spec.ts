@@ -7,14 +7,10 @@ const summary = {
   place_type: "city",
   population_2020: 108250,
   housing_units_2020: 48000,
-  population_2024: 106000,
-  housing_units_2024: 49000,
-  median_home_value_2024: 980000,
   risk_score: 21.25,
   coverage_status: "complete",
   fema_vintage: "December 2025",
   census_vintage: "2020 Census",
-  acs_vintage: "2024 ACS 5-year",
 };
 
 test("prepares, ranks, inspects, and exports", async ({ page }) => {
@@ -36,7 +32,6 @@ test("prepares, ranks, inspects, and exports", async ({ page }) => {
                 source_vintages: {
                   fema: "December 2025",
                   census: "2020",
-                  acs: "2024 ACS 5-year",
                 },
                 scope: { kind: "national", state: null },
               }

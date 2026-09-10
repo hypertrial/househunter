@@ -51,7 +51,6 @@ def sources(
             },
             "census": {
                 "decennial_vintage": config["census"]["decennial_vintage"],
-                "acs_vintage": config["census"]["acs_vintage"],
                 "packaged": census_cached,
                 "error": census_error,
             },
@@ -66,7 +65,7 @@ def sources(
                 f"FEMA NRI {result['fema']['release']} ({result['fema']['version']}): "
                 f"{'cached' if result['fema']['cached'] else 'not downloaded'}"
             )
-            typer.echo(f"Census: 2020 Decennial; 2024 ACS 5-year ({census_state})")
+            typer.echo(f"Census: 2020 Decennial ({census_state})")
             if result["fema"]["error"]:
                 typer.echo(f"Cache error: {result['fema']['error']}", err=True)
             if census_error:
@@ -124,13 +123,9 @@ def rank(
         typer.echo("PLACE_ID  SCORE  POPULATION  PLACE")
         for row in result["items"]:
             score = f"{row['risk_score']:.1f}" if row["risk_score"] is not None else "—"
-            population = (
-                row["population_2024"]
-                if row["population_2024"] is not None
-                else row["population_2020"]
-            )
             typer.echo(
-                f"{row['place_id']:<9} {score:>5}  {population:>10,}  {row['name']}, {row['state']}"
+                f"{row['place_id']:<9} {score:>5}  {row['population_2020']:>10,}  "
+                f"{row['name']}, {row['state']}"
             )
     except HouseHunterError as exc:
         _abort(exc)

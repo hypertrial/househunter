@@ -43,31 +43,19 @@ def fixture_environment(
             "housing_weight": pl.Float64,
         },
     )
-    acs = pl.DataFrame(
-        {
-            "place_id": places["place_id"],
-            "population_2024": [1100, 220, 0, 105, 95],
-            "housing_units_2024": [105, 22, 0, 11, 11],
-            "median_home_value_2024": [200000, 250000, None, 180000, 175000],
-        }
-    )
     places.write_parquet(assets / "places_2020.parquet")
     weights.write_parquet(assets / "place_tract_weights_2020.parquet")
-    acs.write_parquet(assets / "acs_2024_context.parquet")
     metadata = {
-        "schema_version": 1,
+        "schema_version": 2,
         "scope": "50 states and District of Columbia",
         "census_decennial_vintage": 2020,
-        "acs_vintage": 2024,
         "row_counts": {
             "places_2020": places.height,
             "place_tract_weights_2020": weights.height,
-            "acs_2024_context": acs.height,
         },
         "logical_checksums": {
             "places_2020": _logical_checksum(places, ["place_id"]),
             "place_tract_weights_2020": _logical_checksum(weights, ["place_id", "tract_id"]),
-            "acs_2024_context": _logical_checksum(acs, ["place_id"]),
         },
     }
     (assets / "reference_metadata.json").write_text(json.dumps(metadata) + "\n")
@@ -95,7 +83,7 @@ def fixture_environment(
             ),
             "canonical_sha256": None,
         },
-        "census": {"decennial_vintage": 2020, "acs_vintage": 2024},
+        "census": {"decennial_vintage": 2020},
     }
     config_path = tmp_path / "sources.yml"
     import yaml

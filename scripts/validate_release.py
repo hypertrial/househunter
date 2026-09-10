@@ -25,7 +25,7 @@ def main() -> None:
     arguments = parser.parse_args()
     paths = RuntimePaths.from_root()
     assets = reference_assets()
-    places, weights, acs = validate_reference_assets(assets)
+    places, weights = validate_reference_assets(assets)
     metadata = json.loads(assets.metadata.read_text())
     expected_states = {
         "AL",
@@ -88,7 +88,6 @@ def main() -> None:
     for name, frame in {
         "places_2020": places,
         "place_tract_weights_2020": weights,
-        "acs_2024_context": acs,
     }.items():
         sort = ["place_id", "tract_id"] if "tract_id" in frame.columns else ["place_id"]
         actual = logical_checksum(frame, frame.columns, sort)
@@ -104,7 +103,7 @@ def main() -> None:
         raise ValueError("Connecticut reconciliation audit lacks the sole water-tract split")
     source = load_config()["fema"]
     fema, _ = validate_cached_fema(paths.cache / "fema_nri_tracts.parquet", source)
-    scored, _ = compute_scores(places, weights, acs, fema, fema_vintage=source["version"])
+    scored, _ = compute_scores(places, weights, fema, fema_vintage=source["version"])
     ranked = scored.filter(pl.col("coverage_status") == "complete")
     if ranked.filter(pl.col("coverage_ratio") != 1).height:
         raise ValueError("A ranked Place lacks complete positive-housing coverage")

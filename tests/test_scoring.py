@@ -25,21 +25,13 @@ def _inputs():  # type: ignore[no-untyped-def]
         },
         schema_overrides={"tract_id": pl.String},
     )
-    acs = pl.DataFrame(
-        {
-            "place_id": places["place_id"],
-            "population_2024": [1] * 5,
-            "housing_units_2024": [1] * 5,
-            "median_home_value_2024": [1] * 5,
-        }
-    )
     fema = pl.DataFrame(
         {
             "tract_id": ["01001000100", "01001000200", "01001000300"],
             "alr_npctl": [20.0, 60.0, 77.0],
         }
     )
-    return places, weights, acs, fema
+    return places, weights, fema
 
 
 def test_weighted_mean_and_single_tract_identity() -> None:
@@ -62,12 +54,11 @@ def test_incomplete_places_are_retained_without_renormalizing() -> None:
 
 
 def test_score_is_monotonic_in_source_percentile() -> None:
-    places, weights, acs, fema = _inputs()
-    baseline, _ = compute_scores(places, weights, acs, fema)
+    places, weights, fema = _inputs()
+    baseline, _ = compute_scores(places, weights, fema)
     raised, _ = compute_scores(
         places,
         weights,
-        acs,
         fema.with_columns(
             pl.when(pl.col("tract_id") == "01001000100")
             .then(pl.lit(40.0))

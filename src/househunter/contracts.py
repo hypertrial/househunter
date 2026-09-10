@@ -15,14 +15,10 @@ class PlaceSummary(BaseModel):
     place_type: str
     population_2020: int
     housing_units_2020: int
-    population_2024: int | None
-    housing_units_2024: int | None
-    median_home_value_2024: int | None
     risk_score: float | None
     coverage_status: CoverageStatus
     fema_vintage: str
     census_vintage: str
-    acs_vintage: str
 
 
 class TractContribution(BaseModel):

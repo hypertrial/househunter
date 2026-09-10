@@ -12,7 +12,7 @@ probability, an insurance quote, or a prediction.
 ## Quick start
 
 HouseHunter requires Python 3.12+ and [`uv`](https://docs.astral.sh/uv/). The compiled web
-interface is committed, so Node is not required to use the app.
+interface is committed, so Node is not required to use the app. No API keys are required.
 
 ```console
 uv sync

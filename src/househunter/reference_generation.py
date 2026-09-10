@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -7,21 +8,19 @@ from typing import Any
 import polars as pl
 
 
-def align_acs_context(
-    places: pl.DataFrame, acs: pl.DataFrame
-) -> tuple[pl.DataFrame, dict[str, Any]]:
-    if acs["place_id"].n_unique() != acs.height:
-        raise ValueError("ACS context contains duplicate Place IDs")
-    place_ids = places.select("place_id")
-    missing = place_ids.join(acs.select("place_id"), on="place_id", how="anti").sort("place_id")
-    excluded = acs.select("place_id").join(place_ids, on="place_id", how="anti").sort("place_id")
-    aligned = place_ids.join(acs, on="place_id", how="left").sort("place_id")
-    return aligned, {
-        "strategy": "left join 2024 ACS context onto canonical 2020 Place IDs",
-        "matched_places": aligned.height - missing.height,
-        "missing_2020_place_ids": missing["place_id"].to_list(),
-        "excluded_2024_only_place_ids": excluded["place_id"].to_list(),
-    }
+def remove_obsolete_assets(output: Path) -> None:
+    expected = {"places_2020.parquet", "place_tract_weights_2020.parquet"}
+    metadata_path = output / "reference_metadata.json"
+    try:
+        metadata = json.loads(metadata_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return
+    generated = metadata.get("row_counts", {})
+    if not isinstance(generated, dict):
+        return
+    for asset in output.glob("*.parquet"):
+        if asset.stem in generated and asset.name not in expected:
+            asset.unlink()
 
 
 def reconcile_connecticut(

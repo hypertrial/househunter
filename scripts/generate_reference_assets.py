@@ -15,7 +15,6 @@ import json
 import os
 import struct
 import time
-import urllib.parse
 import urllib.request
 import zipfile
 from collections import defaultdict
@@ -26,7 +25,7 @@ from typing import Any, BinaryIO
 
 import polars as pl
 
-from househunter.reference_generation import align_acs_context, reconcile_connecticut
+from househunter.reference_generation import reconcile_connecticut, remove_obsolete_assets
 
 STATES = {
     "01": ("AL", "ALABAMA"),
@@ -83,7 +82,7 @@ STATES = {
 }
 
 
-def download(url: str, destination: Path, *, display_url: str | None = None) -> Path:
+def download(url: str, destination: Path) -> Path:
     if destination.is_file():
         return destination
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -103,8 +102,7 @@ def download(url: str, destination: Path, *, display_url: str | None = None) -> 
         except OSError as exc:
             last_error = exc
             time.sleep(2**attempt)
-    detail = type(last_error).__name__ if display_url else str(last_error)
-    raise RuntimeError(f"Could not download {display_url or url}: {detail}")
+    raise RuntimeError(f"Could not download {url}: {last_error}")
 
 
 def _dbf_records(source: BinaryIO) -> Iterator[dict[str, str]]:
@@ -175,34 +173,6 @@ def census_urls(state_fips: str) -> dict[str, str]:
     }
 
 
-def fetch_acs(
-    state_fips: str, api_key: str | None, cache: Path
-) -> tuple[list[dict[str, str]], Path]:
-    output = cache / f"acs_2024_{state_fips}.json"
-    if not output.is_file():
-        if not api_key:
-            raise ValueError(f"Missing cached {output}; provide --census-api-key or CENSUS_API_KEY")
-        parameters = urllib.parse.urlencode(
-            {
-                "get": "NAME,B01003_001E,B25001_001E,B25077_001E",
-                "for": "place:*",
-                "in": f"state:{state_fips}",
-                "key": api_key,
-            }
-        )
-        base_url = "https://api.census.gov/data/2024/acs/acs5"
-        download(f"{base_url}?{parameters}", output, display_url=base_url)
-    rows = json.loads(output.read_text())
-    return [dict(zip(rows[0], values, strict=True)) for values in rows[1:]], output
-
-
-def integer_or_none(value: str | None) -> int | None:
-    if value in {None, ""}:
-        return None
-    parsed = int(value)
-    return parsed if parsed >= 0 else None
-
-
 def frame_checksum(frame: pl.DataFrame, sort_by: list[str]) -> str:
     payload = json.dumps(
         [list(row) for row in frame.sort(sort_by).iter_rows()],
@@ -220,12 +190,13 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def generate(cache: Path, output: Path, api_key: str | None, fema_path: Path) -> None:
+def generate(cache: Path, output: Path, fema_path: Path) -> None:
+    output.mkdir(parents=True, exist_ok=True)
+    remove_obsolete_assets(output)
     all_places: list[dict[str, Any]] = []
-    all_acs: list[dict[str, Any]] = []
     tract_housing: dict[tuple[str, str], int] = defaultdict(int)
     ct_tract_totals: dict[str, int] = defaultdict(int)
-    source_urls: list[str] = ["https://api.census.gov/data/2024/acs/acs5"]
+    source_urls: list[str] = []
     raw_checksums: dict[str, str] = {}
     for state_fips, (state, _) in STATES.items():
         print(f"Preparing {state} ({state_fips})", flush=True)
@@ -269,18 +240,6 @@ def generate(cache: Path, output: Path, api_key: str | None, fema_path: Path) ->
                     "housing_units_2020": housing,
                 }
             )
-        acs_rows, acs_path = fetch_acs(state_fips, api_key, cache / "acs")
-        raw_checksums[f"{state_fips}/acs"] = sha256_file(acs_path)
-        for row in acs_rows:
-            all_acs.append(
-                {
-                    "place_id": row["state"] + row["place"],
-                    "population_2024": integer_or_none(row["B01003_001E"]),
-                    "housing_units_2024": integer_or_none(row["B25001_001E"]),
-                    "median_home_value_2024": integer_or_none(row["B25077_001E"]),
-                }
-            )
-
     tract_housing, ct_audit = reconcile_connecticut(tract_housing, ct_tract_totals, fema_path)
     positive = {key: value for key, value in tract_housing.items() if value > 0}
     totals: dict[str, int] = defaultdict(int)
@@ -304,16 +263,6 @@ def generate(cache: Path, output: Path, api_key: str | None, fema_path: Path) ->
         },
     ).sort(["place_id", "tract_id"])
     places = pl.DataFrame(all_places).sort("place_id")
-    raw_acs = pl.DataFrame(
-        all_acs,
-        schema={
-            "place_id": pl.String,
-            "population_2024": pl.Int64,
-            "housing_units_2024": pl.Int64,
-            "median_home_value_2024": pl.Int64,
-        },
-    ).sort("place_id")
-    acs, acs_audit = align_acs_context(places, raw_acs)
     if places.height != places["place_id"].n_unique():
         raise ValueError("Generated Place IDs are not unique")
     if weights.filter((pl.col("housing_weight") <= 0) | (pl.col("housing_units") <= 0)).height:
@@ -325,11 +274,9 @@ def generate(cache: Path, output: Path, api_key: str | None, fema_path: Path) ->
     )
     if bad_sums.height:
         raise ValueError(f"Generated weights fail normalization for {bad_sums.height} Places")
-    output.mkdir(parents=True, exist_ok=True)
     assets = {
         "places_2020": places,
         "place_tract_weights_2020": weights,
-        "acs_2024_context": acs,
     }
     checksums: dict[str, str] = {}
     for name, frame in assets.items():
@@ -337,16 +284,14 @@ def generate(cache: Path, output: Path, api_key: str | None, fema_path: Path) ->
         checksums[name] = frame_checksum(frame, sort)
         frame.write_parquet(output / f"{name}.parquet", compression="zstd", statistics=True)
     metadata = {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at": datetime.now(UTC).isoformat(),
         "scope": "50 states and District of Columbia",
         "census_decennial_vintage": 2020,
-        "acs_vintage": 2024,
         "source_urls": sorted(source_urls),
         "raw_source_checksums": raw_checksums,
         "logical_checksums": checksums,
         "connecticut_reconciliation": ct_audit,
-        "acs_reconciliation": acs_audit,
         "row_counts": {name: frame.height for name, frame in assets.items()},
     }
     (output / "reference_metadata.json").write_text(
@@ -361,9 +306,8 @@ def main() -> None:
     parser.add_argument(
         "--fema-parquet", type=Path, default=Path("data/cache/fema_nri_tracts.parquet")
     )
-    parser.add_argument("--census-api-key", default=os.environ.get("CENSUS_API_KEY"))
     arguments = parser.parse_args()
-    generate(arguments.cache, arguments.output, arguments.census_api_key, arguments.fema_parquet)
+    generate(arguments.cache, arguments.output, arguments.fema_parquet)
 
 
 if __name__ == "__main__":

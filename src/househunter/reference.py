@@ -15,7 +15,6 @@ from .errors import HouseHunterError
 class ReferenceAssets:
     places: Path
     weights: Path
-    acs: Path
     metadata: Path
 
 
@@ -29,7 +28,6 @@ def reference_asset_paths() -> ReferenceAssets:
     return ReferenceAssets(
         places=root / "places_2020.parquet",
         weights=root / "place_tract_weights_2020.parquet",
-        acs=root / "acs_2024_context.parquet",
         metadata=root / "reference_metadata.json",
     )
 
@@ -70,11 +68,10 @@ def _logical_checksum(frame: pl.DataFrame, sort_by: list[str]) -> str:
 
 def validate_reference_assets(
     assets: ReferenceAssets,
-) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
+) -> tuple[pl.DataFrame, pl.DataFrame]:
     try:
         places = pl.read_parquet(assets.places)
         weights = pl.read_parquet(assets.weights)
-        acs = pl.read_parquet(assets.acs)
     except (OSError, pl.exceptions.PolarsError) as exc:
         raise HouseHunterError(f"Cannot read Census reference assets: {exc}") from exc
     _require_columns(
@@ -87,15 +84,8 @@ def validate_reference_assets(
         {"place_id", "tract_id", "housing_units", "housing_weight"},
         "place_tract_weights_2020",
     )
-    _require_columns(
-        acs,
-        {"place_id", "population_2024", "housing_units_2024", "median_home_value_2024"},
-        "acs_2024_context",
-    )
     if places["place_id"].n_unique() != places.height:
         raise HouseHunterError("places_2020 place_id values are not unique")
-    if acs["place_id"].n_unique() != acs.height:
-        raise HouseHunterError("acs_2024_context place_id values are not unique")
     invalid_places = places.filter(
         pl.col("place_id").is_null() | ~pl.col("place_id").str.contains(r"^\d{7}$")
     )
@@ -153,31 +143,20 @@ def validate_reference_assets(
     )
     if housing_check.filter(pl.col("housing_units_2020") != pl.col("weighted_housing")).height:
         raise HouseHunterError("Place housing totals do not match Place/tract housing totals")
-    if acs.filter(pl.col("place_id").is_null()).height:
-        raise HouseHunterError("acs_2024_context contains a null Place ID")
-    if acs.join(places.select("place_id"), on="place_id", how="anti").height:
-        raise HouseHunterError("acs_2024_context references unknown Places")
-    if places.join(acs.select("place_id"), on="place_id", how="anti").height:
-        raise HouseHunterError("acs_2024_context does not cover every Place")
-    context_columns = ["population_2024", "housing_units_2024", "median_home_value_2024"]
-    if acs.filter(pl.any_horizontal(pl.col(context_columns).fill_null(0) < 0)).height:
-        raise HouseHunterError("acs_2024_context contains negative values")
     try:
         metadata = json.loads(assets.metadata.read_text())
     except (OSError, json.JSONDecodeError) as exc:
         raise HouseHunterError(f"Cannot read Census reference metadata: {exc}") from exc
     if (
         not isinstance(metadata, dict)
-        or metadata.get("schema_version") != 1
+        or metadata.get("schema_version") != 2
         or metadata.get("scope") != "50 states and District of Columbia"
         or metadata.get("census_decennial_vintage") != 2020
-        or metadata.get("acs_vintage") != 2024
     ):
         raise HouseHunterError("Census reference metadata has an unsupported scope or vintage")
     frames = {
         "places_2020": (places, ["place_id"]),
         "place_tract_weights_2020": (weights, ["place_id", "tract_id"]),
-        "acs_2024_context": (acs, ["place_id"]),
     }
     row_counts = metadata.get("row_counts", {})
     checksums = metadata.get("logical_checksums", {})
@@ -187,4 +166,4 @@ def validate_reference_assets(
         actual_checksum = _logical_checksum(frame, sort_by)
         if checksums.get(name) != actual_checksum:
             raise HouseHunterError(f"Census reference checksum differs for {name}")
-    return places.sort("place_id"), weights.sort(["place_id", "tract_id"]), acs.sort("place_id")
+    return places.sort("place_id"), weights.sort(["place_id", "tract_id"])

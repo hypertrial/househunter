@@ -16,7 +16,6 @@ interface Meta {
 }
 
 const number = new Intl.NumberFormat("en-US");
-const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
 
 async function json<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, options);
@@ -84,7 +83,7 @@ function Setup({ token, referencesReady, referencesError, onReady }: { token: st
     {error && <p role="alert" className="error">{error}</p>}
     {!referencesReady && <p role="alert" className="error">{referencesError ? `Census reference validation failed: ${referencesError}` : "This checkout is missing its release-generated Census reference assets. See DATA_SOURCES.md before preparing data."}</p>}
     {referencesReady && (!job || ["failed", "cancelled"].includes(job.state)) && <button className="primary" onClick={prepare}>{job ? "Try preparation again" : "Prepare national data"}</button>}
-    <p className="fine">FEMA NRI December 2025 v1.20 · Census 2020 · ACS 2024 5-year</p>
+    <p className="fine">FEMA NRI December 2025 v1.20 · Census 2020</p>
   </main>;
 }
 
@@ -110,8 +109,8 @@ function Detail({ placeId, onClose }: { placeId: string; onClose: () => void }) 
       <h2>{detail.summary.name}, {detail.summary.state}</h2>
       <div className="score"><span>{scoreLabel(detail.summary)}</span><small>HouseHunter Risk Score<br />Lower is better</small></div>
       <dl className="facts">
-        <div><dt>2024 population</dt><dd>{detail.summary.population_2024 !== null ? number.format(detail.summary.population_2024) : "Unavailable"}</dd></div>
-        <div><dt>2024 median home value</dt><dd>{detail.summary.median_home_value_2024 !== null ? money.format(detail.summary.median_home_value_2024) : "Unavailable"}</dd></div>
+        <div><dt>2020 population</dt><dd>{number.format(detail.summary.population_2020)}</dd></div>
+        <div><dt>2020 housing units</dt><dd>{number.format(detail.summary.housing_units_2020)}</dd></div>
         <div><dt>Housing coverage</dt><dd>{(detail.coverage_ratio * 100).toFixed(1)}%</dd></div>
       </dl>
       <h3>Tract contributions</h3>
@@ -178,16 +177,14 @@ function Rankings({ meta }: { meta: Meta }) {
           <th scope="col" aria-sort={sort === "name" ? (direction === "asc" ? "ascending" : "descending") : "none"}><button onClick={() => changeSort("name")}>Place</button></th>
           <th scope="col" aria-sort={sort === "state" ? (direction === "asc" ? "ascending" : "descending") : "none"}><button onClick={() => changeSort("state")}>State</button></th>
           <th scope="col" aria-sort={sort === "population" ? (direction === "asc" ? "ascending" : "descending") : "none"}><button onClick={() => changeSort("population")}>Population</button></th>
-          <th scope="col" aria-sort={sort === "home_value" ? (direction === "asc" ? "ascending" : "descending") : "none"}><button onClick={() => changeSort("home_value")}>Home value</button></th>
           <th scope="col" aria-sort={sort === "risk_score" ? (direction === "asc" ? "ascending" : "descending") : "none"}><button onClick={() => changeSort("risk_score")}>Risk score {sort === "risk_score" && direction === "desc" ? "↑" : "↓"}</button></th>
         </tr></thead><tbody>{places.map((place, index) => <tr key={place.place_id} onClick={() => setSelected(place.place_id)}>
           <td>{offset + index + 1}</td><td><button className="place-link" onClick={() => setSelected(place.place_id)}><strong>{place.name}</strong><small>{place.place_type}</small></button></td><td>{place.state}</td>
-          <td>{number.format(place.population_2024 ?? place.population_2020)}</td>
-          <td>{place.median_home_value_2024 !== null ? money.format(place.median_home_value_2024) : "—"}</td>
+          <td>{number.format(place.population_2020)}</td>
           <td><span className={place.risk_score === null ? "pill missing" : "pill"}>{scoreLabel(place)}</span>{place.risk_score === null && <small>{place.coverage_status.replaceAll("_", " ")}</small>}</td>
         </tr>)}</tbody></table></div>
         <div className="pager"><button disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 50))}>Previous</button><span>{offset + 1}–{Math.min(offset + 50, total)}</span><button disabled={offset + 50 >= total} onClick={() => setOffset(offset + 50)}>Next</button></div>
-        <footer><strong>Provenance</strong><span>{meta.build?.source_vintages.fema} · Census {meta.build?.source_vintages.census} · {meta.build?.source_vintages.acs}</span><span>Build {meta.build?.build_id} · {meta.build?.scope.kind}</span></footer>
+        <footer><strong>Provenance</strong><span>{meta.build?.source_vintages.fema} · Census {meta.build?.source_vintages.census}</span><span>Build {meta.build?.build_id} · {meta.build?.scope.kind}</span></footer>
       </section>
       {selected && <Detail placeId={selected} onClose={() => setSelected(null)} />}
     </main>

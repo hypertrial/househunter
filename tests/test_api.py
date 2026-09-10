@@ -25,7 +25,23 @@ def test_api_filters_details_exports_and_token(
         response = client.get("/api/v1/places", params={"state": "AL", "min_population": 300})
         assert response.status_code == 200
         assert [row["name"] for row in response.json()["items"]] == ["Alpha"]
-        assert client.get("/api/v1/places/0100001").json()["summary"]["risk_score"] == 22.0
+        summary = client.get("/api/v1/places/0100001").json()["summary"]
+        assert summary["risk_score"] == 22.0
+        assert summary["population_2020"] == 1000
+        assert set(summary) == {
+            "place_id",
+            "name",
+            "state",
+            "place_type",
+            "population_2020",
+            "housing_units_2020",
+            "risk_score",
+            "coverage_status",
+            "fema_vintage",
+            "census_vintage",
+        }
+        sources = client.get("/api/v1/sources").json()
+        assert [source["source"] for source in sources] == ["fema", "census_2020"]
         unmatched = client.get("/api/v1/places/0200002")
         assert unmatched.status_code == 200
         assert unmatched.json()["tract_contributions"][0]["tract_id"] is None

@@ -13,8 +13,7 @@ from .errors import AmbiguousPlaceError, BuildNotFoundError, HouseHunterError
 
 SUMMARY_COLUMNS = """
 place_id, name, state, place_type, population_2020, housing_units_2020,
-population_2024, housing_units_2024, median_home_value_2024, risk_score,
-coverage_status, fema_vintage, census_vintage, acs_vintage
+risk_score, coverage_status, fema_vintage, census_vintage
 """
 SUMMARY_KEYS = [
     "place_id",
@@ -23,14 +22,10 @@ SUMMARY_KEYS = [
     "place_type",
     "population_2020",
     "housing_units_2020",
-    "population_2024",
-    "housing_units_2024",
-    "median_home_value_2024",
     "risk_score",
     "coverage_status",
     "fema_vintage",
     "census_vintage",
-    "acs_vintage",
 ]
 
 
@@ -56,7 +51,11 @@ def current_build(paths: RuntimePaths) -> tuple[Path, dict[str, Any]]:
         metadata = json.loads((build / "build.json").read_text())
     except (OSError, json.JSONDecodeError) as exc:
         raise BuildNotFoundError(f"Build metadata is invalid: {exc}") from exc
-    if metadata.get("build_id") != pointer.get("build_id"):
+    if (
+        pointer.get("schema_version") != 2
+        or metadata.get("schema_version") != 2
+        or metadata.get("build_id") != pointer.get("build_id")
+    ):
         raise BuildNotFoundError("Current pointer and build metadata disagree")
     return build, metadata
 
@@ -95,8 +94,7 @@ class Store:
             "risk_score": "risk_score",
             "name": "name",
             "state": "state",
-            "population": "coalesce(population_2024, population_2020)",
-            "home_value": "median_home_value_2024",
+            "population": "population_2020",
         }
         if sort not in sort_columns:
             raise HouseHunterError(f"Unsupported sort column: {sort}")
@@ -115,8 +113,8 @@ class Store:
             clauses.append("state = ?")
             parameters.append(state.upper())
         for column, operator, value in (
-            ("coalesce(population_2024, population_2020)", ">=", min_population),
-            ("coalesce(population_2024, population_2020)", "<=", max_population),
+            ("population_2020", ">=", min_population),
+            ("population_2020", "<=", max_population),
             ("risk_score", ">=", min_score),
             ("risk_score", "<=", max_score),
         ):

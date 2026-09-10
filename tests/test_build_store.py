@@ -132,12 +132,25 @@ def test_reference_validation_rejects_asset_metadata_mismatch(
     fixture_environment: tuple[RuntimePaths, object],
 ) -> None:
     _, assets = fixture_environment
-    acs_path = assets / "acs_2024_context.parquet"
-    pl.read_parquet(acs_path).with_columns(
-        (pl.col("median_home_value_2024") + 1).alias("median_home_value_2024")
-    ).write_parquet(acs_path)
-    with pytest.raises(HouseHunterError, match="checksum differs for acs_2024_context"):
+    places_path = assets / "places_2020.parquet"
+    pl.read_parquet(places_path).with_columns(
+        (pl.col("population_2020") + 1).alias("population_2020")
+    ).write_parquet(places_path)
+    with pytest.raises(HouseHunterError, match="checksum differs for places_2020"):
         validate_reference_assets(reference_assets())
     present, error = reference_asset_status()
     assert present is True
-    assert error and "checksum differs for acs_2024_context" in error
+    assert error and "checksum differs for places_2020" in error
+
+
+def test_legacy_build_schema_is_not_reused(
+    fixture_environment: tuple[RuntimePaths, object],
+) -> None:
+    paths, _ = fixture_environment
+    output = build_snapshot(paths)
+    metadata_path = output / "build.json"
+    metadata = json.loads(metadata_path.read_text())
+    metadata["schema_version"] = 1
+    metadata_path.write_text(json.dumps(metadata))
+    with pytest.raises(HouseHunterError, match="immutable build failed validation"):
+        build_snapshot(paths)

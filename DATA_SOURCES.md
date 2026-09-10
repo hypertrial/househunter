@@ -28,31 +28,22 @@ and [FEMA data resources](https://hazards.fema.gov/nri/data-resources).
 
 ## Census reference assets
 
-Ordinary setup uses three compact release assets packaged with HouseHunter:
+Ordinary setup uses two compact release assets packaged with HouseHunter:
 
 - `places_2020.parquet`: canonical name, state, type, population, and housing for every
   incorporated Place and CDP in the 50 states and DC.
 - `place_tract_weights_2020.parquet`: positive-housing Place/tract intersections and weights.
-- `acs_2024_context.parquet`: 2024 ACS 5-year population, housing units, and median home
-  value (`B01003_001E`, `B25001_001E`, `B25077_001E`).
-
 The maintainer-only `scripts/generate_reference_assets.py` streams official 2020
 population-and-housing block DBFs and joins the official incorporated-Place/CDP Block
 Assignment File. It aggregates `HOUSING20` at `(place_id, tract_id)` and normalizes only after
-discarding zero-housing intersections. Place names/types come from the 2020 Place DBF. ACS
-context comes from the official 2024 ACS 5-year API and requires a Census API key.
+discarding zero-housing intersections. Place names/types come from the 2020 Place DBF.
 
 Raw archives are cached beneath ignored `data/reference-source/` and are never packaged or
 committed. The generator emits sorted Parquet plus `reference_metadata.json` containing
 logical and raw source checksums, row counts, source URLs, generation time, and a Connecticut
 audit. The validator emits `reference_validation.json`; both JSON records are committed with
-the three Parquet assets. Every runtime build rechecks the packaged table row counts, logical
+the two Parquet assets. Every runtime build rechecks the packaged table row counts, logical
 checksums, national scope, and pinned vintages against that metadata before scoring.
-
-ACS context is left-joined onto the canonical 2020 Place universe. Places introduced only in
-the 2024 geography are excluded; 2020 Places without a 2024 ACS row are retained with null
-context values. Both identifier sets are recorded in `reference_metadata.json`, and neither
-case changes the risk score.
 
 ### Release regeneration
 
@@ -60,7 +51,7 @@ First retrieve and validate FEMA, then run:
 
 ```console
 uv run househunter download --source fema
-CENSUS_API_KEY=... uv run python scripts/generate_reference_assets.py
+uv run python scripts/generate_reference_assets.py
 uv run python scripts/validate_release.py
 ```
 
@@ -69,8 +60,7 @@ the expected `data/reference-source/<state FIPS>/` cache paths when automated ac
 rate-limited. Existing files are verified structurally and reused.
 
 Official references: [2020 TIGER/Line technical documentation](https://www.census.gov/programs-surveys/geography/technical-documentation/complete-technical-documentation/tiger-geo-line.2020.html),
-[2020 Block Assignment Files](https://www.census.gov/geographies/reference-files/2020/geo/block-assignment-files.html),
-and [2024 ACS 5-year API](https://api.census.gov/data/2024/acs/acs5.html).
+[2020 Block Assignment Files](https://www.census.gov/geographies/reference-files/2020/geo/block-assignment-files.html).
 
 ### Connecticut
 
@@ -87,5 +77,5 @@ missing positive-housing tract is dropped or redistributed.
 The score represents where 2020 housing units are distributed across Census tracts, not risk
 at a specific address. A percentile is a national relative ranking, not a probability or
 expected dollar loss. The composite combines FEMA consequence types and should not be read as
-one particular hazard. ACS estimates are context only and never affect rank. Census and FEMA
-vintages differ by design and are shown in every output.
+one particular hazard. Census and FEMA vintages differ by design and are shown in every
+output.

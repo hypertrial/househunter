@@ -7,14 +7,10 @@ export interface PlaceSummary {
   place_type: string;
   population_2020: number;
   housing_units_2020: number;
-  population_2024: number | null;
-  housing_units_2024: number | null;
-  median_home_value_2024: number | null;
   risk_score: number | null;
   coverage_status: CoverageStatus;
   fema_vintage: string;
   census_vintage: string;
-  acs_vintage: string;
 }
 
 export interface TractContribution {

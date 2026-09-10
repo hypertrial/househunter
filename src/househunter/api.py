@@ -157,12 +157,6 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
                 "cached": census_cached,
                 "error": census_error,
             },
-            {
-                "source": "acs_context",
-                "version": "2024 ACS 5-year",
-                "cached": census_cached,
-                "error": census_error,
-            },
         ]
 
     @app.post(

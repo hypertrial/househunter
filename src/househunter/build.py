@@ -33,12 +33,10 @@ def _cancelled(cancelled: Cancelled | None) -> None:
 def compute_scores(
     places: pl.DataFrame,
     weights: pl.DataFrame,
-    acs: pl.DataFrame,
     fema: pl.DataFrame,
     *,
     fema_vintage: str = "December 2025",
     census_vintage: str = "2020 Census",
-    acs_vintage: str = "2024 ACS 5-year",
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
     contributions = (
         weights.join(fema.select("tract_id", "alr_npctl"), on="tract_id", how="left")
@@ -58,8 +56,7 @@ def compute_scores(
         pl.col("alr_npctl").is_null().any().alias("has_missing_fema"),
     )
     result = (
-        places.join(acs, on="place_id", how="left")
-        .join(aggregates, on="place_id", how="left")
+        places.join(aggregates, on="place_id", how="left")
         .with_columns(
             pl.col("total_weighted_housing").fill_null(0),
             pl.col("covered_housing").fill_null(0),
@@ -89,7 +86,6 @@ def compute_scores(
         .with_columns(
             pl.lit(fema_vintage).alias("fema_vintage"),
             pl.lit(census_vintage).alias("census_vintage"),
-            pl.lit(acs_vintage).alias("acs_vintage"),
         )
         .drop("risk_score_candidate", "has_unmatched_geography", "has_missing_fema")
         .sort("place_id")
@@ -128,7 +124,11 @@ def _existing_build_is_valid(target: Path, build_id: str, input_hashes: dict[str
         return False
     if not (target / "househunter.duckdb").is_file():
         return False
-    if metadata.get("build_id") != build_id or metadata.get("input_checksums") != input_hashes:
+    if (
+        metadata.get("schema_version") != 2
+        or metadata.get("build_id") != build_id
+        or metadata.get("input_checksums") != input_hashes
+    ):
         return False
     if metadata.get("place_count") != places.height:
         return False
@@ -178,13 +178,12 @@ def build_snapshot(
     assets = reference_assets()
     if progress:
         progress(5, "Validating Census reference assets")
-    places, weights, acs = validate_reference_assets(assets)
+    places, weights = validate_reference_assets(assets)
     if state:
         if state not in places["state"].unique().to_list():
             raise HouseHunterError(f"Unknown state abbreviation: {state}")
         places = places.filter(pl.col("state") == state)
         weights = weights.join(places.select("place_id"), on="place_id", how="semi")
-        acs = acs.join(places.select("place_id"), on="place_id", how="semi")
     _cancelled(cancelled)
     fema_path = paths.cache / "fema_nri_tracts.parquet"
     if not fema_path.is_file():
@@ -195,7 +194,6 @@ def build_snapshot(
         "fema": fema_sha,
         "places_2020": sha256_file(assets.places),
         "place_tract_weights_2020": sha256_file(assets.weights),
-        "acs_2024_context": sha256_file(assets.acs),
     }
     scope = state or "national"
     build_key = sha256_bytes(canonical_json({"scope": scope, "inputs": input_hashes}))[:16]
@@ -212,9 +210,7 @@ def build_snapshot(
         return target
     if progress:
         progress(25, "Computing housing-weighted scores")
-    scored, contributions = compute_scores(
-        places, weights, acs, fema, fema_vintage=source["version"]
-    )
+    scored, contributions = compute_scores(places, weights, fema, fema_vintage=source["version"])
     _cancelled(cancelled)
     complete = scored.filter(pl.col("coverage_status") == "complete")
     if complete.filter(pl.col("coverage_ratio") != 1.0).height:
@@ -230,7 +226,7 @@ def build_snapshot(
         ),
     }
     metadata: dict[str, object] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "build_id": build_id,
         "scope": {"kind": "state" if state else "national", "state": state},
         "created_at": datetime.now(UTC).isoformat(),
@@ -240,7 +236,6 @@ def build_snapshot(
             "fema": source["version"],
             "fema_release": source["release"],
             "census": "2020",
-            "acs": "2024 ACS 5-year",
         },
         "input_checksums": input_hashes,
         "logical_checksums": checksums,
@@ -274,7 +269,7 @@ def build_snapshot(
 
 
 def _publish_current(paths: RuntimePaths, target: Path, build_id: str, scope: str) -> None:
-    pointer = {"schema_version": 1, "build_id": build_id, "scope": scope, "path": str(target)}
+    pointer = {"schema_version": 2, "build_id": build_id, "scope": scope, "path": str(target)}
     temporary = paths.current.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(pointer, indent=2, sort_keys=True) + "\n")
     os.replace(temporary, paths.current)

@@ -33,4 +33,10 @@ def test_cli_build_rank_inspect_export_and_sources(
 
     sources = runner.invoke(app, ["sources", "--json"])
     assert sources.exit_code == 0
-    assert json.loads(sources.output)["fema"]["version"] == "December 2025"
+    source_status = json.loads(sources.output)
+    assert source_status["fema"]["version"] == "December 2025"
+    assert source_status["census"] == {
+        "decennial_vintage": 2020,
+        "error": None,
+        "packaged": True,
+    }
