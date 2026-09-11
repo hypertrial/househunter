@@ -11,7 +11,9 @@ import yaml
 from househunter.config import RuntimePaths
 from househunter.download import (
     _request_json,
+    _schema_fingerprint,
     _validate_county_rows,
+    _validate_layer,
     _validate_rows,
     download_fema,
     download_fema_counties,
@@ -19,6 +21,37 @@ from househunter.download import (
     validate_cached_fema,
 )
 from househunter.errors import SourceContractError
+
+
+def test_geometry_contract_rejects_non_polygon_layer() -> None:
+    fields = {"TRACTFIPS": "esriFieldTypeString"}
+    source = {
+        "item_id": "fixture",
+        "layer_url": "https://example.test/layer/0",
+        "item_modified_ms": 10,
+        "data_last_edit_ms": 20,
+        "layer_last_edit_ms": 30,
+        "fields": fields,
+        "schema_fingerprint": _schema_fingerprint(fields),
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/sharing/" in request.url.path:
+            return httpx.Response(200, json={"modified": 10})
+        return httpx.Response(
+            200,
+            json={
+                "geometryType": "esriGeometryPoint",
+                "editingInfo": {"lastEditDate": 30, "dataLastEditDate": 20},
+                "fields": [{"name": "TRACTFIPS", "type": "esriFieldTypeString"}],
+            },
+        )
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(SourceContractError, match="geometry type changed"),
+    ):
+        _validate_layer(client, source, expected_geometry_type="esriGeometryPolygon")
 
 
 def test_download_paginates_and_reuses_verified_cache(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]

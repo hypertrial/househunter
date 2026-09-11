@@ -9,7 +9,8 @@ release. A source update requires review, validation, and a HouseHunter release.
 - Release: v1.20, December 2025
 - ArcGIS item: `9da4eeb936544335a6db0cd7a8448a51`
 - Requested fields: `TRACTFIPS`, `ALR_NPCTL`, `NRI_VER`, and the 18 published `{CODE}_ALR_NPCTL` doubles (`AVLN`, `CFLD`, `CWAV`, `DRGT`, `ERQK`, `HAIL`, `HWAV`, `HRCN`, `ISTM`, `LNDS`, `LTNG`, `IFLD`, `SWND`, `TRND`, `TSUN`, `VLCN`, `WFIR`, `WNTW`)
-- Geometry: never requested
+- Geometry: requested only by the maintainer map-asset generator; runtime preparation
+  and ranking never request geometry
 - Metric: composite Expected Annual Loss Rate national percentile (`ALR_NPCTL`). Hazard columns are the same layer's published `{CODE}_ALR_NPCTL` values, used for inspect/detail/export only.
 - Cache: `data/cache/fema_nri_tracts.parquet`
 
@@ -23,7 +24,8 @@ and [FEMA data resources](https://hazards.fema.gov/nri/data-resources).
 - Release: v1.20, December 2025
 - ArcGIS item: `39485e8035d446a5bff03259508ae355`
 - Requested fields: `STCOFIPS`, `COUNTY`, `COUNTYTYPE`, `STATEABBRV`, `ALR_NPCTL`, `NRI_VER`, and the same 18 `{CODE}_ALR_NPCTL` doubles as the tract layer
-- Geometry: never requested
+- Geometry: requested only by the maintainer map-asset generator; runtime preparation
+  and ranking never request geometry
 - Metric: FEMA's published **county** `ALR_NPCTL`, ranked among counties. County hazard percentiles come from this layer, not from averaging tracts.
 - Cache: `data/cache/fema_nri_counties.parquet`
 
@@ -50,6 +52,24 @@ used to rebuild it atomically; remote schema or version drift still stops the op
 State abbreviations for tracts are derived from the first two `TRACTFIPS` digits using
 a bundled map. Unknown prefixes are retained as `??` / `Unknown` and are excluded from
 known `--state` scopes.
+
+## Derived map assets
+
+The maintainer-only `scripts/generate_map_assets.py` requests polygon geometry from the
+same pinned FEMA FeatureServer layers after validating their item IDs and item/data/layer
+edit timestamps. It verifies exact equality with the cached attribute identifier sets:
+85,154 unique tract FIPS and 3,232 unique county FIPS across the 50 states, DC, Puerto
+Rico, US Virgin Islands, Guam, American Samoa, and Northern Mariana Islands.
+
+Only deterministic, quantized, content-addressed TopoJSON gzip files and their manifest
+are committed under `src/househunter/map_assets/`. The package includes a simplified
+national tract topology, detailed tract topologies loaded by jurisdiction after zoom, a
+national county topology, and state/territory outlines and labels. Raw downloads remain
+ignored under `data/cache/map-geometry/`. Geometry never contains scores: the active local
+snapshot is the sole score source. At startup the loopback server validates the manifest,
+pinned revisions, complete national/detail inventory, feature identities, sizes, SHA-256
+digests, gzip streams, and polygonal TopoJSON before advertising the map as ready. Reusing
+ignored raw geometry also requires matching recorded revisions and file digests.
 
 ## Address lookup
 
@@ -95,3 +115,6 @@ read as one particular hazard. The 18 `{CODE}_ALR_NPCTL` values are FEMA's publi
 percentiles at the same grain; HouseHunter does not blend them. Null means FEMA
 published no rating, never zero. County scores and county hazard percentiles are not
 a summary of the tracts inside the county.
+National tract boundaries are simplified for overview rendering, so fine boundary detail
+appears only after zoom loads the jurisdiction asset. Small urban tracts can be subpixel at
+the national extent; they are not aggregated or enlarged.

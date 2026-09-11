@@ -1,9 +1,9 @@
 # HouseHunter
 
-HouseHunter is a local-only macOS application that ranks FEMA National Risk Index
-geographies by published `ALR_NPCTL`. Lower is better. Tract ranking is the
-default. County ranking uses FEMA's official county table, not an average of
-tract scores.
+HouseHunter is a local-only macOS application that maps FEMA National Risk Index
+geographies by published `ALR_NPCTL`. Lower is better. The full-viewport map starts
+with all 85,154 tracts; a county mode maps all 3,232 counties using FEMA's official
+county table, not an average of tract scores.
 
 `ALR_NPCTL` is FEMA's national percentile for composite Expected Annual Loss Rate,
 distinct from FEMA's broader Risk Index. Tract and county percentiles are not
@@ -112,16 +112,30 @@ npm test
 npm run build
 ```
 
-The committed `web/dist/` must match `npm run build`. The Python wheel packages that bundle.
-Raw third-party files and generated runtime databases belong under ignored `data/`, never in
-Git.
+The committed `web/dist/` must match `npm run build`. The Python wheel packages the
+compiled UI and the derived map assets exactly once. Raw third-party files and generated
+runtime databases belong under ignored `data/`, never in Git.
+
+Maintainers regenerate boundaries only when the pinned FEMA revisions change:
+
+```console
+uv run python scripts/generate_map_assets.py
+```
+
+The generator validates the live ArcGIS item/revision metadata, exact tract and county
+identifier sets, geometry, jurisdiction coverage, output sizes, and every generated
+topology. It emits deterministic content-addressed files and
+`src/househunter/map_assets/manifest.json`; `--reuse-raw` rebuilds from the ignored local
+geometry download only when its recorded source revisions and digests still match the
+live pinned FEMA layers. A revision mismatch or corrupt packaged asset blocks the map
+with an explicit repair message.
 
 ## Scope
 
-V1 lists stay ranked by composite `ALR_NPCTL` only. The 18 published FEMA hazard
-percentiles appear on inspect/detail and ride along in exports; there is still no
-sort or filter by hazard, no HouseHunter-invented composite weights, mountain
-classifier, trails, maps, insurance data, hosted service, or native installer.
+The map uses composite `ALR_NPCTL` only. The 18 published FEMA hazard percentiles
+appear on inspect/detail and ride along in exports; there is no hazard map layer,
+sort or filter by hazard, HouseHunter-invented composite, mountain classifier,
+trails, insurance data, external basemap, hosted service, or native installer.
 
 ## License
 

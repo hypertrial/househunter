@@ -1,33 +1,21 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page, type Route } from "@playwright/test";
+import AxeBuilder from "@axe-core/playwright";
+
+const build = {
+  build_id: "national-fixture", place_count: 1, ranked_place_count: 1,
+  county_count: 1, ranked_county_count: 1,
+  source_vintages: { fema: "December 2025", fema_counties: "December 2025" },
+  scope: { kind: "national", state: null },
+};
 
 const summary = {
-  place_id: "08013012101",
-  name: "08013012101",
-  state: "CO",
-  place_type: "tract",
-  population_2020: 0,
-  housing_units_2020: 0,
-  risk_score: 21.25,
-  coverage_status: "complete",
-  fema_vintage: "December 2025",
-  census_vintage: "n/a",
-  county_fips: "08013",
-  county_name: "Boulder",
+  place_id: "08013012101", name: "Census tract 121.01", state: "CO", place_type: "tract",
+  population_2020: 0, housing_units_2020: 0, risk_score: 21.25, coverage_status: "complete",
+  fema_vintage: "December 2025", census_vintage: "n/a", county_fips: "08013", county_name: "Boulder",
 };
 
 const countySummary = {
-  place_id: "08013",
-  name: "Boulder",
-  state: "CO",
-  place_type: "county",
-  population_2020: 0,
-  housing_units_2020: 0,
-  risk_score: 18.5,
-  coverage_status: "complete",
-  fema_vintage: "December 2025",
-  census_vintage: "n/a",
-  county_fips: "08013",
-  county_name: "Boulder",
+  ...summary, place_id: "08013", name: "Boulder", place_type: "county", risk_score: 18.5,
 };
 
 const hazards = [
@@ -36,274 +24,211 @@ const hazards = [
   { code: "TSUN", label: "Tsunami", percentile: null },
 ];
 
-test("prepares, ranks, inspects, and exports", async ({ page }) => {
-  let prepared = false;
-  await page.route("**/api/v1/**", async (route) => {
+const detail = (item = summary) => ({
+  summary: item, total_weighted_housing: 0, coverage_ratio: 1,
+  methodology_notice: "Published FEMA ALR_NPCTL; not property-level risk.",
+  tract_contributions: [], hazard_percentiles: hazards,
+  member_tract_count: item.place_type === "county" ? 12 : null,
+});
+
+const polygon = {
+  type: "Topology",
+  objects: { geography: { type: "GeometryCollection", geometries: [{
+    type: "Polygon", id: "08013012101", properties: {
+      place_id: "08013012101", state: "CO", county_fips: "08013", name: "Census tract 121.01",
+    }, arcs: [[0]],
+  }] } },
+  arcs: [[[-109, 41], [-102, 41], [-102, 37], [-109, 37], [-109, 41]]],
+};
+
+const countyPolygon = {
+  ...polygon,
+  objects: { geography: { type: "GeometryCollection", geometries: [{
+    type: "Polygon", id: "08013", properties: {
+      place_id: "08013", state: "CO", county_fips: "08013", name: "Boulder",
+    }, arcs: [[0]],
+  }] } },
+};
+
+const states = {
+  type: "Topology",
+  objects: { geography: { type: "GeometryCollection", geometries: [{
+    type: "LineString", id: "CO", properties: { state: "CO", name: "Colorado", label: [-105.5, 39] }, arcs: [0],
+  }] } },
+  arcs: [[[-109, 41], [-102, 41], [-102, 37], [-109, 37], [-109, 41]]],
+};
+
+const manifest = {
+  schema_version: 1, release: "v1.20", sources: {}, initial_compressed_size: 100,
+  files: [
+    { key: "states-national", filename: "states.topojson.gz", level: "state", lod: "national", jurisdiction: null, feature_count: 1, bounds: [], compressed_size: 1, sha256: "a" },
+    { key: "tracts-national", filename: "tracts.topojson.gz", level: "tract", lod: "national", jurisdiction: null, feature_count: 1, bounds: [], compressed_size: 1, sha256: "b" },
+    { key: "counties-national", filename: "counties.topojson.gz", level: "county", lod: "national", jurisdiction: null, feature_count: 1, bounds: [], compressed_size: 1, sha256: "c" },
+    { key: "tracts-co", filename: "tracts-co.topojson.gz", level: "tract", lod: "detail", jurisdiction: "CO", feature_count: 1, bounds: [], compressed_size: 1, sha256: "d" },
+  ],
+};
+
+async function installRoutes(page: Page, initiallyPrepared = true, failDetailOnce = false) {
+  let prepared = initiallyPrepared;
+  let detailFailed = false;
+  await page.route("**/map-assets/**", async (route) => {
+    const name = new URL(route.request().url()).pathname.split("/").pop();
+    if (name === "manifest.json") await route.fulfill({ json: manifest });
+    else if (name === "states.topojson.gz") await route.fulfill({ json: states });
+    else if (name === "counties.topojson.gz") await route.fulfill({ json: countyPolygon });
+    else if (name === "tracts-co.topojson.gz" && failDetailOnce && !detailFailed) {
+      detailFailed = true;
+      await route.fulfill({ status: 503, json: { detail: "corrupt detail asset" } });
+    } else await route.fulfill({ json: polygon });
+  });
+  await page.route("**/api/v1/**", async (route: Route) => {
     const url = new URL(route.request().url());
     if (url.pathname === "/api/v1/meta") {
-      await route.fulfill({
-        json: {
-          app_version: "1.0.0",
-          mutation_token: "test-token",
-          reference_assets_ready: true,
-          reference_assets_error: null,
-          build: prepared
-            ? {
-                build_id: "national-fixture",
-                place_count: 1,
-                ranked_place_count: 1,
-                source_vintages: {
-                  fema: "December 2025",
-                },
-                scope: { kind: "national", state: null },
-              }
-            : null,
-        },
-      });
+      await route.fulfill({ json: {
+        app_version: "1.0.0", mutation_token: "test-token", reference_assets_ready: true,
+        reference_assets_error: null, build: prepared ? build : null,
+        map_assets: { ready: true, error: null, schema_version: 1, release: "v1.20", manifest_url: "/map-assets/manifest.json" },
+      } });
     } else if (url.pathname === "/api/v1/jobs" && route.request().method() === "POST") {
       expect(route.request().headers()["x-househunter-token"]).toBe("test-token");
-      await route.fulfill({
-        status: 202,
-        json: {
-          job_id: "one",
-          state: "running",
-          progress: 30,
-          message: "Building",
-          error: null,
-        },
-      });
+      await route.fulfill({ status: 202, json: { job_id: "one", state: "running", progress: 30, message: "Building", error: null } });
     } else if (url.pathname === "/api/v1/jobs/one") {
       prepared = true;
-      await route.fulfill({
-        json: {
-          job_id: "one",
-          state: "succeeded",
-          progress: 100,
-          message: "Complete",
-          error: null,
-        },
-      });
+      await route.fulfill({ json: { job_id: "one", state: "succeeded", progress: 100, message: "Complete", error: null } });
+    } else if (url.pathname === "/api/v1/map/scores") {
+      const county = url.searchParams.get("level") === "county";
+      await route.fulfill({ json: { schema_version: 1, build_id: build.build_id, level: county ? "county" : "tract", scope: build.scope, rows: [{ place_id: county ? "08013" : "08013012101", risk_score: county ? 18.5 : 21.25, coverage_status: "complete" }] } });
     } else if (url.pathname === "/api/v1/places") {
-      if (url.searchParams.has("state")) {
-        expect(url.searchParams.get("state")).toBe("CO");
-        expect(url.searchParams.get("offset")).toBe("0");
-      }
-      if (url.searchParams.has("county")) {
-        expect(url.searchParams.get("county")).toBe("08013");
-      }
       await route.fulfill({ json: { total: 1, items: [summary] } });
     } else if (url.pathname === "/api/v1/counties") {
       await route.fulfill({ json: { total: 1, items: [countySummary] } });
-    } else if (url.pathname === "/api/v1/counties/08013") {
-      await route.fulfill({
-        json: {
-          summary: countySummary,
-          total_weighted_housing: 0,
-          coverage_ratio: 1,
-          methodology_notice: "HouseHunter ranks FEMA counties by published county ALR_NPCTL.",
-          tract_contributions: [],
-          hazard_percentiles: hazards,
-          member_tract_count: 12,
-        },
-      });
     } else if (url.pathname === "/api/v1/places/08013012101") {
-      await route.fulfill({
-        json: {
-          summary,
-          total_weighted_housing: 0,
-          coverage_ratio: 1,
-          methodology_notice: "HouseHunter ranks FEMA tracts by published ALR_NPCTL.",
-          tract_contributions: [],
-          hazard_percentiles: hazards,
-          member_tract_count: null,
-        },
-      });
-    } else if (url.pathname === "/api/v1/lookup") {
-      expect(route.request().method()).toBe("POST");
-      await route.fulfill({
-        json: {
-          status: "resolved",
-          query: "1 Main St, Boulder, CO",
-          matched_address: "1 MAIN ST, BOULDER, CO, 80302",
-          tract_id: "08013012101",
-          provider: "census",
-          precision: "house",
-          approximate: false,
-          attribution: null,
-          detail: {
-            summary,
-            total_weighted_housing: 0,
-            coverage_ratio: 1,
-            methodology_notice: "HouseHunter ranks FEMA tracts by published ALR_NPCTL.",
-            tract_contributions: [],
-            hazard_percentiles: hazards,
-            member_tract_count: null,
-          },
-        },
-      });
-    } else if (url.pathname.endsWith("places.csv") || url.pathname.endsWith("counties.csv")) {
-      await route.fulfill({
-        body: "place_id,name\n08013012101,08013012101\n",
-        headers: {
-          "Content-Type": "text/csv",
-          "Content-Disposition": "attachment; filename=places.csv",
-        },
-      });
-    } else {
-      await route.abort();
-    }
-  });
-
-  await page.goto("/");
-  await page.getByRole("button", { name: "Prepare national data" }).click();
-  await expect(page.getByRole("heading", { name: "Lower risk, plainly ranked." })).toBeVisible();
-  await expect(page.getByText(/may send it to OpenStreetMap/i)).toBeVisible();
-  await expect(page.getByLabel("Score color scale, lower is better")).toBeVisible();
-  await expect(page.getByText("0–20")).toBeVisible();
-  await expect(page.getByText("20–40")).toBeVisible();
-  await expect(page.getByText("40–60")).toBeVisible();
-  await expect(page.getByText("60–80")).toBeVisible();
-  await expect(page.getByText("80–100")).toBeVisible();
-  await expect(page.getByText("Very High")).toHaveCount(0);
-  await expect(page.getByLabel("State")).toHaveValue("");
-  await expect(page.getByLabel("County")).toBeDisabled();
-  await page.getByLabel("State").selectOption("CO");
-  await expect(page.getByLabel("State")).toHaveValue("CO");
-  await expect(page.getByLabel("County")).toBeEnabled();
-  await page.getByLabel("County").selectOption("08013");
-  await page.getByRole("row", { name: /08013012101/ }).click();
-  await expect(page.getByRole("heading", { name: "08013012101, CO" })).toBeVisible();
-  await expect(page.getByText("21.3").first()).toHaveClass(/score-below/);
-  await expect(page.getByRole("heading", { name: "Published hazard percentiles" })).toBeVisible();
-  await expect(page.getByText("Wildfire")).toBeVisible();
-  await expect(page.getByText("No rating")).toBeVisible();
-  await expect(page.locator(".bar.score-highest")).toBeVisible();
-  await expect(page.locator(".bar.score-low")).toBeVisible();
-  await expect(page.locator(".bar.missing")).toBeVisible();
-  await expect(page.locator(".bar.missing")).not.toHaveClass(/score-low/);
-  await expect(page.locator(".bar.missing i")).toHaveAttribute("style", /width:\s*0%/);
-  await page.getByRole("button", { name: "Close tract detail" }).first().click();
-  await page.getByRole("button", { name: "Counties" }).click();
-  await expect(page.getByText(/ranked among counties/i)).toBeVisible();
-  await page.getByRole("row", { name: /Boulder/ }).click();
-  await expect(page.getByRole("heading", { name: "Boulder, CO" })).toBeVisible();
-  await expect(page.getByText("18.5").first()).toHaveClass(/score-low/);
-  await expect(page.getByText("Wildfire")).toBeVisible();
-  await page.getByRole("button", { name: "View 12 tracts" }).click();
-  await expect(page.getByRole("button", { name: "Tracts" })).toHaveAttribute("aria-pressed", "true");
-  await expect(page.getByLabel("County")).toHaveValue("08013");
-  await page.getByLabel("Address").fill("1 Main St, Boulder, CO");
-  await page.getByRole("button", { name: "Find tract" }).click();
-  await expect(page.getByRole("heading", { name: "08013012101, CO" })).toBeVisible();
-  await page.getByRole("button", { name: "Close tract detail" }).first().click();
-  const downloaded = page.waitForEvent("download");
-  await page.getByRole("link", { name: "Tracts CSV" }).click();
-  await expect(await downloaded).toBeTruthy();
-});
-
-test("confirms an approximate street match without contacting geocoders", async ({ page }) => {
-  const streetSummary = {
-    ...summary,
-    place_id: "08041007301",
-    name: "08041007301",
-    county_fips: "08041",
-    county_name: "El Paso",
-  };
-  const external: string[] = [];
-  page.on("request", (request) => {
-    const host = new URL(request.url()).hostname;
-    if (host.includes("census.gov") || host.includes("nominatim") || host.includes("openstreetmap.org")) {
-      external.push(request.url());
-    }
-  });
-  await page.route("**/api/v1/**", async (route) => {
-    const url = new URL(route.request().url());
-    if (url.pathname === "/api/v1/meta") {
-      await route.fulfill({
-        json: {
-          app_version: "1.0.0",
-          mutation_token: "test-token",
-          reference_assets_ready: true,
-          reference_assets_error: null,
-          build: {
-            build_id: "national-fixture",
-            place_count: 1,
-            ranked_place_count: 1,
-            source_vintages: { fema: "December 2025" },
-            scope: { kind: "national", state: null },
-          },
-        },
-      });
-    } else if (url.pathname === "/api/v1/places") {
-      await route.fulfill({ json: { total: 1, items: [streetSummary] } });
-    } else if (url.pathname === "/api/v1/counties") {
-      await route.fulfill({ json: { total: 0, items: [] } });
+      await route.fulfill({ json: detail() });
+    } else if (url.pathname === "/api/v1/counties/08013") {
+      await route.fulfill({ json: detail(countySummary) });
     } else if (url.pathname === "/api/v1/lookup") {
       const posted = route.request().postDataJSON() as { candidate_id?: string };
-      if (posted.candidate_id) {
-        await route.fulfill({
-          json: {
-            status: "resolved",
-            query: "1720 Lazy Cat Ln, Monument, CO 80132",
-            matched_address: "Lazy Cat Lane, Monument, Colorado, United States",
-            tract_id: "08041007301",
-            provider: "nominatim",
-            precision: "street",
-            approximate: true,
-            attribution: "© OpenStreetMap contributors",
-            detail: {
-              summary: streetSummary,
-              total_weighted_housing: 0,
-              coverage_ratio: 1,
-              methodology_notice: "HouseHunter ranks FEMA tracts by published ALR_NPCTL.",
-              tract_contributions: [],
-              hazard_percentiles: hazards,
-              member_tract_count: null,
-            },
-          },
-        });
-      } else {
-        await route.fulfill({
-          json: {
-            status: "confirmation_required",
-            query: "1720 Lazy Cat Ln, Monument, CO 80132",
-            message: "Census has no street range for that address. OpenStreetMap matched a road. A road representative point may cross tract boundaries.",
-            attribution: "© OpenStreetMap contributors",
-            candidates: [
-              {
-                candidate_id: "cand-1",
-                matched_address: "Lazy Cat Lane, Monument, Colorado, United States",
-                precision: "street",
-              },
-            ],
-          },
-        });
-      }
-    } else if (url.pathname === "/api/v1/places/08041007301") {
-      await route.fulfill({
-        json: {
-          summary: streetSummary,
-          total_weighted_housing: 0,
-          coverage_ratio: 1,
-          methodology_notice: "HouseHunter ranks FEMA tracts by published ALR_NPCTL.",
-          tract_contributions: [],
-          hazard_percentiles: hazards,
-          member_tract_count: null,
-        },
-      });
-    } else {
-      await route.abort();
-    }
+      if (posted.candidate_id) await route.fulfill({ json: {
+        status: "resolved", query: "1 Main St", matched_address: "Main Street, Boulder, CO", tract_id: summary.place_id,
+        provider: "nominatim", precision: "street", approximate: true, attribution: "© OpenStreetMap contributors", detail: detail(),
+      } });
+      else await route.fulfill({ json: {
+        status: "confirmation_required", query: "1 Main St", message: "Census had no house-level match. Confirm this approximate street match.",
+        attribution: "© OpenStreetMap contributors", candidates: [{ candidate_id: "candidate-1", matched_address: "Main Street, Boulder, CO", precision: "street" }],
+      } });
+    } else if (url.pathname.includes("/exports/")) {
+      await route.fulfill({ body: "place_id,name\n08013012101,Census tract 121.01\n", headers: { "Content-Type": "text/csv", "Content-Disposition": "attachment; filename=export.csv" } });
+    } else await route.abort();
   });
+}
 
+test("keeps preparation and retained workflows inside the map shell", async ({ page }) => {
+  await installRoutes(page, false);
   await page.goto("/");
-  await expect(page.getByText(/may send it to OpenStreetMap/i)).toBeVisible();
-  await page.getByLabel("Address").fill("1720 Lazy Cat Ln, Monument, CO 80132");
+  await expect(page.locator("canvas")).toBeVisible();
+  await page.getByRole("button", { name: "Prepare national data" }).click();
+  await expect(page.getByRole("button", { name: "Tracts" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("table")).toHaveCount(0);
+  await page.getByRole("button", { name: /Filters/ }).click();
+  await page.getByLabel("State").selectOption("CO");
+  await expect(page.getByLabel("County")).toBeEnabled();
+  await page.getByLabel("County").selectOption("08013");
+  await page.getByRole("button", { name: "Apply" }).click();
+  await expect(page).toHaveURL(/state=CO/);
+  await expect(page).toHaveURL(/county=08013/);
+  await page.getByRole("button", { name: "Counties" }).click();
+  await expect(page.getByRole("button", { name: "Counties" })).toHaveAttribute("aria-pressed", "true");
+  await page.goBack();
+  await expect(page.getByRole("button", { name: "Tracts" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page).toHaveURL(/county=08013/);
+  await page.getByRole("button", { name: "Lowest / Highest" }).click();
+  await expect(page.getByRole("heading", { name: "Lowest" })).toBeVisible();
+  await page.getByRole("button", { name: /Census tract 121.01/ }).first().click();
+  await expect(page.getByRole("dialog", { name: "Tract detail" })).toContainText("Wildfire");
+  await expect(page.getByRole("dialog", { name: "Tract detail" })).toContainText("No rating");
+});
+
+test("uses explicit address confirmation and never calls a geocoder from the browser", async ({ page }) => {
+  await installRoutes(page);
+  const external: string[] = [];
+  page.on("request", (request) => {
+    if (/census\.gov|openstreetmap|nominatim/i.test(request.url())) external.push(request.url());
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Search" }).click();
+  await page.getByRole("tab", { name: "Address" }).click();
+  await expect(page.getByText(/through this loopback server/i)).toBeVisible();
+  await page.getByLabel("House address").fill("1 Main St, Boulder, CO");
   await page.getByRole("button", { name: "Find tract" }).click();
   await expect(page.getByRole("region", { name: "Approximate street match" })).toBeVisible();
-  await expect(page.getByText("© OpenStreetMap contributors")).toBeVisible();
-  await expect(page.getByText(/road representative point may cross tract boundaries/i)).toBeVisible();
-  await page.getByRole("button", { name: "Use approximate street location" }).click();
-  await expect(page.getByRole("heading", { name: "08041007301, CO" })).toBeVisible();
+  await page.getByRole("button", { name: /Use approximate street location/ }).click();
+  await expect(page.getByRole("dialog", { name: "Tract detail" })).toBeVisible();
   expect(external).toEqual([]);
+  expect(await page.locator("[class*=marker]").count()).toBe(0);
+});
+
+test("is keyboard operable and never overflows the viewport", async ({ page }, testInfo) => {
+  await installRoutes(page, true, true);
+  const regionalRequests: string[] = [];
+  page.on("request", (request) => {
+    if (request.url().includes("tracts-co.topojson.gz")) regionalRequests.push(request.url());
+  });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto("/#level=tract&cx=0.5&cy=0.5&z=5");
+  const canvas = page.locator("canvas");
+  await expect(page.getByRole("alert")).toContainText("Detailed tract request failed");
+  await page.getByRole("button", { name: "Retry map" }).click();
+  await expect(page.locator(".build-pill")).toContainText("interactive");
+  await expect.poll(() => regionalRequests.length).toBeGreaterThan(1);
+  await page.getByRole("button", { name: "Reset map" }).click();
+  await expect(page).toHaveURL(/z=1\.000/);
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  const bounds = await canvas.boundingBox();
+  if (!bounds) throw new Error("Map canvas has no bounds");
+  await canvas.focus();
+  const isPhone = testInfo.project.name.includes("phone");
+  if (!isPhone) {
+    await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+    await expect(page.locator(".map-tooltip")).toBeVisible();
+  }
+  const position = { x: bounds.width / 2, y: bounds.height / 2 };
+  if (testInfo.project.name.includes("phone") || testInfo.project.name.includes("tablet")) await canvas.tap({ position });
+  else await canvas.click({ position });
+  await expect(page.getByRole("dialog", { name: "Tract detail" })).toBeVisible();
+  await page.getByRole("button", { name: "Close tract detail" }).click();
+  await expect(canvas).toBeFocused();
+  await page.getByRole("button", { name: "Reset map" }).click();
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await canvas.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("dialog", { name: "Tract detail" })).toBeVisible();
+  await page.getByRole("button", { name: "Close tract detail" }).click();
+  await expect(canvas).toBeFocused();
+  await page.getByRole("button", { name: "Reset map" }).click();
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(bounds.x + bounds.width / 2 + 24, bounds.y + bounds.height / 2);
+  await page.mouse.up();
+  await expect(page.getByRole("dialog", { name: "Tract detail" })).toHaveCount(0);
+  await canvas.focus();
+  await page.keyboard.press("ArrowRight");
+  for (let index = 0; index < 4; index += 1) await page.keyboard.press("+");
+  await expect.poll(() => Number(new URL(page.url()).hash.match(/(?:^|&)z=([\d.]+)/)?.[1] ?? 0)).toBeGreaterThan(5);
+  await expect.poll(() => regionalRequests.length).toBeGreaterThan(0);
+  await page.getByRole("button", { name: "Search" }).click();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("tab", { name: "Place / FIPS" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Search" })).toBeFocused();
+  if (testInfo.project.name.includes("desktop") || testInfo.project.name.includes("wide")) {
+    await page.setViewportSize({ width: Math.floor(bounds.width / 2), height: Math.floor(bounds.height / 2) });
+  }
+  const dimensions = await page.evaluate(() => ({ page: document.documentElement.scrollWidth, viewport: innerWidth }));
+  expect(dimensions.page).toBe(dimensions.viewport);
+  await expect(page.getByLabel(/Focusable USA tract risk map/)).toBeVisible();
+  await expect(page.getByLabel("Score color scale, lower is better")).toContainText("not property-level risk");
+  const accessibility = await new AxeBuilder({ page })
+    .withTags(["wcag2a", "wcag2aa", "wcag21aa", "wcag22aa"])
+    .analyze();
+  expect(accessibility.violations).toEqual([]);
 });

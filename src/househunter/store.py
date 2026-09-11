@@ -216,6 +216,24 @@ class Store:
             limit=limit,
         )
 
+    def map_scores(self, level: str) -> dict[str, Any]:
+        table = {"tract": "places", "county": "counties"}.get(level)
+        if table is None:
+            raise HouseHunterError("Map level must be tract or county")
+        rows = self.connection.execute(
+            f"SELECT place_id, risk_score, coverage_status FROM {table} ORDER BY place_id"
+        ).fetchall()
+        return {
+            "schema_version": 1,
+            "build_id": self.metadata["build_id"],
+            "level": level,
+            "scope": self.metadata["scope"],
+            "rows": [
+                {"place_id": place_id, "risk_score": risk_score, "coverage_status": status}
+                for place_id, risk_score, status in rows
+            ],
+        }
+
     def resolve_place(self, query: str) -> str:
         if len(query) == 11 and query.isdigit():
             exists = self.connection.execute(

@@ -7,5 +7,5 @@ npm --prefix web ci
 npm --prefix web test
 npm --prefix web run build
 git diff --exit-code -- web/dist
-npm --prefix web exec playwright install chromium
+npm --prefix web exec playwright install chromium webkit
 npm --prefix web run test:e2e

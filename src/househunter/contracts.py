@@ -85,6 +85,20 @@ class PlacePage(BaseModel):
     limit: int
 
 
+class MapScore(BaseModel):
+    place_id: str
+    risk_score: float | None
+    coverage_status: CoverageStatus
+
+
+class MapScores(BaseModel):
+    schema_version: Literal[1] = 1
+    build_id: str
+    level: Literal["tract", "county"]
+    scope: dict[str, str | None]
+    rows: list[MapScore]
+
+
 class SourceStatus(BaseModel):
     source: str
     version: str

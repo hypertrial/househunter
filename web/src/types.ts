@@ -74,3 +74,65 @@ export interface JobStatus {
   message: string;
   error: string | null;
 }
+
+export type Geography = "tract" | "county";
+
+export interface BuildMeta {
+  build_id: string;
+  place_count: number;
+  ranked_place_count: number;
+  county_count?: number;
+  ranked_county_count?: number;
+  source_vintages: Record<string, string>;
+  scope: { kind: string; state: string | null };
+}
+
+export interface MapAssetStatus {
+  ready: boolean;
+  error: string | null;
+  schema_version: number | null;
+  release: string | null;
+  manifest_url: string;
+}
+
+export interface Meta {
+  app_version: string;
+  mutation_token: string;
+  reference_assets_ready: boolean;
+  reference_assets_error: string | null;
+  map_assets: MapAssetStatus;
+  build: BuildMeta | null;
+}
+
+export interface MapScore {
+  place_id: string;
+  risk_score: number | null;
+  coverage_status: CoverageStatus;
+}
+
+export interface MapScores {
+  schema_version: 1;
+  build_id: string;
+  level: Geography;
+  scope: { kind: string; state: string | null };
+  rows: MapScore[];
+}
+
+export interface MapAssetEntry {
+  key: string;
+  filename: string;
+  level: Geography | "state";
+  lod: "national" | "detail";
+  jurisdiction: string | null;
+  feature_count: number;
+  bounds: [number, number, number, number];
+  compressed_size: number;
+  sha256: string;
+}
+
+export interface MapManifest {
+  schema_version: 1;
+  release: string;
+  files: MapAssetEntry[];
+  initial_compressed_size: number;
+}

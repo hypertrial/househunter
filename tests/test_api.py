@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
+import duckdb
 import httpx
 from fastapi.testclient import TestClient
+from test_map_assets import write_assets
 
 from househunter.api import create_app
 from househunter.build import build_snapshot
@@ -49,9 +52,10 @@ def test_api_filters_details_exports_and_token(
             "county_fips",
             "county_name",
         }
-        assert "alr_npctl_wfir" not in client.get("/api/v1/places", params={"state": "AL"}).json()[
-            "items"
-        ][0]
+        assert (
+            "alr_npctl_wfir"
+            not in client.get("/api/v1/places", params={"state": "AL"}).json()["items"][0]
+        )
         tract_detail = client.get("/api/v1/places/01001000100").json()
         hazards = {item["code"]: item for item in tract_detail["hazard_percentiles"]}
         assert len(tract_detail["hazard_percentiles"]) == 18
@@ -108,6 +112,83 @@ def test_api_filters_details_exports_and_token(
         assert status["state"] == "succeeded"
 
 
+def test_map_scores_and_assets_are_complete_ordered_and_safe(
+    fixture_environment: tuple[RuntimePaths, object],
+    monkeypatch: object,
+    tmp_path: Path,
+) -> None:
+    paths, _ = fixture_environment
+    output = build_snapshot(paths)
+    with duckdb.connect(str(output / "househunter.duckdb")) as connection:
+        connection.execute(
+            "UPDATE places SET risk_score = NULL, coverage_status = 'missing_fema' "
+            "WHERE place_id = '99999999999'"
+        )
+    asset_root = tmp_path / "assets"
+    asset_root.mkdir()
+    filename = write_assets(asset_root, monkeypatch)
+    monkeypatch.setattr("househunter.api.asset_directory", lambda: asset_root)
+    with TestClient(create_app(paths, testing=True)) as client:
+        tract = client.get("/api/v1/map/scores", params={"level": "tract"})
+        assert tract.status_code == 200
+        assert tract.headers["content-encoding"] == "gzip"
+        body = tract.json()
+        assert body["schema_version"] == 1
+        assert body["level"] == "tract"
+        assert body["scope"] == {"kind": "national", "state": None}
+        assert [row["place_id"] for row in body["rows"]] == sorted(
+            row["place_id"] for row in body["rows"]
+        )
+        assert len(body["rows"]) == 5
+        assert any(row["risk_score"] is None for row in body["rows"])
+        county = client.get("/api/v1/map/scores", params={"level": "county"}).json()
+        assert [row["place_id"] for row in county["rows"]] == ["01001", "02001"]
+        assert county["rows"][0]["risk_score"] == 40.0
+        meta = client.get("/api/v1/meta").json()
+        assert meta["map_assets"] == {
+            "ready": True,
+            "error": None,
+            "schema_version": 1,
+            "release": "v1.20",
+            "manifest_url": "/map-assets/manifest.json",
+        }
+        manifest = client.get("/map-assets/manifest.json")
+        assert manifest.status_code == 200
+        assert manifest.headers["cache-control"] == "no-cache"
+        asset = client.get(f"/map-assets/{filename}")
+        assert asset.status_code == 200
+        assert asset.headers["content-type"].startswith("application/topo+json")
+        assert "immutable" in asset.headers["cache-control"]
+        assert client.get("/map-assets/not-listed.topojson.gz").status_code == 404
+        assert client.get("/map-assets/%2e%2e%2fsecret").status_code == 404
+        (asset_root / filename).write_bytes(b"corrupt")
+        corrupt = client.get(f"/map-assets/{filename}")
+        assert corrupt.status_code == 503
+        assert "wrong size" in corrupt.json()["detail"]
+
+    build_snapshot(paths, state="AL")
+    write_assets(asset_root, monkeypatch)
+    with TestClient(create_app(paths, testing=True)) as client:
+        scoped = client.get("/api/v1/map/scores", params={"level": "tract"}).json()
+        assert scoped["scope"] == {"kind": "state", "state": "AL"}
+        assert [row["place_id"] for row in scoped["rows"]] == [
+            "01001000100",
+            "01001000200",
+            "01001000300",
+        ]
+        assert client.get("/api/v1/map/scores", params={"level": "invalid"}).status_code == 422
+
+
+def test_map_scores_require_a_current_build(
+    fixture_environment: tuple[RuntimePaths, object],
+) -> None:
+    paths, _ = fixture_environment
+    with TestClient(create_app(paths, testing=True)) as client:
+        response = client.get("/api/v1/map/scores")
+        assert response.status_code == 404
+        assert "No published build" in response.json()["detail"]
+
+
 def test_api_rejects_hostile_origin(fixture_environment: tuple[RuntimePaths, object]) -> None:
     paths, _ = fixture_environment
     with TestClient(create_app(paths, testing=True)) as client:
@@ -116,6 +197,16 @@ def test_api_rejects_hostile_origin(fixture_environment: tuple[RuntimePaths, obj
             headers={"origin": "https://attacker.example"},
         )
         assert response.status_code == 403
+        cross_site = client.get(
+            "/api/v1/map/scores",
+            headers={"sec-fetch-site": "cross-site"},
+        )
+        assert cross_site.status_code == 403
+        cross_site_asset = client.get(
+            "/map-assets/manifest.json",
+            headers={"sec-fetch-site": "cross-site"},
+        )
+        assert cross_site_asset.status_code == 403
 
 
 def test_api_rejects_non_loopback_host(fixture_environment: tuple[RuntimePaths, object]) -> None:

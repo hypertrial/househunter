@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import secrets
 from pathlib import Path
 from typing import Annotated, Literal
@@ -9,7 +10,8 @@ from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -21,6 +23,7 @@ from .contracts import (
     AddressLookup,
     AddressLookupRequest,
     JobStatus,
+    MapScores,
     PlaceDetail,
     PlacePage,
     SourceStatus,
@@ -29,6 +32,13 @@ from .download import source_statuses
 from .errors import AmbiguousPlaceError, BuildNotFoundError, HouseHunterError
 from .geocode import lookup_address
 from .jobs import JobKind, JobManager
+from .map_assets import (
+    MANIFEST_NAME,
+    asset_directory,
+    load_manifest,
+    manifest_entry,
+    map_asset_status,
+)
 from .store import Store, current_build
 
 
@@ -91,6 +101,10 @@ class LocalOnlyMiddleware(BaseHTTPMiddleware):
                 return JSONResponse(
                     {"detail": "Origin is not same-origin loopback"}, status_code=403
                 )
+        if request.headers.get("sec-fetch-site", "").lower() == "cross-site" and (
+            request.url.path.startswith("/api/") or request.url.path.startswith("/map-assets/")
+        ):
+            return JSONResponse({"detail": "Cross-site loopback request rejected"}, status_code=403)
         response = await call_next(request)
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; connect-src 'self'; img-src 'self' data:; "
@@ -119,6 +133,9 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
     jobs = JobManager(runtime)
     app = FastAPI(title="HouseHunter", version=__version__, docs_url=None, redoc_url=None)
     app.add_middleware(LocalOnlyMiddleware, testing=testing)
+    app.add_middleware(GZipMiddleware, minimum_size=1000)
+    asset_root = asset_directory()
+    assets = map_asset_status(asset_root)
 
     @app.exception_handler(HouseHunterError)
     async def handle_househunter_error(_: Request, exc: HouseHunterError) -> JSONResponse:
@@ -144,6 +161,7 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
             "methodology": "FEMA tract-level ALR_NPCTL",
             "reference_assets_ready": True,
             "reference_assets_error": None,
+            "map_assets": assets.as_dict(),
         }
         try:
             _, metadata = current_build(runtime)
@@ -151,6 +169,42 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
         except BuildNotFoundError:
             result["build"] = None
         return result
+
+    @app.get("/api/v1/map/scores", response_model=MapScores)
+    def map_scores(level: Literal["tract", "county"] = "tract") -> dict[str, object]:
+        with Store(runtime) as store:
+            return store.map_scores(level)
+
+    @app.get(f"/map-assets/{MANIFEST_NAME}")
+    def map_manifest() -> Response:
+        try:
+            manifest = load_manifest(asset_root, verify_files=False)
+        except ValueError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        return Response(
+            content=json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
+            media_type="application/json",
+            headers={"Cache-Control": "no-cache"},
+        )
+
+    @app.get("/map-assets/{filename}")
+    def map_asset(filename: str) -> FileResponse:
+        try:
+            path, _ = manifest_entry(filename, asset_root)
+        except ValueError as exc:
+            missing = str(exc) in {
+                "Invalid map asset path",
+                "Map asset is not listed in the manifest",
+            }
+            raise HTTPException(status_code=404 if missing else 503, detail=str(exc)) from exc
+        return FileResponse(
+            path,
+            media_type="application/topo+json",
+            headers={
+                "Content-Encoding": "gzip",
+                "Cache-Control": "public, max-age=31536000, immutable",
+            },
+        )
 
     @app.get("/api/v1/sources", response_model=list[SourceStatus])
     def sources() -> list[dict[str, object]]:

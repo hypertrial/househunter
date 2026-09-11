@@ -52,7 +52,12 @@ def _request_json(client: httpx.Client, url: str, params: dict[str, Any]) -> dic
     raise SourceContractError(f"FEMA request failed after retries: {last_error}")
 
 
-def _validate_layer(client: httpx.Client, source: dict[str, Any]) -> int:
+def _validate_layer(
+    client: httpx.Client,
+    source: dict[str, Any],
+    *,
+    expected_geometry_type: str | None = None,
+) -> int:
     item = _request_json(
         client,
         f"https://www.arcgis.com/sharing/rest/content/items/{source['item_id']}",
@@ -64,6 +69,11 @@ def _validate_layer(client: httpx.Client, source: dict[str, Any]) -> int:
             f"expected modification {source['item_modified_ms']}, got {item.get('modified')}"
         )
     metadata = _request_json(client, source["layer_url"], {"f": "json"})
+    if expected_geometry_type and metadata.get("geometryType") != expected_geometry_type:
+        raise SourceContractError(
+            "FEMA geometry type changed: "
+            f"expected {expected_geometry_type}, got {metadata.get('geometryType')}"
+        )
     actual = {field["name"]: field["type"] for field in metadata.get("fields", [])}
     required = source["fields"]
     if _schema_fingerprint(required) != source["schema_fingerprint"]:
