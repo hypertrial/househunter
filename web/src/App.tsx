@@ -38,6 +38,44 @@ export function scoreLabel(place: PlaceSummary): string {
   return place.risk_score === null ? "Not ranked" : place.risk_score.toFixed(1);
 }
 
+export type ScoreBand = "low" | "below" | "typical" | "high" | "highest";
+
+export const SCORE_BANDS = [
+  { id: "low", label: "0–20" },
+  { id: "below", label: "20–40" },
+  { id: "typical", label: "40–60" },
+  { id: "high", label: "60–80" },
+  { id: "highest", label: "80–100" },
+] as const satisfies ReadonlyArray<{ id: ScoreBand; label: string }>;
+
+export const SCORE_BAND_LABELS: Record<ScoreBand, string> = {
+  low: "low among peers",
+  below: "below typical",
+  typical: "typical",
+  high: "high among peers",
+  highest: "highest among peers",
+};
+
+export function scoreBand(value: number | null): ScoreBand | null {
+  if (value === null || !Number.isFinite(value) || value < 0 || value > 100) return null;
+  const displayed = Number(value.toFixed(1));
+  if (displayed < 20) return "low";
+  if (displayed < 40) return "below";
+  if (displayed < 60) return "typical";
+  if (displayed < 80) return "high";
+  return "highest";
+}
+
+export function scoreToneClass(value: number | null): string {
+  const band = scoreBand(value);
+  return band ? `score-${band}` : "missing";
+}
+
+export function scorePillLabel(place: PlaceSummary): string | undefined {
+  const band = scoreBand(place.risk_score);
+  return band ? `${scoreLabel(place)}, ${SCORE_BAND_LABELS[band]}` : undefined;
+}
+
 export function sortedHazardPercentiles(hazards: HazardPercentile[]): HazardPercentile[] {
   return [...hazards].sort((left, right) => {
     if (left.percentile === null && right.percentile === null) {
@@ -155,7 +193,7 @@ function Detail({
     {!detail ? <p>Loading…</p> : <>
       <p className="eyebrow">{detail.summary.place_type} · {detail.summary.place_id}</p>
       <h2>{detail.summary.name}, {detail.summary.state}</h2>
-      <div className="score"><span>{scoreLabel(detail.summary)}</span><small>{level === "county" ? "FEMA county ALR_NPCTL" : "FEMA ALR_NPCTL"}<br />Lower is better</small></div>
+      <div className={`score ${scoreToneClass(detail.summary.risk_score)}`}><span>{scoreLabel(detail.summary)}</span><small>{level === "county" ? "FEMA county ALR_NPCTL" : "FEMA ALR_NPCTL"}<br />Lower is better</small></div>
       <dl className="facts">
         <div><dt>{level === "county" ? "County FIPS" : "Tract FIPS"}</dt><dd>{detail.summary.place_id}</dd></div>
         <div><dt>State</dt><dd>{detail.summary.state}</dd></div>
@@ -168,7 +206,7 @@ function Detail({
       <div className="contributions">
         {sortedHazardPercentiles(detail.hazard_percentiles).map((hazard) => <div key={hazard.code} className="contribution">
           <div><span>{hazard.label}</span><span>{hazard.percentile === null ? "No rating" : hazard.percentile.toFixed(1)}</span></div>
-          <div className="bar"><i style={{ width: `${hazard.percentile ?? 0}%` }} /></div>
+          <div className={`bar ${scoreToneClass(hazard.percentile)}`}><i style={{ width: hazard.percentile === null ? "0%" : `${hazard.percentile}%` }} /></div>
         </div>)}
       </div>
       <p className="notice">{detail.methodology_notice}</p>
@@ -298,7 +336,7 @@ function Rankings({ meta }: { meta: Meta }) {
           <button type="button" aria-pressed={level === "county"} onClick={() => changeLevel("county")}>Counties</button>
         </div>
         <form className="lookup" onSubmit={(event) => { void findTract(event); }}>
-          <label>Address<input value={address} onChange={(e) => setAddress(e.target.value)} placeholder="123 Main St, Denver, CO" maxLength={200} autoComplete="off" /></label>
+          <label>Address<input value={address} onChange={(e) => setAddress(e.target.value)} placeholder="1670 Broadway, Denver, CO" maxLength={200} autoComplete="off" /></label>
           <button className="primary" type="submit" disabled={looking}>Find tract</button>
         </form>
         <form className="filters" onSubmit={submit}>
@@ -316,6 +354,10 @@ function Rankings({ meta }: { meta: Meta }) {
         </form>
         {error && <p role="alert" className="error">{error}</p>}
         <p className="result-count">{number.format(total)} {noun} · click a row for details</p>
+        <p className="score-legend" aria-label="Score color scale, lower is better">
+          <span>Lower is better</span>
+          {SCORE_BANDS.map((band) => <span key={band.id} className={`pill score-${band.id}`}>{band.label}</span>)}
+        </p>
         <div className="table-wrap"><table><thead><tr>
           <th scope="col">#</th>
           <th scope="col" aria-sort={sort === "name" ? (direction === "asc" ? "ascending" : "descending") : "none"}><button onClick={() => changeSort("name")}>{level === "county" ? "County" : "Tract"}</button></th>
@@ -326,7 +368,7 @@ function Rankings({ meta }: { meta: Meta }) {
           <td>{offset + index + 1}</td><td><button className="place-link" onClick={() => setSelected(place.place_id)}><strong>{place.name}</strong><small>{place.place_type}</small></button></td>
           {level === "tract" && <td>{place.county_name}</td>}
           <td>{place.state}</td>
-          <td><span className={place.risk_score === null ? "pill missing" : "pill"}>{scoreLabel(place)}</span>{place.risk_score === null && <small>{place.coverage_status.replaceAll("_", " ")}</small>}</td>
+          <td><span className={`pill ${scoreToneClass(place.risk_score)}`} aria-label={scorePillLabel(place)}>{scoreLabel(place)}</span>{place.risk_score === null && <small>{place.coverage_status.replaceAll("_", " ")}</small>}</td>
         </tr>)}</tbody></table></div>
         <div className="pager"><button disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 50))}>Previous</button><span>{offset + 1}–{Math.min(offset + 50, total)}</span><button disabled={offset + 50 >= total} onClick={() => setOffset(offset + 50)}>Next</button></div>
         <footer><strong>Provenance</strong><span>{meta.build?.source_vintages.fema}</span><span>Build {meta.build?.build_id} · {meta.build?.scope.kind}</span></footer>
