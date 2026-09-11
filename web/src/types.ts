@@ -11,6 +11,8 @@ export interface PlaceSummary {
   coverage_status: CoverageStatus;
   fema_vintage: string;
   census_vintage: string;
+  county_fips: string;
+  county_name: string;
 }
 
 export interface TractContribution {

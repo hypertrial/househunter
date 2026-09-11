@@ -9,7 +9,14 @@ import pytest
 import yaml
 
 from househunter.config import RuntimePaths
-from househunter.download import _request_json, _validate_rows, download_fema, validate_cached_fema
+from househunter.download import (
+    _request_json,
+    _validate_county_rows,
+    _validate_rows,
+    download_fema,
+    download_fema_counties,
+    validate_cached_fema,
+)
 from househunter.errors import SourceContractError
 
 
@@ -83,6 +90,117 @@ def test_download_paginates_and_reuses_verified_cache(tmp_path: Path, monkeypatc
     assert len(calls) == first_calls + 2
     assert paths.source_manifest.is_file()
     assert pl.read_parquet(paths.source_manifest)["source"].item() == "fema"
+
+
+def test_county_download_paginates_and_reuses_verified_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = {
+        "schema_version": 1,
+        "fema": {},
+        "fema_counties": {
+            "item_id": "fixture",
+            "layer_url": "https://example.test/counties/0",
+            "item_url": "https://example.test/counties",
+            "terms_url": "https://example.test/terms",
+            "version": "December 2025",
+            "release": "v1.20",
+            "item_modified_ms": 10,
+            "data_last_edit_ms": 20,
+            "layer_last_edit_ms": 30,
+            "expected_row_count": 2,
+            "fields": {
+                "STCOFIPS": "esriFieldTypeString",
+                "COUNTY": "esriFieldTypeString",
+                "COUNTYTYPE": "esriFieldTypeString",
+                "STATEABBRV": "esriFieldTypeString",
+                "ALR_NPCTL": "esriFieldTypeDouble",
+                "NRI_VER": "esriFieldTypeString",
+            },
+            "schema_fingerprint": (
+                "de3fb9c4dd2b2d7f507f908fce69ab95fc7f20bcfc155e93851a9e2ed85767f2"
+            ),
+            "canonical_sha256": None,
+        },
+        "census": {},
+    }
+    config_path = tmp_path / "sources.yml"
+    config_path.write_text(yaml.safe_dump(config))
+    monkeypatch.setenv("HOUSEHUNTER_CONFIG", str(config_path))
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        if "/sharing/" in request.url.path:
+            return httpx.Response(200, json={"modified": 10})
+        if not request.url.path.endswith("query"):
+            return httpx.Response(
+                200,
+                json={
+                    "maxRecordCount": 1,
+                    "editingInfo": {"lastEditDate": 30, "dataLastEditDate": 20},
+                    "fields": [
+                        {"name": name, "type": kind}
+                        for name, kind in config["fema_counties"]["fields"].items()
+                    ],
+                },
+            )
+        offset = int(request.url.params["resultOffset"])
+        records = [
+            {
+                "STCOFIPS": "01001",
+                "COUNTY": "Autauga",
+                "COUNTYTYPE": "County",
+                "STATEABBRV": "AL",
+                "ALR_NPCTL": 40.0,
+                "NRI_VER": "December 2025",
+            },
+            {
+                "STCOFIPS": "02001",
+                "COUNTY": "Aleutians East",
+                "COUNTYTYPE": "Borough",
+                "STATEABBRV": "AK",
+                "ALR_NPCTL": 12.0,
+                "NRI_VER": "December 2025",
+            },
+        ][offset : offset + 1]
+        return httpx.Response(200, json={"features": [{"attributes": row} for row in records]})
+
+    paths = RuntimePaths.from_root(tmp_path)
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        output = download_fema_counties(paths, client=client)
+        first_calls = len(calls)
+        assert output.is_file()
+        download_fema_counties(paths, client=client)
+        assert len(calls) == first_calls
+    assert pl.read_parquet(output)["county_fips"].to_list() == ["01001", "02001"]
+    assert "fema_counties" in pl.read_parquet(paths.source_manifest)["source"].to_list()
+
+
+def test_county_contract_rejects_duplicates() -> None:
+    source = {"expected_row_count": 2, "version": "December 2025"}
+    with pytest.raises(SourceContractError, match="not unique"):
+        _validate_county_rows(
+            [
+                {
+                    "STCOFIPS": "01001",
+                    "COUNTY": "Autauga",
+                    "COUNTYTYPE": "County",
+                    "STATEABBRV": "AL",
+                    "ALR_NPCTL": 1.0,
+                    "NRI_VER": "December 2025",
+                },
+                {
+                    "STCOFIPS": "01001",
+                    "COUNTY": "Autauga",
+                    "COUNTYTYPE": "County",
+                    "STATEABBRV": "AL",
+                    "ALR_NPCTL": 2.0,
+                    "NRI_VER": "December 2025",
+                },
+            ],
+            source,
+        )
 
 
 @pytest.mark.parametrize(

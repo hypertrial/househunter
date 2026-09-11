@@ -17,6 +17,26 @@ fema:
     NRI_VER: esriFieldTypeString
   schema_fingerprint: fdbbc3313928b19a8334cf0883667b996c64e5fc33b956dc42bbff55adf7723e
   canonical_sha256: 3bed225905e528ac3b5c4443f66e21a4585bdc553f84dd1edd35daefe930fed4
+fema_counties:
+  name: FEMA National Risk Index Counties
+  item_id: 39485e8035d446a5bff03259508ae355
+  layer_url: https://services.arcgis.com/XG15cJAlne2vxtgt/arcgis/rest/services/National_Risk_Index_Counties/FeatureServer/0
+  item_url: https://www.arcgis.com/home/item.html?id=39485e8035d446a5bff03259508ae355&sublayer=0
+  terms_url: https://hazards.fema.gov/nri/data-resources
+  version: December 2025
+  release: v1.20
+  item_modified_ms: 1766093159000
+  data_last_edit_ms: 1765870621340
+  layer_last_edit_ms: 1765872655413
+  expected_row_count: 3232
+  fields:
+    STCOFIPS: esriFieldTypeString
+    COUNTY: esriFieldTypeString
+    COUNTYTYPE: esriFieldTypeString
+    STATEABBRV: esriFieldTypeString
+    ALR_NPCTL: esriFieldTypeDouble
+    NRI_VER: esriFieldTypeString
+  schema_fingerprint: de3fb9c4dd2b2d7f507f908fce69ab95fc7f20bcfc155e93851a9e2ed85767f2
 census:
   decennial_vintage: 2020
   terms_url: https://www.census.gov/about/policies/open-gov/open-data.html

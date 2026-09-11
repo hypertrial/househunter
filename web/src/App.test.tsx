@@ -1,14 +1,26 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import App, { scoreLabel, STATE_ABBREVIATIONS } from "./App";
 import type { PlaceSummary } from "./types";
 
-const place = { risk_score: 42.04, coverage_status: "complete" } as PlaceSummary;
+const place = {
+  risk_score: 42.04,
+  coverage_status: "complete",
+  county_fips: "01001",
+  county_name: "Autauga",
+} as PlaceSummary;
 
 function placesParams(calls: unknown[][]): URLSearchParams[] {
   return calls
     .map(([url]) => String(url))
     .filter((url) => url.includes("/api/v1/places?"))
+    .map((url) => new URL(url, "http://127.0.0.1").searchParams);
+}
+
+function countiesParams(calls: unknown[][]): URLSearchParams[] {
+  return calls
+    .map(([url]) => String(url))
+    .filter((url) => url.includes("/api/v1/counties?"))
     .map((url) => new URL(url, "http://127.0.0.1").searchParams);
 }
 
@@ -47,20 +59,37 @@ describe("ranking workflow", () => {
               scope: { kind: "national", state: null },
             },
           }
-        : {
-            items: [
-              {
-                ...place,
-                place_id: "01001000100",
-                name: "01001000100",
-                state: "AL",
-                place_type: "tract",
-                population_2020: 0,
-                housing_units_2020: 0,
-              },
-            ],
-            total: 100,
-          };
+        : url.includes("/api/v1/counties?")
+          ? {
+              items: [
+                {
+                  ...place,
+                  place_id: "08013",
+                  name: "Boulder",
+                  state: "CO",
+                  place_type: "county",
+                  population_2020: 0,
+                  housing_units_2020: 0,
+                  county_fips: "08013",
+                  county_name: "Boulder",
+                },
+              ],
+              total: 1,
+            }
+          : {
+              items: [
+                {
+                  ...place,
+                  place_id: "01001000100",
+                  name: "01001000100",
+                  state: "AL",
+                  place_type: "tract",
+                  population_2020: 0,
+                  housing_units_2020: 0,
+                },
+              ],
+              total: 100,
+            };
       return new Response(JSON.stringify(body), { status: 200 });
     });
     vi.stubGlobal("fetch", request);
@@ -70,12 +99,16 @@ describe("ranking workflow", () => {
     const stateFilter = screen.getByLabelText("State");
     expect(stateFilter.tagName).toBe("SELECT");
     expect(stateFilter).toHaveDisplayValue("All states");
-    expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual([
+    expect([...stateFilter.querySelectorAll("option")].map((option) => option.textContent)).toEqual([
       "All states",
       ...STATE_ABBREVIATIONS,
     ]);
-    expect([...STATE_ABBREVIATIONS]).toEqual([...STATE_ABBREVIATIONS].toSorted());
+    expect([...STATE_ABBREVIATIONS]).toEqual([...STATE_ABBREVIATIONS].slice().sort());
     expect(new Set(STATE_ABBREVIATIONS).size).toBe(56);
+    const countyFilter = screen.getByLabelText("County");
+    expect(countyFilter).toBeDisabled();
+    expect(countyFilter).toHaveDisplayValue("All counties");
+    expect(screen.getByRole("columnheader", { name: "County" })).toBeVisible();
     await waitFor(() => expect(placesParams(request.mock.calls).length).toBeGreaterThan(0));
     expect(placesParams(request.mock.calls).at(-1)?.has("state")).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
@@ -86,6 +119,10 @@ describe("ranking workflow", () => {
       expect(latest?.get("state")).toBe("CO");
       expect(latest?.get("offset")).toBe("0");
     });
+    await waitFor(() => expect(countyFilter).toBeEnabled());
+    await waitFor(() => expect(within(countyFilter).getByRole("option", { name: "Boulder" })).toBeVisible());
+    fireEvent.change(countyFilter, { target: { value: "08013" } });
+    await waitFor(() => expect(placesParams(request.mock.calls).at(-1)?.get("county")).toBe("08013"));
     fireEvent.change(stateFilter, { target: { value: "" } });
     await waitFor(() => expect(placesParams(request.mock.calls).at(-1)?.has("state")).toBe(false));
     expect(screen.getByLabelText("Include incomplete")).not.toBeChecked();
@@ -96,6 +133,10 @@ describe("ranking workflow", () => {
       expect(request.mock.calls.some(([url]) => String(url).includes("direction=desc"))).toBe(true),
     );
     expect(riskHeader).toHaveAttribute("aria-sort", "descending");
+    fireEvent.click(screen.getByRole("button", { name: "Counties" }));
+    await waitFor(() => expect(countiesParams(request.mock.calls).some((params) => !params.has("sort") || params.get("sort") === "risk_score" || params.get("limit") === "50")).toBe(true));
+    expect(screen.getByText(/ranked among counties/i)).toBeVisible();
+    expect(screen.getByRole("button", { name: "Counties" })).toHaveAttribute("aria-pressed", "true");
   });
 
   it("starts preparation with the per-launch token", async () => {

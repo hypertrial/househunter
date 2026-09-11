@@ -15,6 +15,8 @@ interface Meta {
   };
 }
 
+type Geography = "tract" | "county";
+
 const number = new Intl.NumberFormat("en-US");
 
 export const STATE_ABBREVIATIONS = [
@@ -82,7 +84,7 @@ function Setup({ token, onReady }: { token: string; onReady: () => void }) {
   return <main className="setup">
     <p className="eyebrow">Local data preparation</p>
     <h1>Rank FEMA tracts with one clear risk signal.</h1>
-    <p className="lead">HouseHunter downloads the pinned FEMA National Risk Index and builds a private snapshot on this Mac. No Census download is required.</p>
+    <p className="lead">HouseHunter downloads the pinned FEMA National Risk Index tract and county layers and builds a private snapshot on this Mac. No Census download is required.</p>
     {job && <section aria-live="polite" className="progress-card">
       <div className="progress-copy"><strong>{job.message}</strong><span>{job.progress}%</span></div>
       <progress max="100" value={job.progress}>{job.progress}%</progress>
@@ -94,13 +96,14 @@ function Setup({ token, onReady }: { token: string; onReady: () => void }) {
   </main>;
 }
 
-function Detail({ placeId, onClose }: { placeId: string; onClose: () => void }) {
+function Detail({ placeId, level, onClose }: { placeId: string; level: Geography; onClose: () => void }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [detail, setDetail] = useState<PlaceDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
-    json<PlaceDetail>(`/api/v1/places/${placeId}`).then(setDetail).catch((caught) => setError(caught.message));
-  }, [placeId]);
+    const path = level === "county" ? `/api/v1/counties/${placeId}` : `/api/v1/places/${placeId}`;
+    json<PlaceDetail>(path).then(setDetail).catch((caught) => setError(caught.message));
+  }, [placeId, level]);
   useEffect(() => {
     const node = dialog.current;
     if (node && !node.open) node.showModal();
@@ -108,25 +111,29 @@ function Detail({ placeId, onClose }: { placeId: string; onClose: () => void }) 
       if (node?.open) node.close();
     };
   }, []);
-  return <dialog ref={dialog} className="detail" aria-label="Tract detail" onCancel={(event) => { event.preventDefault(); onClose(); }}>
-    <button autoFocus className="close" onClick={onClose} aria-label="Close tract detail">×</button>
+  const closeLabel = level === "county" ? "Close county detail" : "Close tract detail";
+  return <dialog ref={dialog} className="detail" aria-label={level === "county" ? "County detail" : "Tract detail"} onCancel={(event) => { event.preventDefault(); onClose(); }}>
+    <button autoFocus className="close" onClick={onClose} aria-label={closeLabel}>×</button>
     {error && <p role="alert" className="error">{error}</p>}
     {!detail ? <p>Loading…</p> : <>
       <p className="eyebrow">{detail.summary.place_type} · {detail.summary.place_id}</p>
       <h2>{detail.summary.name}, {detail.summary.state}</h2>
-      <div className="score"><span>{scoreLabel(detail.summary)}</span><small>FEMA ALR_NPCTL<br />Lower is better</small></div>
+      <div className="score"><span>{scoreLabel(detail.summary)}</span><small>{level === "county" ? "FEMA county ALR_NPCTL" : "FEMA ALR_NPCTL"}<br />Lower is better</small></div>
       <dl className="facts">
-        <div><dt>Tract FIPS</dt><dd>{detail.summary.place_id}</dd></div>
+        <div><dt>{level === "county" ? "County FIPS" : "Tract FIPS"}</dt><dd>{detail.summary.place_id}</dd></div>
         <div><dt>State</dt><dd>{detail.summary.state}</dd></div>
+        {level === "tract" && <div><dt>County</dt><dd>{detail.summary.county_name}</dd></div>}
         <div><dt>FEMA vintage</dt><dd>{detail.summary.fema_vintage}</dd></div>
       </dl>
-      <h3>FEMA value</h3>
-      <div className="contributions">
-        {detail.tract_contributions.map((tract, index) => <div key={tract.tract_id ?? `missing-${index}`} className="contribution">
-          <div><span>{tract.tract_id ?? "Missing tract"}</span><span>{tract.fema_percentile?.toFixed(1) ?? "Missing"}</span></div>
-          <div className="bar"><i style={{ width: `${tract.fema_percentile ?? 0}%` }} /></div>
-        </div>)}
-      </div>
+      {detail.tract_contributions.length > 0 && <>
+        <h3>FEMA value</h3>
+        <div className="contributions">
+          {detail.tract_contributions.map((tract, index) => <div key={tract.tract_id ?? `missing-${index}`} className="contribution">
+            <div><span>{tract.tract_id ?? "Missing tract"}</span><span>{tract.fema_percentile?.toFixed(1) ?? "Missing"}</span></div>
+            <div className="bar"><i style={{ width: `${tract.fema_percentile ?? 0}%` }} /></div>
+          </div>)}
+        </div>
+      </>}
       <p className="notice">{detail.methodology_notice}</p>
     </>}
   </dialog>;
@@ -137,6 +144,9 @@ function Rankings({ meta }: { meta: Meta }) {
   const [total, setTotal] = useState(0);
   const [search, setSearch] = useState("");
   const [state, setState] = useState("");
+  const [county, setCounty] = useState("");
+  const [countyOptions, setCountyOptions] = useState<PlaceSummary[]>([]);
+  const [level, setLevel] = useState<Geography>("tract");
   const [includeUnranked, setIncludeUnranked] = useState(false);
   const [sort, setSort] = useState("risk_score");
   const [direction, setDirection] = useState("asc");
@@ -144,16 +154,28 @@ function Rankings({ meta }: { meta: Meta }) {
   const [selected, setSelected] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  useEffect(() => {
+    setCounty("");
+    setCountyOptions([]);
+    if (!state) return;
+    const params = new URLSearchParams({ state, limit: "500", sort: "name", direction: "asc" });
+    json<{ items: PlaceSummary[] }>(`/api/v1/counties?${params}`)
+      .then((result) => setCountyOptions(result.items))
+      .catch((caught) => setError((caught as Error).message));
+  }, [state]);
+
   const load = useCallback(async () => {
     const params = new URLSearchParams({ limit: "50", offset: String(offset), sort, direction });
     if (search) params.set("search", search);
     if (state) params.set("state", state);
     if (includeUnranked) params.set("include_unranked", "true");
+    if (level === "tract" && county) params.set("county", county);
+    const path = level === "county" ? "/api/v1/counties" : "/api/v1/places";
     try {
-      const result = await json<{ items: PlaceSummary[]; total: number }>(`/api/v1/places?${params}`);
+      const result = await json<{ items: PlaceSummary[]; total: number }>(`${path}?${params}`);
       setPlaces(result.items); setTotal(result.total); setError(null);
     } catch (caught) { setError((caught as Error).message); }
-  }, [direction, includeUnranked, offset, search, sort, state]);
+  }, [county, direction, includeUnranked, level, offset, search, sort, state]);
 
   useEffect(() => { void load(); }, [load]);
   function submit(event: FormEvent) { event.preventDefault(); setOffset(0); void load(); }
@@ -162,35 +184,61 @@ function Rankings({ meta }: { meta: Meta }) {
     else { setSort(value); setDirection("asc"); }
     setOffset(0);
   }
+  function changeLevel(next: Geography) {
+    setLevel(next);
+    setSelected(null);
+    setOffset(0);
+    if (next === "county") setCounty("");
+  }
+  const scopeKind = meta.build?.scope.kind === "state" ? `${meta.build.scope.state} ` : "";
+  const noun = level === "county" ? "counties" : "tracts";
+  const exportBase = level === "county" ? "/api/v1/exports/counties" : "/api/v1/exports/places";
   return <>
-    <header className="topbar"><div><strong>HouseHunter</strong><span>FEMA ALR_NPCTL</span></div><nav aria-label="Exports"><a href="/api/v1/exports/places.csv">CSV</a><a href="/api/v1/exports/places.parquet">Parquet</a></nav></header>
+    <header className="topbar"><div><strong>HouseHunter</strong><span>FEMA ALR_NPCTL</span></div><nav aria-label="Exports"><a href={`${exportBase}.csv`}>CSV</a><a href={`${exportBase}.parquet`}>Parquet</a></nav></header>
     <main className="layout">
       <section className="rankings">
-        <div className="intro"><p className="eyebrow">{meta.build?.scope.kind === "state" ? `${meta.build.scope.state} FEMA tracts` : "FEMA National Risk Index tracts"}</p><h1>Lower risk, plainly ranked.</h1><p>One score: each tract's published FEMA Expected Annual Loss Rate national percentile.</p></div>
+        <div className="intro">
+          <p className="eyebrow">{level === "county" ? `${scopeKind}FEMA National Risk Index counties` : `${scopeKind}FEMA National Risk Index tracts`}</p>
+          <h1>Lower risk, plainly ranked.</h1>
+          <p>{level === "county"
+            ? "One score: each county's published FEMA Expected Annual Loss Rate national percentile, ranked among counties. This is not an average of tract scores."
+            : "One score: each tract's published FEMA Expected Annual Loss Rate national percentile."}</p>
+        </div>
+        <div className="view-toggle" role="group" aria-label="Geography">
+          <button type="button" aria-pressed={level === "tract"} onClick={() => changeLevel("tract")}>Tracts</button>
+          <button type="button" aria-pressed={level === "county"} onClick={() => changeLevel("county")}>Counties</button>
+        </div>
         <form className="filters" onSubmit={submit}>
-          <label>Search<input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Tract FIPS" /></label>
+          <label>Search<input value={search} onChange={(e) => setSearch(e.target.value)} placeholder={level === "county" ? "County name or FIPS" : "Tract FIPS or county name"} /></label>
           <label>State<select value={state} onChange={(e) => { setState(e.target.value); setOffset(0); }}>
             <option value="">All states</option>
             {STATE_ABBREVIATIONS.map((abbreviation) => <option key={abbreviation} value={abbreviation}>{abbreviation}</option>)}
           </select></label>
+          {level === "tract" && <label>County<select value={county} disabled={!state} onChange={(e) => { setCounty(e.target.value); setOffset(0); }}>
+            <option value="">All counties</option>
+            {countyOptions.map((option) => <option key={option.place_id} value={option.place_id}>{option.name}</option>)}
+          </select></label>}
           <label className="check"><input type="checkbox" checked={includeUnranked} onChange={(e) => setIncludeUnranked(e.target.checked)} /> Include incomplete</label>
           <button className="primary" type="submit">Apply</button>
         </form>
         {error && <p role="alert" className="error">{error}</p>}
-        <p className="result-count">{number.format(total)} tracts · click a row for details</p>
+        <p className="result-count">{number.format(total)} {noun} · click a row for details</p>
         <div className="table-wrap"><table><thead><tr>
           <th scope="col">#</th>
-          <th scope="col" aria-sort={sort === "name" ? (direction === "asc" ? "ascending" : "descending") : "none"}><button onClick={() => changeSort("name")}>Tract</button></th>
+          <th scope="col" aria-sort={sort === "name" ? (direction === "asc" ? "ascending" : "descending") : "none"}><button onClick={() => changeSort("name")}>{level === "county" ? "County" : "Tract"}</button></th>
+          {level === "tract" && <th scope="col">County</th>}
           <th scope="col" aria-sort={sort === "state" ? (direction === "asc" ? "ascending" : "descending") : "none"}><button onClick={() => changeSort("state")}>State</button></th>
           <th scope="col" aria-sort={sort === "risk_score" ? (direction === "asc" ? "ascending" : "descending") : "none"}><button onClick={() => changeSort("risk_score")}>Risk score {sort === "risk_score" && direction === "desc" ? "↑" : "↓"}</button></th>
         </tr></thead><tbody>{places.map((place, index) => <tr key={place.place_id} onClick={() => setSelected(place.place_id)}>
-          <td>{offset + index + 1}</td><td><button className="place-link" onClick={() => setSelected(place.place_id)}><strong>{place.name}</strong><small>{place.place_type}</small></button></td><td>{place.state}</td>
+          <td>{offset + index + 1}</td><td><button className="place-link" onClick={() => setSelected(place.place_id)}><strong>{place.name}</strong><small>{place.place_type}</small></button></td>
+          {level === "tract" && <td>{place.county_name}</td>}
+          <td>{place.state}</td>
           <td><span className={place.risk_score === null ? "pill missing" : "pill"}>{scoreLabel(place)}</span>{place.risk_score === null && <small>{place.coverage_status.replaceAll("_", " ")}</small>}</td>
         </tr>)}</tbody></table></div>
         <div className="pager"><button disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 50))}>Previous</button><span>{offset + 1}–{Math.min(offset + 50, total)}</span><button disabled={offset + 50 >= total} onClick={() => setOffset(offset + 50)}>Next</button></div>
         <footer><strong>Provenance</strong><span>{meta.build?.source_vintages.fema}</span><span>Build {meta.build?.build_id} · {meta.build?.scope.kind}</span></footer>
       </section>
-      {selected && <Detail placeId={selected} onClose={() => setSelected(null)} />}
+      {selected && <Detail placeId={selected} level={level} onClose={() => setSelected(null)} />}
     </main>
   </>;
 }

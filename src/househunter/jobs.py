@@ -9,7 +9,7 @@ from typing import Literal
 from .build import build_snapshot
 from .config import RuntimePaths
 from .contracts import JobStatus
-from .download import download_fema
+from .download import download_fema, download_fema_counties
 from .errors import HouseHunterError
 from .locking import exclusive_lock
 
@@ -87,22 +87,29 @@ class JobManager:
                     self._update(job, value, message)
 
                 if job.status.kind == "download":
-                    download_fema(self.paths, progress=progress, cancelled=job.cancel.is_set)
+                    download_fema(
+                        self.paths,
+                        progress=lambda value, message: progress(value * 50 // 100, message),
+                        cancelled=job.cancel.is_set,
+                    )
+                    download_fema_counties(
+                        self.paths,
+                        progress=lambda value, message: progress(50 + value * 50 // 100, message),
+                        cancelled=job.cancel.is_set,
+                    )
                 elif job.status.kind == "build":
                     build_snapshot(
                         self.paths, state=state, progress=progress, cancelled=job.cancel.is_set
                     )
                 else:
-                    download_fema(
-                        self.paths,
-                        progress=lambda value, message: progress(value // 2, message),
-                        cancelled=job.cancel.is_set,
-                    )
-                    build_snapshot(
+                    from .run import prepare_runtime
+
+                    prepare_runtime(
                         self.paths,
                         state=state,
-                        progress=lambda value, message: progress(50 + value // 2, message),
+                        progress=progress,
                         cancelled=job.cancel.is_set,
+                        hold_lock=False,
                     )
                 with self._guard:
                     job.status.state = "succeeded"

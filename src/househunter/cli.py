@@ -12,7 +12,7 @@ import uvicorn
 from .api import create_app
 from .build import build_snapshot
 from .config import RuntimePaths, load_config
-from .download import download_fema, source_status
+from .download import download_fema, download_fema_counties, source_statuses
 from .errors import AmbiguousPlaceError, HouseHunterError
 from .locking import exclusive_lock
 from .store import Store
@@ -40,23 +40,28 @@ def sources(
     """Show pinned source versions and local cache state."""
     try:
         config = load_config()
-        status = source_status(_paths()).model_dump(mode="json")
+        statuses = {item.source: item.model_dump(mode="json") for item in source_statuses(_paths())}
         result = {
-            "fema": {
-                **status,
-                "release": config["fema"]["release"],
-                "url": config["fema"]["item_url"],
+            key: {
+                **statuses[key],
+                "release": config[key]["release"],
+                "url": config[key]["item_url"],
             }
+            for key in ("fema", "fema_counties")
         }
         if json_output:
             typer.echo(json.dumps(result, indent=2, sort_keys=True))
         else:
-            typer.echo(
-                f"FEMA NRI {result['fema']['release']} ({result['fema']['version']}): "
-                f"{'cached' if result['fema']['cached'] else 'not downloaded'}"
-            )
-            if result["fema"]["error"]:
-                typer.echo(f"Cache error: {result['fema']['error']}", err=True)
+            for key, label in (
+                ("fema", "FEMA NRI tracts"),
+                ("fema_counties", "FEMA NRI counties"),
+            ):
+                typer.echo(
+                    f"{label} {result[key]['release']} ({result[key]['version']}): "
+                    f"{'cached' if result[key]['cached'] else 'not downloaded'}"
+                )
+                if result[key]["error"]:
+                    typer.echo(f"Cache error ({key}): {result[key]['error']}", err=True)
     except HouseHunterError as exc:
         _abort(exc)
 
@@ -66,12 +71,19 @@ def download(
     source: Annotated[str, typer.Option("--source", help="Source to download")] = "fema",
 ) -> None:
     """Download and verify pinned source data."""
-    if source.lower() != "fema":
-        _abort(HouseHunterError("V1 supports only --source fema"))
+    selected = source.lower().replace("-", "_")
     paths = _paths()
     try:
         with exclusive_lock(paths.job_lock):
-            output = download_fema(paths, progress=_progress)
+            if selected == "fema":
+                output = download_fema(paths, progress=_progress)
+            elif selected == "fema_counties":
+                output = download_fema_counties(paths, progress=_progress)
+            elif selected == "all":
+                download_fema(paths, progress=_progress)
+                output = download_fema_counties(paths, progress=_progress)
+            else:
+                _abort(HouseHunterError("Supported sources are fema, fema_counties, and all"))
         typer.echo(str(output))
     except HouseHunterError as exc:
         _abort(exc)
@@ -94,32 +106,55 @@ def build(
 @app.command()
 def rank(
     state: Annotated[str | None, typer.Option("--state")] = None,
+    county: Annotated[str | None, typer.Option("--county", help="5-digit county FIPS")] = None,
+    level: Annotated[str, typer.Option("--level", help="tract or county")] = "tract",
     limit: Annotated[int, typer.Option("--limit", min=1, max=500)] = 25,
     include_unranked: Annotated[bool, typer.Option("--include-unranked")] = False,
 ) -> None:
-    """List tracts from lowest to highest FEMA ALR_NPCTL."""
+    """List geographies from lowest to highest FEMA ALR_NPCTL."""
+    selected = level.lower()
+    if selected not in {"tract", "county"}:
+        _abort(HouseHunterError("Rank level must be tract or county"))
+    if selected == "county" and county:
+        _abort(HouseHunterError("--county filters tracts; omit it when ranking counties"))
     try:
         with Store(_paths()) as store:
-            result = store.list_places(
-                state=state,
-                limit=limit,
-                include_unranked=include_unranked,
-            )
-        typer.echo("TRACT_ID     SCORE  STATE")
+            if selected == "county":
+                result = store.list_counties(
+                    state=state,
+                    limit=limit,
+                    include_unranked=include_unranked,
+                )
+                typer.echo("COUNTY_FIPS  SCORE  STATE  NAME")
+            else:
+                result = store.list_places(
+                    state=state,
+                    county=county,
+                    limit=limit,
+                    include_unranked=include_unranked,
+                )
+                typer.echo("TRACT_ID     SCORE  STATE")
         for row in result["items"]:
             score = f"{row['risk_score']:.1f}" if row["risk_score"] is not None else "—"
-            typer.echo(f"{row['place_id']:<12} {score:>5}  {row['state']}")
+            if selected == "county":
+                typer.echo(
+                    f"{row['place_id']:<12} {score:>5}  {row['state']:<5}  {row['name']}"
+                )
+            else:
+                typer.echo(f"{row['place_id']:<12} {score:>5}  {row['state']}")
     except HouseHunterError as exc:
         _abort(exc)
 
 
 @app.command("inspect")
 def inspect_place(query: str) -> None:
-    """Inspect a tract by FIPS ID."""
+    """Inspect a tract by 11-digit FIPS or a county by 5-digit FIPS."""
     try:
         with Store(_paths()) as store:
-            place_id = store.resolve_place(query)
-            detail = store.place_detail(place_id)
+            if len(query) == 5 and query.isdigit():
+                detail = store.county_detail(store.resolve_county(query))
+            else:
+                detail = store.place_detail(store.resolve_place(query))
         typer.echo(json.dumps(detail, indent=2, sort_keys=True))
     except AmbiguousPlaceError as exc:
         typer.echo(
@@ -134,15 +169,21 @@ def inspect_place(query: str) -> None:
 def export(
     format: Annotated[str, typer.Option("--format", help="csv or parquet")] = "csv",
     output: Annotated[Path | None, typer.Option("--output")] = None,
+    level: Annotated[str, typer.Option("--level", help="tract or county")] = "tract",
 ) -> None:
-    """Export the selected immutable tract snapshot."""
+    """Export the selected immutable snapshot table."""
     selected = format.lower()
+    geography = level.lower()
     if selected not in {"csv", "parquet"}:
         _abort(HouseHunterError("Export format must be csv or parquet"))
-    destination = (output or Path.cwd() / f"househunter-places.{selected}").expanduser().resolve()
+    if geography not in {"tract", "county"}:
+        _abort(HouseHunterError("Export level must be tract or county"))
+    table = "counties" if geography == "county" else "places"
+    stem = "househunter-counties" if geography == "county" else "househunter-places"
+    destination = (output or Path.cwd() / f"{stem}.{selected}").expanduser().resolve()
     try:
         with Store(_paths()) as store:
-            store.export(selected, destination)
+            store.export(selected, destination, table=table)
         typer.echo(str(destination))
     except (HouseHunterError, OSError) as exc:
         _abort(HouseHunterError(str(exc)))

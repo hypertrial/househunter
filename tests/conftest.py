@@ -37,6 +37,31 @@ def fixture_environment(
             ),
             "canonical_sha256": None,
         },
+        "fema_counties": {
+            "name": "fixture counties",
+            "item_id": "fixture-counties",
+            "layer_url": "https://example.test/counties/0",
+            "item_url": "https://example.test/counties",
+            "terms_url": "https://example.test/terms",
+            "version": "December 2025",
+            "release": "v1.20",
+            "item_modified_ms": 1,
+            "data_last_edit_ms": 1,
+            "layer_last_edit_ms": 2,
+            "expected_row_count": 2,
+            "fields": {
+                "STCOFIPS": "esriFieldTypeString",
+                "COUNTY": "esriFieldTypeString",
+                "COUNTYTYPE": "esriFieldTypeString",
+                "STATEABBRV": "esriFieldTypeString",
+                "ALR_NPCTL": "esriFieldTypeDouble",
+                "NRI_VER": "esriFieldTypeString",
+            },
+            "schema_fingerprint": (
+                "de3fb9c4dd2b2d7f507f908fce69ab95fc7f20bcfc155e93851a9e2ed85767f2"
+            ),
+            "canonical_sha256": None,
+        },
     }
     config_path = tmp_path / "sources.yml"
     config_path.write_text(yaml.safe_dump(config))
@@ -58,4 +83,15 @@ def fixture_environment(
         }
     )
     fema.write_parquet(paths.cache / "fema_nri_tracts.parquet")
+    counties = pl.DataFrame(
+        {
+            "county_fips": ["01001", "02001"],
+            "county": ["Autauga", "Aleutians East"],
+            "county_type": ["County", "Borough"],
+            "state": ["AL", "AK"],
+            "alr_npctl": [40.0, 12.0],
+            "nri_version": ["December 2025", "December 2025"],
+        }
+    )
+    counties.write_parquet(paths.cache / "fema_nri_counties.parquet")
     return paths, tmp_path

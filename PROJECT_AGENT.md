@@ -1,10 +1,13 @@
 # HouseHunter project notes
 
 HouseHunter is a local-only macOS application that ranks FEMA National Risk Index
-tracts by the published tract-level `ALR_NPCTL`. Lower is better.
+tracts by the published tract-level `ALR_NPCTL`, and separately ranks FEMA
+counties by the published county-level `ALR_NPCTL`. Lower is better.
 
-A HouseHunter score is FEMA's published tract percentile. It is **not** a
-property-level assessment, a loss probability, an insurance quote, or a prediction.
+A HouseHunter tract score is FEMA's published tract percentile. A county score is
+FEMA's published county percentile, ranked among counties — not the mean of tract
+scores. Neither is a property-level assessment, a loss probability, an insurance
+quote, or a prediction.
 
 Use the `househunter-engineering` workspace from `.pad.toml`. Follow `AGENTS.md`
 and the local `pad-engineering` skill. Keep ticket bodies, exports, credentials,
@@ -20,7 +23,7 @@ and local Pad state out of this public repository.
   change the UI.
 - Never commit credentials or fetched FEMA payloads.
 - Runtime ranking uses FEMA only. Do not contact census.gov from `run-app`,
-  prepare, or build.
+  prepare, or build. Tract and county layers are both required.
 
 ## Verification
 

@@ -17,7 +17,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from . import __version__
 from .config import RuntimePaths
 from .contracts import JobStatus, PlaceDetail, PlacePage, SourceStatus
-from .download import source_status
+from .download import source_statuses
 from .errors import AmbiguousPlaceError, BuildNotFoundError, HouseHunterError
 from .jobs import JobKind, JobManager
 from .store import Store, current_build
@@ -145,8 +145,7 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
 
     @app.get("/api/v1/sources", response_model=list[SourceStatus])
     def sources() -> list[dict[str, object]]:
-        fema = source_status(runtime).model_dump(mode="json")
-        return [fema]
+        return [status.model_dump(mode="json") for status in source_statuses(runtime)]
 
     @app.post(
         "/api/v1/jobs",
@@ -173,6 +172,7 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
     def places(
         search: str | None = None,
         state: str | None = None,
+        county: str | None = None,
         min_population: int | None = Query(None, ge=0),
         max_population: int | None = Query(None, ge=0),
         min_score: float | None = Query(None, ge=0, le=100),
@@ -187,6 +187,7 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
             return store.list_places(
                 search=search,
                 state=state,
+                county=county,
                 min_population=min_population,
                 max_population=max_population,
                 min_score=min_score,
@@ -202,6 +203,36 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
     def place(place_id: str) -> dict[str, object]:
         with Store(runtime) as store:
             return store.place_detail(store.resolve_place(place_id))
+
+    @app.get("/api/v1/counties", response_model=PlacePage)
+    def counties(
+        search: str | None = None,
+        state: str | None = None,
+        min_score: float | None = Query(None, ge=0, le=100),
+        max_score: float | None = Query(None, ge=0, le=100),
+        include_unranked: bool = False,
+        sort: str = "risk_score",
+        direction: Literal["asc", "desc"] = "asc",
+        offset: int = Query(0, ge=0),
+        limit: int = Query(100, ge=1, le=500),
+    ) -> dict[str, object]:
+        with Store(runtime) as store:
+            return store.list_counties(
+                search=search,
+                state=state,
+                min_score=min_score,
+                max_score=max_score,
+                include_unranked=include_unranked,
+                sort=sort,
+                direction=direction,
+                offset=offset,
+                limit=limit,
+            )
+
+    @app.get("/api/v1/counties/{stco_fips}", response_model=PlaceDetail)
+    def county(stco_fips: str) -> dict[str, object]:
+        with Store(runtime) as store:
+            return store.county_detail(store.resolve_county(stco_fips))
 
     @app.get("/api/v1/exports/places.csv")
     def csv_export() -> StreamingResponse:
@@ -231,6 +262,36 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
             build / "places.parquet",
             media_type="application/vnd.apache.parquet",
             filename="househunter-places.parquet",
+        )
+
+    @app.get("/api/v1/exports/counties.csv")
+    def counties_csv_export() -> StreamingResponse:
+        def rows():  # type: ignore[no-untyped-def]
+            with Store(runtime) as store:
+                cursor = store.connection.execute("SELECT * FROM counties ORDER BY place_id")
+                buffer = io.StringIO()
+                writer = csv.writer(buffer)
+                writer.writerow([column[0] for column in cursor.description])
+                yield buffer.getvalue()
+                while batch := cursor.fetchmany(1000):
+                    buffer.seek(0)
+                    buffer.truncate(0)
+                    writer.writerows(batch)
+                    yield buffer.getvalue()
+
+        return StreamingResponse(
+            rows(),
+            media_type="text/csv",
+            headers={"Content-Disposition": 'attachment; filename="househunter-counties.csv"'},
+        )
+
+    @app.get("/api/v1/exports/counties.parquet")
+    def counties_parquet_export() -> FileResponse:
+        build, _ = current_build(runtime)
+        return FileResponse(
+            build / "counties.parquet",
+            media_type="application/vnd.apache.parquet",
+            filename="househunter-counties.parquet",
         )
 
     static = static_directory()

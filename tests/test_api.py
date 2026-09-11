@@ -43,13 +43,33 @@ def test_api_filters_details_exports_and_token(
             "coverage_status",
             "fema_vintage",
             "census_vintage",
+            "county_fips",
+            "county_name",
         }
+        assert summary["county_fips"] == "01001"
+        assert summary["county_name"] == "Autauga"
         sources = client.get("/api/v1/sources").json()
-        assert [source["source"] for source in sources] == ["fema"]
+        assert [source["source"] for source in sources] == ["fema", "fema_counties"]
         unknown = client.get("/api/v1/places/99999999999")
         assert unknown.status_code == 200
         assert unknown.json()["summary"]["state"] == "??"
+        assert unknown.json()["summary"]["county_fips"] == "??"
+        county_rows = client.get("/api/v1/counties", params={"state": "AL"}).json()
+        assert [row["place_id"] for row in county_rows["items"]] == ["01001"]
+        assert county_rows["items"][0]["risk_score"] == 40.0
+        county_detail = client.get("/api/v1/counties/01001").json()
+        assert "ranked among counties" in county_detail["methodology_notice"]
+        assert county_detail["summary"]["risk_score"] == 40.0
+        filtered = client.get("/api/v1/places", params={"county": "01001"}).json()
+        assert [row["place_id"] for row in filtered["items"]] == [
+            "01001000100",
+            "01001000200",
+            "01001000300",
+        ]
+        assert client.get("/api/v1/places", params={"county": "0100"}).status_code == 400
+        assert client.get("/api/v1/places", params={"county": ""}).status_code == 200
         assert client.get("/api/v1/exports/places.parquet").status_code == 200
+        assert client.get("/api/v1/exports/counties.parquet").status_code == 200
         assert client.post("/api/v1/jobs", json={"kind": "build"}).status_code == 403
         accepted = client.post(
             "/api/v1/jobs",

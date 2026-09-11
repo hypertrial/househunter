@@ -117,9 +117,74 @@ def _validate_rows(rows: list[dict[str, Any]], source: dict[str, Any]) -> pl.Dat
     return frame
 
 
+def _validate_county_rows(rows: list[dict[str, Any]], source: dict[str, Any]) -> pl.DataFrame:
+    if any(not isinstance(row, dict) for row in rows):
+        raise SourceContractError("FEMA returned a malformed data row")
+    normalized = [
+        {
+            "county_fips": str(row.get("STCOFIPS", "")),
+            "county": "" if row.get("COUNTY") is None else str(row.get("COUNTY")),
+            "county_type": "" if row.get("COUNTYTYPE") is None else str(row.get("COUNTYTYPE")),
+            "state": "" if row.get("STATEABBRV") is None else str(row.get("STATEABBRV")),
+            "alr_npctl": row.get("ALR_NPCTL"),
+            "nri_version": row.get("NRI_VER"),
+        }
+        for row in rows
+    ]
+    try:
+        frame = pl.DataFrame(
+            normalized,
+            schema={
+                "county_fips": pl.String,
+                "county": pl.String,
+                "county_type": pl.String,
+                "state": pl.String,
+                "alr_npctl": pl.Float64,
+                "nri_version": pl.String,
+            },
+        ).sort("county_fips")
+    except (TypeError, ValueError, pl.exceptions.PolarsError) as exc:
+        raise SourceContractError(f"FEMA rows do not match the expected types: {exc}") from exc
+    if frame.height != source["expected_row_count"]:
+        raise SourceContractError(
+            f"FEMA row count changed: expected {source['expected_row_count']}, got {frame.height}"
+        )
+    if frame["county_fips"].n_unique() != frame.height:
+        raise SourceContractError("FEMA STCOFIPS values are not unique")
+    invalid_ids = frame.filter(~pl.col("county_fips").str.contains(r"^\d{5}$"))
+    if invalid_ids.height:
+        raise SourceContractError(f"FEMA contains {invalid_ids.height} invalid county identifiers")
+    invalid_values = frame.filter(
+        pl.col("alr_npctl").is_null()
+        | ~pl.col("alr_npctl").is_finite()
+        | (pl.col("alr_npctl") < 0)
+        | (pl.col("alr_npctl") > 100)
+    )
+    if invalid_values.height:
+        raise SourceContractError(f"FEMA contains {invalid_values.height} invalid ALR_NPCTL values")
+    versions = frame["nri_version"].unique().to_list()
+    if versions != [source["version"]]:
+        raise SourceContractError(f"Expected NRI_VER {source['version']!r}, got {versions!r}")
+    return frame
+
+
 def _logical_rows(frame: pl.DataFrame) -> list[list[Any]]:
     return [
         [row["tract_id"], row["alr_npctl"], row["nri_version"]]
+        for row in frame.iter_rows(named=True)
+    ]
+
+
+def _logical_county_rows(frame: pl.DataFrame) -> list[list[Any]]:
+    return [
+        [
+            row["county_fips"],
+            row["county"],
+            row["county_type"],
+            row["state"],
+            row["alr_npctl"],
+            row["nri_version"],
+        ]
         for row in frame.iter_rows(named=True)
     ]
 
@@ -153,6 +218,38 @@ def validate_cached_fema(path: Path, source: dict[str, Any]) -> tuple[pl.DataFra
     return frame, logical_sha
 
 
+def validate_cached_fema_counties(path: Path, source: dict[str, Any]) -> tuple[pl.DataFrame, str]:
+    try:
+        frame = pl.read_parquet(path)
+    except (OSError, pl.exceptions.PolarsError) as exc:
+        raise SourceContractError(f"Cannot read cached FEMA data: {exc}") from exc
+    required = {"county_fips", "county", "county_type", "state", "alr_npctl", "nri_version"}
+    missing = required - set(frame.columns)
+    if missing:
+        raise SourceContractError(
+            f"Cached FEMA data is missing columns: {', '.join(sorted(missing))}"
+        )
+    frame = _validate_county_rows(
+        [
+            {
+                "STCOFIPS": row["county_fips"],
+                "COUNTY": row["county"],
+                "COUNTYTYPE": row["county_type"],
+                "STATEABBRV": row["state"],
+                "ALR_NPCTL": row["alr_npctl"],
+                "NRI_VER": row["nri_version"],
+            }
+            for row in frame.iter_rows(named=True)
+        ],
+        source,
+    )
+    logical_sha = sha256_bytes(canonical_json(_logical_county_rows(frame)))
+    expected = source.get("canonical_sha256")
+    if expected and logical_sha != expected:
+        raise SourceContractError(f"FEMA checksum mismatch: expected {expected}, got {logical_sha}")
+    return frame, logical_sha
+
+
 def _write_source_manifest(
     paths: RuntimePaths,
     source: dict[str, Any],
@@ -160,11 +257,12 @@ def _write_source_manifest(
     logical_sha: str,
     rows: int,
     *,
+    source_key: str = "fema",
     retrieved_at: datetime | None = None,
 ) -> None:
     record = pl.DataFrame(
         {
-            "source": ["fema"],
+            "source": [source_key],
             "version": [source["version"]],
             "release": [source["release"]],
             "url": [source["item_url"]],
@@ -176,13 +274,29 @@ def _write_source_manifest(
             "terms_url": [source["terms_url"]],
         }
     )
+    if paths.source_manifest.is_file():
+        try:
+            existing = pl.read_parquet(paths.source_manifest)
+        except (OSError, pl.exceptions.PolarsError):
+            existing = record.clear()
+        else:
+            if "source" not in existing.columns:
+                existing = existing.with_columns(pl.lit("fema").alias("source"))
+            existing = existing.filter(pl.col("source") != source_key)
+            record = pl.concat([existing, record], how="diagonal")
     temporary = paths.source_manifest.with_suffix(".parquet.tmp")
     record.write_parquet(temporary, compression="zstd")
     os.replace(temporary, paths.source_manifest)
 
 
 def _validate_source_manifest(
-    path: Path, source: dict[str, Any], output: Path, logical_sha: str, rows: int
+    path: Path,
+    source: dict[str, Any],
+    output: Path,
+    logical_sha: str,
+    rows: int,
+    *,
+    source_key: str = "fema",
 ) -> datetime:
     try:
         manifest = pl.read_parquet(path)
@@ -205,11 +319,14 @@ def _validate_source_manifest(
         raise SourceContractError(
             f"FEMA source manifest is missing columns: {', '.join(sorted(missing))}"
         )
-    if manifest.height != 1:
-        raise SourceContractError("FEMA source manifest must contain exactly one row")
-    row = manifest.row(0, named=True)
+    if "source" not in manifest.columns:
+        raise SourceContractError("FEMA source manifest is missing columns: source")
+    matched = manifest.filter(pl.col("source") == source_key)
+    if matched.height != 1:
+        raise SourceContractError(f"FEMA source manifest must contain one {source_key} row")
+    row = matched.row(0, named=True)
     expected = {
-        "source": "fema",
+        "source": source_key,
         "version": source["version"],
         "release": source["release"],
         "url": source["item_url"],
@@ -228,9 +345,82 @@ def _validate_source_manifest(
     return retrieved_at
 
 
-def download_fema(
+def _fetch_layer_rows(
+    http: httpx.Client,
+    source: dict[str, Any],
+    *,
+    out_fields: str,
+    order_by: str,
+    pages: Path,
+    progress: Progress | None,
+    cancelled: Cancelled | None,
+    noun: str,
+) -> list[dict[str, Any]]:
+    page_size = max(1, _validate_layer(http, source))
+    rows: list[dict[str, Any]] = []
+    offset = 0
+    expected = int(source["expected_row_count"])
+    while offset < expected:
+        if cancelled and cancelled():
+            raise InterruptedError("FEMA download cancelled")
+        page_path = pages / f"{offset:06d}.json"
+        if page_path.is_file():
+            try:
+                payload = json.loads(page_path.read_text())
+            except (OSError, json.JSONDecodeError) as exc:
+                raise SourceContractError(f"Cached FEMA page is invalid: {page_path}") from exc
+            if not isinstance(payload, dict):
+                raise SourceContractError(f"Cached FEMA page is invalid: {page_path}")
+            page_rows = payload.get("features", [])
+            if not isinstance(page_rows, list):
+                raise SourceContractError(f"Cached FEMA page is invalid: {page_path}")
+        else:
+            payload = _request_json(
+                http,
+                f"{source['layer_url']}/query",
+                {
+                    "where": "1=1",
+                    "outFields": out_fields,
+                    "returnGeometry": "false",
+                    "orderByFields": order_by,
+                    "resultOffset": offset,
+                    "resultRecordCount": page_size,
+                    "f": "json",
+                },
+            )
+            features = payload.get("features", [])
+            if not isinstance(features, list) or any(
+                not isinstance(feature, dict) or not isinstance(feature.get("attributes"), dict)
+                for feature in features
+            ):
+                raise SourceContractError("FEMA returned a malformed feature page")
+            attributes = [feature["attributes"] for feature in features]
+            canonical_page = canonical_json({"features": attributes})
+            temporary_page = page_path.with_suffix(".json.tmp")
+            temporary_page.write_bytes(canonical_page)
+            os.replace(temporary_page, page_path)
+            page_rows = attributes
+        if not page_rows:
+            break
+        rows.extend(page_rows)
+        offset += len(page_rows)
+        if progress:
+            progress(min(90, int(90 * len(rows) / expected)), f"Downloaded {len(rows):,} {noun}")
+    return rows
+
+
+def _download_source(
     paths: RuntimePaths,
     *,
+    source_key: str,
+    output: Path,
+    pages_name: str,
+    out_fields: str,
+    order_by: str,
+    noun: str,
+    validate_cache: Callable[[Path, dict[str, Any]], tuple[pl.DataFrame, str]],
+    validate_rows: Callable[[list[dict[str, Any]], dict[str, Any]], pl.DataFrame],
+    logical_sha_for: Callable[[pl.DataFrame], str],
     client: httpx.Client | None = None,
     progress: Progress | None = None,
     cancelled: Cancelled | None = None,
@@ -239,18 +429,22 @@ def download_fema(
     paths.ensure()
     if cancelled and cancelled():
         raise InterruptedError("FEMA download cancelled")
-    source = load_config()["fema"]
-    output = paths.cache / "fema_nri_tracts.parquet"
+    source = load_config()[source_key]
     if output.is_file() and not force:
         try:
-            frame, logical_sha = validate_cached_fema(output, source)
+            frame, logical_sha = validate_cache(output, source)
         except SourceContractError:
             if progress:
                 progress(0, "Cached FEMA data failed verification; refreshing")
         else:
             try:
                 _validate_source_manifest(
-                    paths.source_manifest, source, output, logical_sha, frame.height
+                    paths.source_manifest,
+                    source,
+                    output,
+                    logical_sha,
+                    frame.height,
+                    source_key=source_key,
                 )
             except SourceContractError:
                 cache_timestamp = datetime.fromtimestamp(output.stat().st_mtime, UTC)
@@ -260,6 +454,7 @@ def download_fema(
                     output,
                     logical_sha,
                     frame.height,
+                    source_key=source_key,
                     retrieved_at=cache_timestamp,
                 )
             if progress:
@@ -268,64 +463,21 @@ def download_fema(
 
     owns_client = client is None
     http = client or httpx.Client(timeout=httpx.Timeout(30, connect=15), follow_redirects=True)
-    pages = paths.cache / f"fema-pages-{source['item_modified_ms']}"
+    pages = paths.cache / f"{pages_name}-{source['item_modified_ms']}"
     pages.mkdir(exist_ok=True)
     try:
-        page_size = max(1, _validate_layer(http, source))
-        rows: list[dict[str, Any]] = []
-        offset = 0
-        expected = int(source["expected_row_count"])
-        while offset < expected:
-            if cancelled and cancelled():
-                raise InterruptedError("FEMA download cancelled")
-            page_path = pages / f"{offset:06d}.json"
-            if page_path.is_file():
-                try:
-                    payload = json.loads(page_path.read_text())
-                except (OSError, json.JSONDecodeError) as exc:
-                    raise SourceContractError(f"Cached FEMA page is invalid: {page_path}") from exc
-                if not isinstance(payload, dict):
-                    raise SourceContractError(f"Cached FEMA page is invalid: {page_path}")
-                page_rows = payload.get("features", [])
-                if not isinstance(page_rows, list):
-                    raise SourceContractError(f"Cached FEMA page is invalid: {page_path}")
-            else:
-                payload = _request_json(
-                    http,
-                    f"{source['layer_url']}/query",
-                    {
-                        "where": "1=1",
-                        "outFields": "TRACTFIPS,ALR_NPCTL,NRI_VER",
-                        "returnGeometry": "false",
-                        "orderByFields": "TRACTFIPS",
-                        "resultOffset": offset,
-                        "resultRecordCount": page_size,
-                        "f": "json",
-                    },
-                )
-                features = payload.get("features", [])
-                if not isinstance(features, list) or any(
-                    not isinstance(feature, dict) or not isinstance(feature.get("attributes"), dict)
-                    for feature in features
-                ):
-                    raise SourceContractError("FEMA returned a malformed feature page")
-                attributes = [feature["attributes"] for feature in features]
-                canonical_page = canonical_json({"features": attributes})
-                temporary_page = page_path.with_suffix(".json.tmp")
-                temporary_page.write_bytes(canonical_page)
-                os.replace(temporary_page, page_path)
-                page_rows = attributes
-            if not page_rows:
-                break
-            rows.extend(page_rows)
-            offset += len(page_rows)
-            if progress:
-                progress(
-                    min(90, int(90 * len(rows) / expected)), f"Downloaded {len(rows):,} tracts"
-                )
-
-        frame = _validate_rows(rows, source)
-        logical_sha = sha256_bytes(canonical_json(_logical_rows(frame)))
+        rows = _fetch_layer_rows(
+            http,
+            source,
+            out_fields=out_fields,
+            order_by=order_by,
+            pages=pages,
+            progress=progress,
+            cancelled=cancelled,
+            noun=noun,
+        )
+        frame = validate_rows(rows, source)
+        logical_sha = logical_sha_for(frame)
         configured_sha = source.get("canonical_sha256")
         if configured_sha and logical_sha != configured_sha:
             raise SourceContractError(
@@ -336,7 +488,9 @@ def download_fema(
         temporary = output.with_suffix(".parquet.tmp")
         frame.write_parquet(temporary, compression="zstd", statistics=True)
         os.replace(temporary, output)
-        _write_source_manifest(paths, source, output, logical_sha, frame.height)
+        _write_source_manifest(
+            paths, source, output, logical_sha, frame.height, source_key=source_key
+        )
         if progress:
             progress(100, "FEMA download verified")
         return output
@@ -345,20 +499,83 @@ def download_fema(
             http.close()
 
 
-def source_status(paths: RuntimePaths) -> SourceStatus:
-    source = load_config()["fema"]
-    cached = paths.cache / "fema_nri_tracts.parquet"
+def download_fema(
+    paths: RuntimePaths,
+    *,
+    client: httpx.Client | None = None,
+    progress: Progress | None = None,
+    cancelled: Cancelled | None = None,
+    force: bool = False,
+) -> Path:
+    return _download_source(
+        paths,
+        source_key="fema",
+        output=paths.cache / "fema_nri_tracts.parquet",
+        pages_name="fema-pages",
+        out_fields="TRACTFIPS,ALR_NPCTL,NRI_VER",
+        order_by="TRACTFIPS",
+        noun="tracts",
+        validate_cache=validate_cached_fema,
+        validate_rows=_validate_rows,
+        logical_sha_for=lambda frame: sha256_bytes(canonical_json(_logical_rows(frame))),
+        client=client,
+        progress=progress,
+        cancelled=cancelled,
+        force=force,
+    )
+
+
+def download_fema_counties(
+    paths: RuntimePaths,
+    *,
+    client: httpx.Client | None = None,
+    progress: Progress | None = None,
+    cancelled: Cancelled | None = None,
+    force: bool = False,
+) -> Path:
+    return _download_source(
+        paths,
+        source_key="fema_counties",
+        output=paths.cache / "fema_nri_counties.parquet",
+        pages_name="fema-county-pages",
+        out_fields="STCOFIPS,COUNTY,COUNTYTYPE,STATEABBRV,ALR_NPCTL,NRI_VER",
+        order_by="STCOFIPS",
+        noun="counties",
+        validate_cache=validate_cached_fema_counties,
+        validate_rows=_validate_county_rows,
+        logical_sha_for=lambda frame: sha256_bytes(canonical_json(_logical_county_rows(frame))),
+        client=client,
+        progress=progress,
+        cancelled=cancelled,
+        force=force,
+    )
+
+
+def _source_status(
+    paths: RuntimePaths,
+    *,
+    source_key: str,
+    cache_name: str,
+    validate_cache: Callable[[Path, dict[str, Any]], tuple[pl.DataFrame, str]],
+) -> SourceStatus:
+    source = load_config()[source_key]
+    cached = paths.cache / cache_name
     if not cached.is_file():
-        return SourceStatus(source="fema", version=source["version"], cached=False)
+        return SourceStatus(source=source_key, version=source["version"], cached=False)
     try:
-        frame, digest = validate_cached_fema(cached, source)
+        frame, digest = validate_cache(cached, source)
         retrieved = None
         if paths.source_manifest.is_file():
             retrieved = _validate_source_manifest(
-                paths.source_manifest, source, cached, digest, frame.height
+                paths.source_manifest,
+                source,
+                cached,
+                digest,
+                frame.height,
+                source_key=source_key,
             )
         return SourceStatus(
-            source="fema",
+            source=source_key,
             version=source["version"],
             cached=True,
             sha256=digest,
@@ -366,4 +583,27 @@ def source_status(paths: RuntimePaths) -> SourceStatus:
             retrieved_at=retrieved,
         )
     except SourceContractError as exc:
-        return SourceStatus(source="fema", version=source["version"], cached=True, error=str(exc))
+        return SourceStatus(
+            source=source_key, version=source["version"], cached=True, error=str(exc)
+        )
+
+
+def source_status(paths: RuntimePaths) -> SourceStatus:
+    return _source_status(
+        paths,
+        source_key="fema",
+        cache_name="fema_nri_tracts.parquet",
+        validate_cache=validate_cached_fema,
+    )
+
+
+def source_statuses(paths: RuntimePaths) -> list[SourceStatus]:
+    return [
+        source_status(paths),
+        _source_status(
+            paths,
+            source_key="fema_counties",
+            cache_name="fema_nri_counties.parquet",
+            validate_cache=validate_cached_fema_counties,
+        ),
+    ]

@@ -14,11 +14,12 @@ import uvicorn
 from .api import create_app
 from .build import build_snapshot
 from .config import RuntimePaths
-from .download import download_fema
+from .download import download_fema, download_fema_counties
 from .errors import HouseHunterError
 from .locking import exclusive_lock
 
 Progress = Callable[[int, str], None]
+Cancelled = Callable[[], bool]
 Download = Callable[..., Path]
 Build = Callable[..., Path]
 Serve = Callable[..., None]
@@ -46,15 +47,30 @@ def prepare_runtime(
     *,
     state: str | None = None,
     download: Download = download_fema,
+    download_counties: Download = download_fema_counties,
     build: Build = build_snapshot,
     progress: Progress | None = None,
+    cancelled: Cancelled | None = None,
+    hold_lock: bool = True,
 ) -> Path:
     paths.ensure()
-    with exclusive_lock(paths.job_lock):
-        download(paths, progress=_scale_progress(progress, 0, 55))
+
+    def _run() -> Path:
+        download(paths, progress=_scale_progress(progress, 0, 40), cancelled=cancelled)
+        download_counties(paths, progress=_scale_progress(progress, 40, 55), cancelled=cancelled)
         if progress:
             progress(55, "Publishing ranking snapshot")
-        return build(paths, state=state, progress=_scale_progress(progress, 55, 99))
+        return build(
+            paths,
+            state=state,
+            progress=_scale_progress(progress, 55, 99),
+            cancelled=cancelled,
+        )
+
+    if hold_lock:
+        with exclusive_lock(paths.job_lock):
+            return _run()
+    return _run()
 
 
 def serve_app(
@@ -78,6 +94,7 @@ def run(
     skip_prepare: bool = False,
     paths: RuntimePaths | None = None,
     download: Download = download_fema,
+    download_counties: Download = download_fema_counties,
     build: Build = build_snapshot,
     serve: Serve = serve_app,
     progress: Progress | None = _progress,
@@ -90,6 +107,7 @@ def run(
             runtime,
             state=state,
             download=download,
+            download_counties=download_counties,
             build=build,
             progress=progress,
         )

@@ -63,9 +63,21 @@ STATE_BY_FIPS: dict[str, str] = {
 
 KNOWN_STATES = frozenset(STATE_BY_FIPS.values())
 UNKNOWN_STATE = "??"
+UNKNOWN_COUNTY_FIPS = "??"
+UNKNOWN_COUNTY_NAME = "Unknown"
 
 
 def state_for_tract(tract_id: str) -> str:
     if len(tract_id) < 2:
         return UNKNOWN_STATE
     return STATE_BY_FIPS.get(tract_id[:2], UNKNOWN_STATE)
+
+
+def county_display_name(name: str | None, county_type: str | None) -> str:
+    label = (name or "").strip()
+    if not label:
+        return UNKNOWN_COUNTY_NAME
+    kind = (county_type or "").strip()
+    if not kind or kind.lower() == "county":
+        return label
+    return f"{label} {kind}"

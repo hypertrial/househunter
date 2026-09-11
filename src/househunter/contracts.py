@@ -19,6 +19,8 @@ class PlaceSummary(BaseModel):
     coverage_status: CoverageStatus
     fema_vintage: str
     census_vintage: str
+    county_fips: str
+    county_name: str
 
 
 class TractContribution(BaseModel):
@@ -70,4 +72,11 @@ METHODOLOGY_NOTICE = (
     "HouseHunter ranks FEMA National Risk Index tracts by their published ALR_NPCTL "
     "percentile. It is not FEMA's broader Risk Index, a property assessment, loss "
     "probability, insurance quote, or prediction."
+)
+
+COUNTY_METHODOLOGY_NOTICE = (
+    "HouseHunter ranks FEMA National Risk Index counties by their published county-level "
+    "ALR_NPCTL percentile, ranked among counties. This is not an average of tract "
+    "percentiles, FEMA's broader Risk Index, a property assessment, loss probability, "
+    "insurance quote, or prediction."
 )

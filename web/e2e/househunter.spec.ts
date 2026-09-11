@@ -11,6 +11,23 @@ const summary = {
   coverage_status: "complete",
   fema_vintage: "December 2025",
   census_vintage: "n/a",
+  county_fips: "08013",
+  county_name: "Boulder",
+};
+
+const countySummary = {
+  place_id: "08013",
+  name: "Boulder",
+  state: "CO",
+  place_type: "county",
+  population_2020: 0,
+  housing_units_2020: 0,
+  risk_score: 18.5,
+  coverage_status: "complete",
+  fema_vintage: "December 2025",
+  census_vintage: "n/a",
+  county_fips: "08013",
+  county_name: "Boulder",
 };
 
 test("prepares, ranks, inspects, and exports", async ({ page }) => {
@@ -66,6 +83,18 @@ test("prepares, ranks, inspects, and exports", async ({ page }) => {
         expect(url.searchParams.get("offset")).toBe("0");
       }
       await route.fulfill({ json: { total: 1, items: [summary] } });
+    } else if (url.pathname === "/api/v1/counties") {
+      await route.fulfill({ json: { total: 1, items: [countySummary] } });
+    } else if (url.pathname === "/api/v1/counties/08013") {
+      await route.fulfill({
+        json: {
+          summary: countySummary,
+          total_weighted_housing: 0,
+          coverage_ratio: 1,
+          methodology_notice: "HouseHunter ranks FEMA counties by published county ALR_NPCTL.",
+          tract_contributions: [],
+        },
+      });
     } else if (url.pathname === "/api/v1/places/08013012101") {
       await route.fulfill({
         json: {
@@ -84,7 +113,7 @@ test("prepares, ranks, inspects, and exports", async ({ page }) => {
           ],
         },
       });
-    } else if (url.pathname.endsWith("places.csv")) {
+    } else if (url.pathname.endsWith("places.csv") || url.pathname.endsWith("counties.csv")) {
       await route.fulfill({
         body: "place_id,name\n08013012101,08013012101\n",
         headers: {
@@ -101,11 +130,19 @@ test("prepares, ranks, inspects, and exports", async ({ page }) => {
   await page.getByRole("button", { name: "Prepare national data" }).click();
   await expect(page.getByRole("heading", { name: "Lower risk, plainly ranked." })).toBeVisible();
   await expect(page.getByLabel("State")).toHaveValue("");
+  await expect(page.getByLabel("County")).toBeDisabled();
   await page.getByLabel("State").selectOption("CO");
   await expect(page.getByLabel("State")).toHaveValue("CO");
+  await expect(page.getByLabel("County")).toBeEnabled();
+  await page.getByLabel("County").selectOption("08013");
   await page.getByRole("row", { name: /08013012101/ }).click();
   await expect(page.getByRole("heading", { name: "08013012101, CO" })).toBeVisible();
   await page.getByRole("button", { name: "Close tract detail" }).first().click();
+  await page.getByRole("button", { name: "Counties" }).click();
+  await expect(page.getByText(/ranked among counties/i)).toBeVisible();
+  await page.getByRole("row", { name: /Boulder/ }).click();
+  await expect(page.getByRole("heading", { name: "Boulder, CO" })).toBeVisible();
+  await page.getByRole("button", { name: "Close county detail" }).first().click();
   const downloaded = page.waitForEvent("download");
   await page.getByRole("link", { name: "CSV" }).click();
   await expect(await downloaded).toBeTruthy();

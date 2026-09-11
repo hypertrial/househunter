@@ -32,9 +32,29 @@ def test_build_is_content_addressed_and_queryable(
         ]
         assert rows["items"][0]["risk_score"] == 10.0
         assert rows["items"][0]["state"] == "AL"
+        assert rows["items"][0]["county_fips"] == "01001"
+        assert rows["items"][0]["county_name"] == "Autauga"
         detail = store.place_detail("01001000100")
         assert detail["coverage_ratio"] == 1.0
         assert detail["tract_contributions"][0]["fema_percentile"] == 10.0
+        counties = store.list_counties(limit=10)
+        assert [item["place_id"] for item in counties["items"]] == ["02001", "01001"]
+        assert counties["items"][0]["risk_score"] == 12.0
+        assert counties["items"][0]["name"] == "Aleutians East Borough"
+        assert counties["items"][1]["risk_score"] == 40.0
+        assert counties["items"][1]["risk_score"] != pytest.approx((10.0 + 50.0 + 80.0) / 3)
+        filtered = store.list_places(county="01001")
+        assert [item["place_id"] for item in filtered["items"]] == [
+            "01001000100",
+            "01001000200",
+            "01001000300",
+        ]
+        named = store.list_places(search="Autauga")
+        assert {item["place_id"] for item in named["items"]} == {
+            "01001000100",
+            "01001000200",
+            "01001000300",
+        }
 
 
 def test_state_build_records_scope(fixture_environment: tuple[RuntimePaths, object]) -> None:
@@ -43,8 +63,10 @@ def test_state_build_records_scope(fixture_environment: tuple[RuntimePaths, obje
     metadata = json.loads((output / "build.json").read_text())
     assert metadata["scope"] == {"kind": "state", "state": "AL"}
     assert metadata["place_count"] == 3
+    assert metadata["county_count"] == 1
     with Store(paths) as store:
         assert all(item["state"] == "AL" for item in store.list_places(limit=10)["items"])
+        assert [item["place_id"] for item in store.list_counties()["items"]] == ["01001"]
 
 
 def test_unknown_fips_prefix_is_retained(
@@ -56,6 +78,8 @@ def test_unknown_fips_prefix_is_retained(
         detail = store.place_detail("99999999999")
         assert detail["summary"]["state"] == "??"
         assert detail["summary"]["risk_score"] == 99.0
+        assert detail["summary"]["county_fips"] == "??"
+        assert detail["summary"]["county_name"] == "Unknown"
 
 
 def test_failed_build_preserves_current_pointer(
@@ -69,6 +93,15 @@ def test_failed_build_preserves_current_pointer(
         build_snapshot(paths)
     assert paths.current.read_text() == pointer
     assert published.is_dir()
+
+
+def test_missing_county_cache_fails_build(
+    fixture_environment: tuple[RuntimePaths, object],
+) -> None:
+    paths, _ = fixture_environment
+    (paths.cache / "fema_nri_counties.parquet").unlink()
+    with pytest.raises(HouseHunterError, match="FEMA county data is not cached"):
+        build_snapshot(paths)
 
 
 def test_existing_build_rejects_a_corrupt_database(
@@ -101,6 +134,19 @@ def test_legacy_build_schema_is_not_reused(
     metadata_path = output / "build.json"
     metadata = json.loads(metadata_path.read_text())
     metadata["schema_version"] = 2
+    metadata_path.write_text(json.dumps(metadata))
+    with pytest.raises(HouseHunterError, match="immutable build failed validation"):
+        build_snapshot(paths)
+
+
+def test_schema_3_build_is_not_reused(
+    fixture_environment: tuple[RuntimePaths, object],
+) -> None:
+    paths, _ = fixture_environment
+    output = build_snapshot(paths)
+    metadata_path = output / "build.json"
+    metadata = json.loads(metadata_path.read_text())
+    metadata["schema_version"] = 3
     metadata_path.write_text(json.dumps(metadata))
     with pytest.raises(HouseHunterError, match="immutable build failed validation"):
         build_snapshot(paths)
