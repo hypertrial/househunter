@@ -20,7 +20,6 @@ from .contracts import JobStatus, PlaceDetail, PlacePage, SourceStatus
 from .download import source_status
 from .errors import AmbiguousPlaceError, BuildNotFoundError, HouseHunterError
 from .jobs import JobKind, JobManager
-from .reference import reference_asset_status
 from .store import Store, current_build
 
 
@@ -130,13 +129,12 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
 
     @app.get("/api/v1/meta")
     def meta() -> dict[str, object]:
-        references_present, references_error = reference_asset_status()
         result: dict[str, object] = {
             "app_version": __version__,
             "mutation_token": token,
-            "methodology": "housing-weighted mean of FEMA tract-level ALR_NPCTL",
-            "reference_assets_ready": references_present and references_error is None,
-            "reference_assets_error": references_error,
+            "methodology": "FEMA tract-level ALR_NPCTL",
+            "reference_assets_ready": True,
+            "reference_assets_error": None,
         }
         try:
             _, metadata = current_build(runtime)
@@ -148,16 +146,7 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
     @app.get("/api/v1/sources", response_model=list[SourceStatus])
     def sources() -> list[dict[str, object]]:
         fema = source_status(runtime).model_dump(mode="json")
-        census_cached, census_error = reference_asset_status()
-        return [
-            fema,
-            {
-                "source": "census_2020",
-                "version": "2020",
-                "cached": census_cached,
-                "error": census_error,
-            },
-        ]
+        return [fema]
 
     @app.post(
         "/api/v1/jobs",

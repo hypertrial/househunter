@@ -21,13 +21,17 @@ def test_api_filters_details_exports_and_token(
         assert "frame-ancestors 'none'" in meta_response.headers["content-security-policy"]
         meta = meta_response.json()
         assert meta["reference_assets_ready"] is True
-        assert meta["reference_assets_error"] is None
-        response = client.get("/api/v1/places", params={"state": "AL", "min_population": 300})
+        assert meta["methodology"] == "FEMA tract-level ALR_NPCTL"
+        response = client.get("/api/v1/places", params={"state": "AL"})
         assert response.status_code == 200
-        assert [row["name"] for row in response.json()["items"]] == ["Alpha"]
-        summary = client.get("/api/v1/places/0100001").json()["summary"]
-        assert summary["risk_score"] == 22.0
-        assert summary["population_2020"] == 1000
+        assert [row["place_id"] for row in response.json()["items"]] == [
+            "01001000100",
+            "01001000200",
+            "01001000300",
+        ]
+        summary = client.get("/api/v1/places/01001000100").json()["summary"]
+        assert summary["risk_score"] == 10.0
+        assert summary["place_type"] == "tract"
         assert set(summary) == {
             "place_id",
             "name",
@@ -41,10 +45,10 @@ def test_api_filters_details_exports_and_token(
             "census_vintage",
         }
         sources = client.get("/api/v1/sources").json()
-        assert [source["source"] for source in sources] == ["fema", "census_2020"]
-        unmatched = client.get("/api/v1/places/0200002")
-        assert unmatched.status_code == 200
-        assert unmatched.json()["tract_contributions"][0]["tract_id"] is None
+        assert [source["source"] for source in sources] == ["fema"]
+        unknown = client.get("/api/v1/places/99999999999")
+        assert unknown.status_code == 200
+        assert unknown.json()["summary"]["state"] == "??"
         assert client.get("/api/v1/exports/places.parquet").status_code == 200
         assert client.post("/api/v1/jobs", json={"kind": "build"}).status_code == 403
         accepted = client.post(

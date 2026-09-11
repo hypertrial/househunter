@@ -67,7 +67,7 @@ class JobStatus(BaseModel):
 
 
 METHODOLOGY_NOTICE = (
-    "HouseHunter aggregates FEMA tract ALR_NPCTL percentiles using 2020 Census housing "
-    "weights. It is not FEMA's broader Risk Index, a FEMA-published Place percentile, "
-    "property assessment, loss probability, insurance quote, or prediction."
+    "HouseHunter ranks FEMA National Risk Index tracts by their published ALR_NPCTL "
+    "percentile. It is not FEMA's broader Risk Index, a property assessment, loss "
+    "probability, insurance quote, or prediction."
 )

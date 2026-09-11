@@ -36,7 +36,7 @@ describe("ranking workflow", () => {
               build_id: "fixture",
               place_count: 1,
               ranked_place_count: 1,
-              source_vintages: { fema: "December 2025", census: "2020" },
+              source_vintages: { fema: "December 2025" },
               scope: { kind: "national", state: null },
             },
           }
@@ -44,12 +44,12 @@ describe("ranking workflow", () => {
             items: [
               {
                 ...place,
-                place_id: "0100001",
-                name: "Alpha",
+                place_id: "01001000100",
+                name: "01001000100",
                 state: "AL",
-                place_type: "city",
-                population_2020: 90,
-                housing_units_2020: 40,
+                place_type: "tract",
+                population_2020: 0,
+                housing_units_2020: 0,
               },
             ],
             total: 1,

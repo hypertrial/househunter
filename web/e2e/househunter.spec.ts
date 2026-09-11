@@ -1,16 +1,16 @@
 import { expect, test } from "@playwright/test";
 
 const summary = {
-  place_id: "0807850",
-  name: "Boulder",
+  place_id: "08013012101",
+  name: "08013012101",
   state: "CO",
-  place_type: "city",
-  population_2020: 108250,
-  housing_units_2020: 48000,
+  place_type: "tract",
+  population_2020: 0,
+  housing_units_2020: 0,
   risk_score: 21.25,
   coverage_status: "complete",
   fema_vintage: "December 2025",
-  census_vintage: "2020 Census",
+  census_vintage: "n/a",
 };
 
 test("prepares, ranks, inspects, and exports", async ({ page }) => {
@@ -31,7 +31,6 @@ test("prepares, ranks, inspects, and exports", async ({ page }) => {
                 ranked_place_count: 1,
                 source_vintages: {
                   fema: "December 2025",
-                  census: "2020",
                 },
                 scope: { kind: "national", state: null },
               }
@@ -63,17 +62,17 @@ test("prepares, ranks, inspects, and exports", async ({ page }) => {
       });
     } else if (url.pathname === "/api/v1/places") {
       await route.fulfill({ json: { total: 1, items: [summary] } });
-    } else if (url.pathname === "/api/v1/places/0807850") {
+    } else if (url.pathname === "/api/v1/places/08013012101") {
       await route.fulfill({
         json: {
           summary,
-          total_weighted_housing: 48000,
+          total_weighted_housing: 0,
           coverage_ratio: 1,
-          methodology_notice: "HouseHunter aggregation, not a property assessment.",
+          methodology_notice: "HouseHunter ranks FEMA tracts by published ALR_NPCTL.",
           tract_contributions: [
             {
               tract_id: "08013012101",
-              housing_units: 48000,
+              housing_units: 0,
               housing_weight: 1,
               fema_percentile: 21.25,
               weighted_contribution: 21.25,
@@ -83,7 +82,7 @@ test("prepares, ranks, inspects, and exports", async ({ page }) => {
       });
     } else if (url.pathname.endsWith("places.csv")) {
       await route.fulfill({
-        body: "place_id,name\n0807850,Boulder\n",
+        body: "place_id,name\n08013012101,08013012101\n",
         headers: {
           "Content-Type": "text/csv",
           "Content-Disposition": "attachment; filename=places.csv",
@@ -97,9 +96,9 @@ test("prepares, ranks, inspects, and exports", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Prepare national data" }).click();
   await expect(page.getByRole("heading", { name: "Lower risk, plainly ranked." })).toBeVisible();
-  await page.getByRole("row", { name: /Boulder/ }).click();
-  await expect(page.getByRole("heading", { name: "Boulder, CO" })).toBeVisible();
-  await page.getByRole("button", { name: "Close place detail" }).first().click();
+  await page.getByRole("row", { name: /08013012101/ }).click();
+  await expect(page.getByRole("heading", { name: "08013012101, CO" })).toBeVisible();
+  await page.getByRole("button", { name: "Close tract detail" }).first().click();
   const downloaded = page.waitForEvent("download");
   await page.getByRole("link", { name: "CSV" }).click();
   await expect(await downloaded).toBeTruthy();

@@ -10,14 +10,16 @@ from pathlib import Path
 import duckdb
 import polars as pl
 
-from .config import RuntimePaths, canonical_json, load_config, sha256_bytes, sha256_file
+from .config import RuntimePaths, canonical_json, load_config, sha256_bytes
 from .contracts import METHODOLOGY_NOTICE
 from .download import validate_cached_fema
 from .errors import HouseHunterError
-from .reference import reference_assets, validate_reference_assets
+from .geography import KNOWN_STATES, STATE_BY_FIPS, UNKNOWN_STATE
 
 Progress = Callable[[int, str], None]
 Cancelled = Callable[[], bool]
+
+BUILD_SCHEMA_VERSION = 3
 
 
 def logical_checksum(frame: pl.DataFrame, columns: list[str], sort_by: list[str]) -> str:
@@ -31,66 +33,41 @@ def _cancelled(cancelled: Cancelled | None) -> None:
 
 
 def compute_scores(
-    places: pl.DataFrame,
-    weights: pl.DataFrame,
     fema: pl.DataFrame,
     *,
     fema_vintage: str = "December 2025",
-    census_vintage: str = "2020 Census",
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
-    contributions = (
-        weights.join(fema.select("tract_id", "alr_npctl"), on="tract_id", how="left")
-        .with_columns(
-            (pl.col("housing_weight") * pl.col("alr_npctl")).alias("weighted_contribution")
-        )
-        .sort(["place_id", "weighted_contribution", "tract_id"], descending=[False, True, False])
-    )
-    aggregates = contributions.group_by("place_id").agg(
-        pl.col("housing_units").sum().alias("total_weighted_housing"),
-        pl.col("housing_units")
-        .filter(pl.col("alr_npctl").is_not_null())
-        .sum()
-        .alias("covered_housing"),
-        pl.col("weighted_contribution").sum().alias("risk_score_candidate"),
-        pl.col("tract_id").is_null().any().alias("has_unmatched_geography"),
-        pl.col("alr_npctl").is_null().any().alias("has_missing_fema"),
-    )
-    result = (
-        places.join(aggregates, on="place_id", how="left")
-        .with_columns(
-            pl.col("total_weighted_housing").fill_null(0),
-            pl.col("covered_housing").fill_null(0),
-            pl.col("has_unmatched_geography").fill_null(False),
-            pl.col("has_missing_fema").fill_null(False),
-        )
-        .with_columns(
-            pl.when(pl.col("housing_units_2020") <= 0)
-            .then(pl.lit("zero_housing"))
-            .when(pl.col("has_unmatched_geography"))
-            .then(pl.lit("unmatched_geography"))
-            .when(pl.col("has_missing_fema") | (pl.col("total_weighted_housing") <= 0))
-            .then(pl.lit("missing_fema"))
-            .otherwise(pl.lit("complete"))
-            .alias("coverage_status"),
-            pl.when(pl.col("total_weighted_housing") > 0)
-            .then(pl.col("covered_housing") / pl.col("total_weighted_housing"))
-            .otherwise(pl.lit(0.0))
-            .alias("coverage_ratio"),
-        )
-        .with_columns(
-            pl.when(pl.col("coverage_status") == "complete")
-            .then(pl.col("risk_score_candidate"))
-            .otherwise(pl.lit(None, dtype=pl.Float64))
-            .alias("risk_score")
-        )
-        .with_columns(
-            pl.lit(fema_vintage).alias("fema_vintage"),
-            pl.lit(census_vintage).alias("census_vintage"),
-        )
-        .drop("risk_score_candidate", "has_unmatched_geography", "has_missing_fema")
-        .sort("place_id")
-    )
-    return result, contributions
+    state = pl.col("tract_id").str.slice(0, 2).replace_strict(STATE_BY_FIPS, default=UNKNOWN_STATE)
+    complete = pl.col("alr_npctl").is_not_null()
+    scored = fema.select(
+        pl.col("tract_id").alias("place_id"),
+        pl.col("tract_id").alias("name"),
+        state.alias("state"),
+        pl.lit("tract").alias("place_type"),
+        pl.lit(0, dtype=pl.Int64).alias("population_2020"),
+        pl.lit(0, dtype=pl.Int64).alias("housing_units_2020"),
+        pl.when(complete).then(pl.col("alr_npctl")).otherwise(pl.lit(None, dtype=pl.Float64)).alias(
+            "risk_score"
+        ),
+        pl.when(complete).then(pl.lit("complete")).otherwise(pl.lit("missing_fema")).alias(
+            "coverage_status"
+        ),
+        pl.when(complete).then(pl.lit(1.0)).otherwise(pl.lit(0.0)).alias("coverage_ratio"),
+        pl.lit(0, dtype=pl.Int64).alias("total_weighted_housing"),
+        pl.lit(fema_vintage).alias("fema_vintage"),
+        pl.lit("n/a").alias("census_vintage"),
+    ).sort("place_id")
+    contributions = fema.select(
+        pl.col("tract_id").alias("place_id"),
+        pl.col("tract_id"),
+        pl.lit(0, dtype=pl.Int64).alias("housing_units"),
+        pl.lit(1.0).alias("housing_weight"),
+        pl.col("alr_npctl"),
+        pl.when(complete).then(pl.col("alr_npctl")).otherwise(pl.lit(None, dtype=pl.Float64)).alias(
+            "weighted_contribution"
+        ),
+    ).sort(["place_id", "tract_id"])
+    return scored, contributions
 
 
 def _write_duckdb(
@@ -125,7 +102,7 @@ def _existing_build_is_valid(target: Path, build_id: str, input_hashes: dict[str
     if not (target / "househunter.duckdb").is_file():
         return False
     if (
-        metadata.get("schema_version") != 2
+        metadata.get("schema_version") != BUILD_SCHEMA_VERSION
         or metadata.get("build_id") != build_id
         or metadata.get("input_checksums") != input_hashes
     ):
@@ -175,26 +152,15 @@ def build_snapshot(
 ) -> Path:
     paths.ensure()
     state = state.upper() if state else None
-    assets = reference_assets()
-    if progress:
-        progress(5, "Validating Census reference assets")
-    places, weights = validate_reference_assets(assets)
-    if state:
-        if state not in places["state"].unique().to_list():
-            raise HouseHunterError(f"Unknown state abbreviation: {state}")
-        places = places.filter(pl.col("state") == state)
-        weights = weights.join(places.select("place_id"), on="place_id", how="semi")
+    if state and state not in KNOWN_STATES:
+        raise HouseHunterError(f"Unknown state abbreviation: {state}")
     _cancelled(cancelled)
     fema_path = paths.cache / "fema_nri_tracts.parquet"
     if not fema_path.is_file():
         raise HouseHunterError("FEMA data is not cached; run `househunter download --source fema`")
     source = load_config()["fema"]
     fema, fema_sha = validate_cached_fema(fema_path, source)
-    input_hashes = {
-        "fema": fema_sha,
-        "places_2020": sha256_file(assets.places),
-        "place_tract_weights_2020": sha256_file(assets.weights),
-    }
+    input_hashes = {"fema": fema_sha}
     scope = state or "national"
     build_key = sha256_bytes(canonical_json({"scope": scope, "inputs": input_hashes}))[:16]
     build_id = f"{scope.lower()}-{build_key}"
@@ -209,13 +175,18 @@ def build_snapshot(
             progress(100, "Using verified existing build")
         return target
     if progress:
-        progress(25, "Computing housing-weighted scores")
-    scored, contributions = compute_scores(places, weights, fema, fema_vintage=source["version"])
+        progress(25, "Ranking FEMA tracts")
+    scored, contributions = compute_scores(fema, fema_vintage=source["version"])
+    if state:
+        scored = scored.filter(pl.col("state") == state)
+        contributions = contributions.join(scored.select("place_id"), on="place_id", how="semi")
+        if scored.height == 0:
+            raise HouseHunterError(f"Unknown state abbreviation: {state}")
     _cancelled(cancelled)
     complete = scored.filter(pl.col("coverage_status") == "complete")
     if complete.filter(pl.col("coverage_ratio") != 1.0).height:
         raise HouseHunterError(
-            "Internal validation failed: ranked Places do not have full coverage"
+            "Internal validation failed: ranked tracts do not have full coverage"
         )
     place_columns = scored.columns
     contribution_columns = contributions.columns
@@ -226,7 +197,7 @@ def build_snapshot(
         ),
     }
     metadata: dict[str, object] = {
-        "schema_version": 2,
+        "schema_version": BUILD_SCHEMA_VERSION,
         "build_id": build_id,
         "scope": {"kind": "state" if state else "national", "state": state},
         "created_at": datetime.now(UTC).isoformat(),
@@ -235,7 +206,6 @@ def build_snapshot(
         "source_vintages": {
             "fema": source["version"],
             "fema_release": source["release"],
-            "census": "2020",
         },
         "input_checksums": input_hashes,
         "logical_checksums": checksums,
@@ -269,7 +239,12 @@ def build_snapshot(
 
 
 def _publish_current(paths: RuntimePaths, target: Path, build_id: str, scope: str) -> None:
-    pointer = {"schema_version": 2, "build_id": build_id, "scope": scope, "path": str(target)}
+    pointer = {
+        "schema_version": BUILD_SCHEMA_VERSION,
+        "build_id": build_id,
+        "scope": scope,
+        "path": str(target),
+    }
     temporary = paths.current.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(pointer, indent=2, sort_keys=True) + "\n")
     os.replace(temporary, paths.current)

@@ -1,6 +1,6 @@
 # Release-generated assets
 
-HouseHunter releases place `places_2020.parquet`, `place_tract_weights_2020.parquet`,
-`reference_metadata.json`, and `reference_validation.json` here. Generate and validate them
-with the documented maintainer scripts. `./scripts/run-app` writes a local ignored copy
-under `data/reference-assets` instead of this directory. Raw Census inputs never belong here.
+This directory may still hold historical Place parquet files from earlier
+HouseHunter releases. Runtime ranking uses FEMA tract `ALR_NPCTL` only and does
+not read these files. `./scripts/run-app` does not generate Census assets here or
+under `data/`.

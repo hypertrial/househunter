@@ -1,12 +1,10 @@
 # HouseHunter project notes
 
-HouseHunter is a local-only macOS application that ranks every 2020 U.S. Census
-Place in the 50 states and District of Columbia by the 2020-housing-weighted mean
-of FEMA tract-level `ALR_NPCTL`. Lower is better.
+HouseHunter is a local-only macOS application that ranks FEMA National Risk Index
+tracts by the published tract-level `ALR_NPCTL`. Lower is better.
 
-A HouseHunter score is an aggregation created by this project. It is **not** a
-FEMA-published Place percentile, a property-level assessment, a loss
-probability, an insurance quote, or a prediction.
+A HouseHunter score is FEMA's published tract percentile. It is **not** a
+property-level assessment, a loss probability, an insurance quote, or a prediction.
 
 Use the `househunter-engineering` workspace from `.pad.toml`. Follow `AGENTS.md`
 and the local `pad-engineering` skill. Keep ticket bodies, exports, credentials,
@@ -21,6 +19,8 @@ and local Pad state out of this public repository.
   `web/` source. Node is not required to *use* the app, but it is required to
   change the UI.
 - Never commit credentials or fetched FEMA payloads.
+- Runtime ranking uses FEMA only. Do not contact census.gov from `run-app`,
+  prepare, or build.
 
 ## Verification
 

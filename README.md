@@ -1,13 +1,13 @@
 # HouseHunter
 
-HouseHunter is a local-only macOS application that ranks every 2020 U.S. Census Place in
-the 50 states and District of Columbia by one transparent measure: the 2020-housing-weighted
-mean of FEMA tract-level `ALR_NPCTL`. Lower is better.
+HouseHunter is a local-only macOS application that ranks FEMA National Risk Index
+tracts by one transparent measure: each tract's published `ALR_NPCTL`. Lower is
+better.
 
-`ALR_NPCTL` is FEMA's national percentile for composite Expected Annual Loss Rate, distinct
-from FEMA's broader Risk Index. A HouseHunter score is an aggregation created by this
-project. It is **not** a FEMA-published Place percentile, a property-level assessment, a loss
-probability, an insurance quote, or a prediction.
+`ALR_NPCTL` is FEMA's national percentile for composite Expected Annual Loss Rate,
+distinct from FEMA's broader Risk Index. A HouseHunter score is that published
+tract percentile. It is **not** a property-level assessment, a loss probability,
+an insurance quote, or a prediction.
 
 ## Quick start
 
@@ -19,11 +19,9 @@ interface is committed, so Node is not required to use the app. No API keys are 
 ```
 
 That installs Python dependencies, downloads the pinned FEMA source if needed,
-generates a local Census reference copy under `data/` when packaged assets are
-missing, publishes a snapshot, and starts the loopback app. Flags: `--port`,
-`--no-open`, `--state`, `--skip-prepare`. `--state` only scopes the snapshot;
-missing Census assets are still generated nationally and the first run can take
-a long time.
+publishes a snapshot, and starts the loopback app. Flags: `--port`, `--no-open`,
+`--state`, `--skip-prepare`. `--state` only scopes the snapshot. The first run
+downloads FEMA once and reuses the local cache afterward.
 
 The same steps can be run individually:
 
@@ -32,18 +30,14 @@ uv sync
 uv run househunter sources
 uv run househunter download --source fema
 uv run househunter build
-uv run househunter rank --state CO --limit 20 --min-population 1000
-uv run househunter inspect "Boulder, CO"
+uv run househunter rank --state CO --limit 20
+uv run househunter inspect 08013012101
 uv run househunter app
 ```
 
 Runtime data is written beneath `data/` by default. Set `HOUSEHUNTER_DATA_DIR` to use a
 different local directory. The server listens only on `127.0.0.1`; it has no telemetry,
 accounts, hosted database, or external browser requests.
-
-Release archives include the generated Census reference assets. `./scripts/run-app`
-can generate a local ignored copy when those files are missing. For release
-regeneration, follow [DATA_SOURCES.md](DATA_SOURCES.md).
 
 ## Commands
 
@@ -52,8 +46,8 @@ regeneration, follow [DATA_SOURCES.md](DATA_SOURCES.md).
 househunter sources [--json]
 househunter download [--source fema]
 househunter build [--state CO]
-househunter rank [--state CO] [--limit N] [--min-population N] [--include-unranked]
-househunter inspect "Place, ST" | PLACE_ID
+househunter rank [--state CO] [--limit N] [--include-unranked]
+househunter inspect TRACT_FIPS
 househunter export --format parquet|csv [--output PATH]
 househunter app [--port PORT] [--no-open]
 ```
@@ -65,19 +59,18 @@ managed cache and build paths so exports cannot overwrite immutable runtime data
 
 ## Method
 
-For Place `p`, HouseHunter calculates:
+For tract `t`, HouseHunter uses:
 
 ```text
-risk_score[p] = sum(housing_units[p,t] * ALR_NPCTL[t])
-                / sum(housing_units[p,t])
+risk_score[t] = ALR_NPCTL[t]
 ```
 
-Every positive-housing Place/tract intersection must have a valid FEMA value. HouseHunter
-does not impute, re-percentile, winsorize, or renormalize around missing tracts. Unrankable
-Places remain visible as `zero_housing`, `missing_fema`, or `unmatched_geography`.
+State is derived from the first two digits of `TRACTFIPS` using a bundled FIPS map.
+HouseHunter does not impute, re-percentile, winsorize, or renormalize around missing
+tracts. Unrankable rows remain visible as `missing_fema`.
 
-Read [DATA_SOURCES.md](DATA_SOURCES.md) for source provenance, release maintenance, the
-Connecticut reconciliation, and limitations.
+Read [DATA_SOURCES.md](DATA_SOURCES.md) for source provenance, release maintenance, and
+limitations.
 
 ## Development
 

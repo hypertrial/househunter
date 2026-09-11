@@ -10,7 +10,7 @@ from househunter.config import RuntimePaths
 
 
 def test_cli_build_rank_inspect_export_and_sources(
-    fixture_environment: tuple[RuntimePaths, object], tmp_path: Path
+    fixture_environment: tuple[RuntimePaths, Path], tmp_path: Path
 ) -> None:
     _, _ = fixture_environment
     runner = CliRunner()
@@ -19,12 +19,12 @@ def test_cli_build_rank_inspect_export_and_sources(
 
     ranked = runner.invoke(app, ["rank", "--state", "AL", "--limit", "2"])
     assert ranked.exit_code == 0
-    assert "Alpha" in ranked.output
-    assert "22.0" in ranked.output
+    assert "01001000100" in ranked.output
+    assert "10.0" in ranked.output
 
-    inspected = runner.invoke(app, ["inspect", "Alpha, AL"])
+    inspected = runner.invoke(app, ["inspect", "01001000100"])
     assert inspected.exit_code == 0
-    assert json.loads(inspected.output)["summary"]["place_id"] == "0100001"
+    assert json.loads(inspected.output)["summary"]["place_id"] == "01001000100"
 
     output = tmp_path / "places.csv"
     exported = runner.invoke(app, ["export", "--format", "csv", "--output", str(output)])
@@ -35,8 +35,4 @@ def test_cli_build_rank_inspect_export_and_sources(
     assert sources.exit_code == 0
     source_status = json.loads(sources.output)
     assert source_status["fema"]["version"] == "December 2025"
-    assert source_status["census"] == {
-        "decennial_vintage": 2020,
-        "error": None,
-        "packaged": True,
-    }
+    assert "census" not in source_status

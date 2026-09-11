@@ -7,6 +7,7 @@ from typing import Any
 
 import duckdb
 
+from .build import BUILD_SCHEMA_VERSION
 from .config import RuntimePaths
 from .contracts import METHODOLOGY_NOTICE
 from .errors import AmbiguousPlaceError, BuildNotFoundError, HouseHunterError
@@ -52,8 +53,8 @@ def current_build(paths: RuntimePaths) -> tuple[Path, dict[str, Any]]:
     except (OSError, json.JSONDecodeError) as exc:
         raise BuildNotFoundError(f"Build metadata is invalid: {exc}") from exc
     if (
-        pointer.get("schema_version") != 2
-        or metadata.get("schema_version") != 2
+        pointer.get("schema_version") != BUILD_SCHEMA_VERSION
+        or metadata.get("schema_version") != BUILD_SCHEMA_VERSION
         or metadata.get("build_id") != pointer.get("build_id")
     ):
         raise BuildNotFoundError("Current pointer and build metadata disagree")
@@ -137,12 +138,12 @@ class Store:
         return {"items": items, "total": total, "offset": offset, "limit": limit}
 
     def resolve_place(self, query: str) -> str:
-        if len(query) == 7 and query.isdigit():
+        if len(query) == 11 and query.isdigit():
             exists = self.connection.execute(
                 "SELECT 1 FROM places WHERE place_id = ?", [query]
             ).fetchone()
             if not exists:
-                raise HouseHunterError(f"Place not found: {query}")
+                raise HouseHunterError(f"Tract not found: {query}")
             return query
         name, separator, state = query.rpartition(",")
         if separator:
@@ -158,7 +159,7 @@ class Store:
                 [query.strip()],
             ).fetchall()
         if not rows:
-            raise HouseHunterError(f"Place not found: {query}")
+            raise HouseHunterError(f"Tract not found: {query}")
         if len(rows) > 1:
             raise AmbiguousPlaceError(
                 query,
@@ -174,7 +175,7 @@ class Store:
         )
         row = cursor.fetchone()
         if row is None:
-            raise HouseHunterError(f"Place not found: {place_id}")
+            raise HouseHunterError(f"Tract not found: {place_id}")
         columns = [item[0] for item in cursor.description]
         record = dict(zip(columns, row, strict=True))
         summary = {key: record[key] for key in SUMMARY_KEYS}
