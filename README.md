@@ -15,6 +15,19 @@ HouseHunter requires Python 3.12+ and [`uv`](https://docs.astral.sh/uv/). The co
 interface is committed, so Node is not required to use the app. No API keys are required.
 
 ```console
+./scripts/run-app
+```
+
+That installs Python dependencies, downloads the pinned FEMA source if needed,
+generates a local Census reference copy under `data/` when packaged assets are
+missing, publishes a snapshot, and starts the loopback app. Flags: `--port`,
+`--no-open`, `--state`, `--skip-prepare`. `--state` only scopes the snapshot;
+missing Census assets are still generated nationally and the first run can take
+a long time.
+
+The same steps can be run individually:
+
+```console
 uv sync
 uv run househunter sources
 uv run househunter download --source fema
@@ -28,13 +41,14 @@ Runtime data is written beneath `data/` by default. Set `HOUSEHUNTER_DATA_DIR` t
 different local directory. The server listens only on `127.0.0.1`; it has no telemetry,
 accounts, hosted database, or external browser requests.
 
-Release archives include the generated Census reference assets. When working from a source
-checkout, run `uv run househunter sources`; if it reports `assets missing`, complete the
-maintainer workflow in [DATA_SOURCES.md](DATA_SOURCES.md) before building a snapshot.
+Release archives include the generated Census reference assets. `./scripts/run-app`
+can generate a local ignored copy when those files are missing. For release
+regeneration, follow [DATA_SOURCES.md](DATA_SOURCES.md).
 
 ## Commands
 
 ```text
+./scripts/run-app [--port PORT] [--no-open] [--state CO] [--skip-prepare]
 househunter sources [--json]
 househunter download [--source fema]
 househunter build [--state CO]

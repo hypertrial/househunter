@@ -33,7 +33,11 @@ Ordinary setup uses two compact release assets packaged with HouseHunter:
 - `places_2020.parquet`: canonical name, state, type, population, and housing for every
   incorporated Place and CDP in the 50 states and DC.
 - `place_tract_weights_2020.parquet`: positive-housing Place/tract intersections and weights.
-The maintainer-only `scripts/generate_reference_assets.py` streams official 2020
+
+A source checkout may omit those files. `./scripts/run-app` then generates a local copy
+under ignored `data/reference-assets` after downloading FEMA. That copy is for local use
+only and is not a release. The maintainer-only `scripts/generate_reference_assets.py`
+streams official 2020
 population-and-housing block DBFs and joins the official incorporated-Place/CDP Block
 Assignment File. It aggregates `HOUSING20` at `(place_id, tract_id)` and normalizes only after
 discarding zero-housing intersections. Place names/types come from the 2020 Place DBF.
