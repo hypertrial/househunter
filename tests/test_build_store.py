@@ -126,40 +126,16 @@ def test_export_cannot_overwrite_managed_data(
     assert protected.read_bytes() == before
 
 
+@pytest.mark.parametrize("schema_version", [2, 3, 4])
 def test_legacy_build_schema_is_not_reused(
     fixture_environment: tuple[RuntimePaths, object],
+    schema_version: int,
 ) -> None:
     paths, _ = fixture_environment
     output = build_snapshot(paths)
     metadata_path = output / "build.json"
     metadata = json.loads(metadata_path.read_text())
-    metadata["schema_version"] = 2
-    metadata_path.write_text(json.dumps(metadata))
-    with pytest.raises(HouseHunterError, match="immutable build failed validation"):
-        build_snapshot(paths)
-
-
-def test_schema_3_build_is_not_reused(
-    fixture_environment: tuple[RuntimePaths, object],
-) -> None:
-    paths, _ = fixture_environment
-    output = build_snapshot(paths)
-    metadata_path = output / "build.json"
-    metadata = json.loads(metadata_path.read_text())
-    metadata["schema_version"] = 3
-    metadata_path.write_text(json.dumps(metadata))
-    with pytest.raises(HouseHunterError, match="immutable build failed validation"):
-        build_snapshot(paths)
-
-
-def test_schema_4_build_is_not_reused(
-    fixture_environment: tuple[RuntimePaths, object],
-) -> None:
-    paths, _ = fixture_environment
-    output = build_snapshot(paths)
-    metadata_path = output / "build.json"
-    metadata = json.loads(metadata_path.read_text())
-    metadata["schema_version"] = 4
+    metadata["schema_version"] = schema_version
     metadata_path.write_text(json.dumps(metadata))
     with pytest.raises(HouseHunterError, match="immutable build failed validation"):
         build_snapshot(paths)

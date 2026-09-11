@@ -631,18 +631,14 @@ def _source_status(
         )
 
 
-def source_status(paths: RuntimePaths) -> SourceStatus:
-    return _source_status(
-        paths,
-        source_key="fema",
-        cache_name="fema_nri_tracts.parquet",
-        validate_cache=validate_cached_fema,
-    )
-
-
 def source_statuses(paths: RuntimePaths) -> list[SourceStatus]:
     return [
-        source_status(paths),
+        _source_status(
+            paths,
+            source_key="fema",
+            cache_name="fema_nri_tracts.parquet",
+            validate_cache=validate_cached_fema,
+        ),
         _source_status(
             paths,
             source_key="fema_counties",

@@ -45,7 +45,6 @@ def test_download_paginates_and_reuses_verified_cache(tmp_path: Path, monkeypatc
             ),
             "canonical_sha256": None,
         },
-        "census": {},
     }
     config_path = tmp_path / "sources.yml"
     config_path.write_text(yaml.safe_dump(config))
@@ -124,7 +123,6 @@ def test_county_download_paginates_and_reuses_verified_cache(
             ),
             "canonical_sha256": None,
         },
-        "census": {},
     }
     config_path = tmp_path / "sources.yml"
     config_path.write_text(yaml.safe_dump(config))
@@ -307,7 +305,7 @@ def test_cancelled_download_does_not_make_network_requests(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config_path = tmp_path / "sources.yml"
-    config_path.write_text("schema_version: 1\nfema: {}\ncensus: {}\n")
+    config_path.write_text("schema_version: 1\nfema: {}\n")
     monkeypatch.setenv("HOUSEHUNTER_CONFIG", str(config_path))
 
     def handler(_: httpx.Request) -> httpx.Response:

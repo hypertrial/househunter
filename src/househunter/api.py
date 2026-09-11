@@ -234,11 +234,10 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
         with Store(runtime) as store:
             return store.county_detail(store.resolve_county(stco_fips))
 
-    @app.get("/api/v1/exports/places.csv")
-    def csv_export() -> StreamingResponse:
+    def csv_export_for(table: Literal["places", "counties"], filename: str) -> StreamingResponse:
         def rows():  # type: ignore[no-untyped-def]
             with Store(runtime) as store:
-                cursor = store.connection.execute("SELECT * FROM places ORDER BY place_id")
+                cursor = store.connection.execute(f"SELECT * FROM {table} ORDER BY place_id")
                 buffer = io.StringIO()
                 writer = csv.writer(buffer)
                 writer.writerow([column[0] for column in cursor.description])
@@ -252,47 +251,32 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
         return StreamingResponse(
             rows(),
             media_type="text/csv",
-            headers={"Content-Disposition": 'attachment; filename="househunter-places.csv"'},
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
+
+    def parquet_export_for(name: Literal["places", "counties"], filename: str) -> FileResponse:
+        build, _ = current_build(runtime)
+        return FileResponse(
+            build / f"{name}.parquet",
+            media_type="application/vnd.apache.parquet",
+            filename=filename,
+        )
+
+    @app.get("/api/v1/exports/places.csv")
+    def csv_export() -> StreamingResponse:
+        return csv_export_for("places", "househunter-places.csv")
 
     @app.get("/api/v1/exports/places.parquet")
     def parquet_export() -> FileResponse:
-        build, _ = current_build(runtime)
-        return FileResponse(
-            build / "places.parquet",
-            media_type="application/vnd.apache.parquet",
-            filename="househunter-places.parquet",
-        )
+        return parquet_export_for("places", "househunter-places.parquet")
 
     @app.get("/api/v1/exports/counties.csv")
     def counties_csv_export() -> StreamingResponse:
-        def rows():  # type: ignore[no-untyped-def]
-            with Store(runtime) as store:
-                cursor = store.connection.execute("SELECT * FROM counties ORDER BY place_id")
-                buffer = io.StringIO()
-                writer = csv.writer(buffer)
-                writer.writerow([column[0] for column in cursor.description])
-                yield buffer.getvalue()
-                while batch := cursor.fetchmany(1000):
-                    buffer.seek(0)
-                    buffer.truncate(0)
-                    writer.writerows(batch)
-                    yield buffer.getvalue()
-
-        return StreamingResponse(
-            rows(),
-            media_type="text/csv",
-            headers={"Content-Disposition": 'attachment; filename="househunter-counties.csv"'},
-        )
+        return csv_export_for("counties", "househunter-counties.csv")
 
     @app.get("/api/v1/exports/counties.parquet")
     def counties_parquet_export() -> FileResponse:
-        build, _ = current_build(runtime)
-        return FileResponse(
-            build / "counties.parquet",
-            media_type="application/vnd.apache.parquet",
-            filename="househunter-counties.parquet",
-        )
+        return parquet_export_for("counties", "househunter-counties.parquet")
 
     static = static_directory()
     if static.is_dir():

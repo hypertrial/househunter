@@ -72,6 +72,3 @@ fema_counties:
     WFIR_ALR_NPCTL: esriFieldTypeDouble
     WNTW_ALR_NPCTL: esriFieldTypeDouble
   schema_fingerprint: 557599b73577df1deedfb5946323d0760d200634e5f1ab315c58b703fb1f4b99
-census:
-  decennial_vintage: 2020
-  terms_url: https://www.census.gov/about/policies/open-gov/open-data.html
