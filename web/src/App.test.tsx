@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import App, { mapFocusTarget, SCORE_BANDS, scoreBand, scoreLabel, scoreToneClass, sortedHazardPercentiles } from "./App";
-import { readHash } from "./map";
+import App, { mapFocusTarget, mapTooltipClass, SCORE_BANDS, scoreBand, scoreLabel, scoreToneClass, sortedHazardPercentiles } from "./App";
+import { readHash, relativeTransform } from "./map";
 import type { HazardPercentile, PlaceSummary } from "./types";
 
 const tract: PlaceSummary = {
@@ -21,6 +21,7 @@ const manifest = {
   files: [
     { key: "states-national", filename: "states.hash.topojson.gz", level: "state", lod: "national", jurisdiction: null, feature_count: 1, bounds: [-106, 38, -105, 39], compressed_size: 1, sha256: "x" },
     { key: "tracts-national", filename: "tracts.hash.topojson.gz", level: "tract", lod: "national", jurisdiction: null, feature_count: 1, bounds: [-106, 38, -105, 39], compressed_size: 1, sha256: "x" },
+    { key: "tracts-co", filename: "tracts-co.hash.topojson.gz", level: "tract", lod: "detail", jurisdiction: "CO", feature_count: 1, bounds: [-106, 38, -105, 39], compressed_size: 1, sha256: "x" },
     { key: "counties-national", filename: "counties.hash.topojson.gz", level: "county", lod: "national", jurisdiction: null, feature_count: 1, bounds: [-106, 38, -105, 39], compressed_size: 1, sha256: "x" },
   ],
 };
@@ -39,7 +40,7 @@ function mockFetch(
       const state = buildScope.state || "CO";
       return response(topology(state, state, state === "AL" ? [-88, 30] : [-106, 38]));
     }
-    if (url.pathname.includes("tracts.hash")) return response(topology(tract.place_id));
+    if (url.pathname.includes("tracts.hash") || url.pathname.includes("tracts-co.hash")) return response(topology(tract.place_id));
     if (url.pathname.includes("counties.hash")) return response(topology(county.place_id));
     if (url.pathname === "/api/v1/map/scores") return response({ schema_version: 1, build_id: "fixture", level: url.searchParams.get("level"), scope: buildScope, rows: [{ place_id: url.searchParams.get("level") === "county" ? county.place_id : tract.place_id, risk_score: url.searchParams.get("level") === "county" ? county.risk_score : tract.risk_score, coverage_status: "complete" }] });
     if (url.pathname === "/api/v1/places" || url.pathname === "/api/v1/counties") return response({ total: 1, items: [url.pathname.includes("counties") ? county : tract] });
@@ -49,14 +50,24 @@ function mockFetch(
   });
 }
 
+const canvasContexts = new Map<HTMLCanvasElement, CanvasRenderingContext2D>();
+
 beforeEach(() => {
+  canvasContexts.clear();
   window.history.replaceState(null, "", "/");
   class Observer { observe() { /* test stub */ } disconnect() { /* test stub */ } }
   vi.stubGlobal("ResizeObserver", Observer);
   vi.spyOn(HTMLCanvasElement.prototype, "getBoundingClientRect").mockReturnValue({ x: 0, y: 0, top: 0, left: 0, right: 1000, bottom: 700, width: 1000, height: 700, toJSON: () => ({}) });
-  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({
-    setTransform: vi.fn(), clearRect: vi.fn(), fillRect: vi.fn(), drawImage: vi.fn(), beginPath: vi.fn(), moveTo: vi.fn(), lineTo: vi.fn(), closePath: vi.fn(), arc: vi.fn(), fill: vi.fn(), stroke: vi.fn(), fillText: vi.fn(), createPattern: vi.fn(() => "pattern"), getImageData: vi.fn(() => ({ data: new Uint8ClampedArray([0, 0, 0, 0]) })),
-  } as unknown as CanvasRenderingContext2D);
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(function (this: HTMLCanvasElement) {
+    let context = canvasContexts.get(this);
+    if (!context) {
+      context = {
+        setTransform: vi.fn(), clearRect: vi.fn(), fillRect: vi.fn(), drawImage: vi.fn(), beginPath: vi.fn(), moveTo: vi.fn(), lineTo: vi.fn(), closePath: vi.fn(), arc: vi.fn(), fill: vi.fn(), stroke: vi.fn(), fillText: vi.fn(), createPattern: vi.fn(() => "pattern"), getImageData: vi.fn(() => ({ data: new Uint8ClampedArray([0, 0, 0, 0]) })),
+      } as unknown as CanvasRenderingContext2D;
+      canvasContexts.set(this, context);
+    }
+    return context;
+  });
 });
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
@@ -79,6 +90,46 @@ describe("score semantics", () => {
     expect(readHash("#level=tract&state=ZZ&county=08013&place=08013012101")).toMatchObject({ state: "", county: "", place: "08013012101" });
     expect(readHash("#level=tract&state=CO&county=01001&place=01001000100")).toMatchObject({ state: "CO", county: "", place: "" });
   });
+  it("computes the gesture delta from the last committed camera", () => {
+    expect(relativeTransform(
+      { k: 6, x: -900, y: -420 },
+      { k: 3, x: -300, y: -120 },
+    )).toEqual({ k: 2, x: -300, y: -180 });
+  });
+  it("positions hover previews away from viewport edges", () => {
+    expect(mapTooltipClass(100, 100, 1000, 700)).toBe("map-tooltip");
+    expect(mapTooltipClass(900, 100, 1000, 700)).toBe("map-tooltip tooltip-left");
+    expect(mapTooltipClass(900, 600, 1000, 700)).toBe("map-tooltip tooltip-left tooltip-up");
+  });
+});
+
+it("rasterizes settled vectors before atomically committing the active zoom frame", async () => {
+  vi.stubGlobal("fetch", mockFetch());
+  render(<App />);
+  await screen.findByText("HouseHunter");
+  await screen.findAllByText("1 tracts interactive");
+  const zoomIn = screen.getByRole("button", { name: "Zoom in" });
+  for (let index = 0; index < 4; index += 1) fireEvent.click(zoomIn);
+  await waitFor(() => {
+    const visibleCanvas = document.querySelector<HTMLCanvasElement>("canvas.risk-canvas");
+    const visibleContext = visibleCanvas ? canvasContexts.get(visibleCanvas) : null;
+    expect(visibleContext).toBeTruthy();
+    const visibleDraws = vi.mocked(visibleContext!.drawImage).mock.calls;
+    const committedIndex = [...visibleDraws.keys()].reverse().find((index) => {
+      const sourceContext = canvasContexts.get(visibleDraws[index][0] as HTMLCanvasElement);
+      return sourceContext && vi.mocked(sourceContext.setTransform).mock.calls.some(([scale]) => Number(scale) > 4);
+    });
+    if (committedIndex === undefined) throw new Error("The settled high-zoom buffer has not committed yet");
+    const committedContext = canvasContexts.get(visibleDraws[committedIndex][0] as HTMLCanvasElement)!;
+    const paintOrders = [
+      ...vi.mocked(committedContext.fill).mock.invocationCallOrder,
+      ...vi.mocked(committedContext.stroke).mock.invocationCallOrder,
+      ...vi.mocked(committedContext.fillText).mock.invocationCallOrder,
+    ];
+    expect(paintOrders.length).toBeGreaterThan(0);
+    expect(vi.mocked(visibleContext!.drawImage).mock.invocationCallOrder[committedIndex])
+      .toBeGreaterThan(Math.max(...paintOrders));
+  });
 });
 
 it("renders the map as the only primary UI with all retained controls", async () => {
@@ -88,10 +139,40 @@ it("renders the map as the only primary UI with all retained controls", async ()
   expect(screen.getByRole("button", { name: "Counties" })).toBeVisible();
   expect(screen.getByRole("button", { name: "Lowest / Highest" })).toBeVisible();
   expect(screen.getByRole("button", { name: /Filters/ })).toBeVisible();
+  expect(screen.getByRole("button", { name: "Search" })).toHaveAttribute("aria-expanded", "false");
+  expect(screen.getByRole("button", { name: "More" })).toHaveAttribute("aria-expanded", "false");
+  fireEvent.click(screen.getByRole("button", { name: "More" }));
+  expect(screen.getByRole("button", { name: "More" })).toHaveAttribute("aria-expanded", "true");
+  expect(screen.getByRole("region", { name: "More actions" })).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "More" }));
   expect(screen.getByLabelText("Score color scale, lower is better")).toHaveTextContent("not property-level risk");
   expect(screen.getByRole("img", { name: /focusable USA tract risk map/i })).toBeVisible();
   expect(screen.queryByRole("table")).not.toBeInTheDocument();
   expect(screen.queryByText("Next")).not.toBeInTheDocument();
+});
+
+it("shows fresh loading feedback and does not refetch when closing extremes", async () => {
+  const baseFetch = mockFetch();
+  let extremeRequests = 0;
+  vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+    const url = new URL(String(input), "http://127.0.0.1");
+    if (url.pathname === "/api/v1/places" && url.searchParams.get("sort") === "risk_score") {
+      extremeRequests += 1;
+      return new Promise<Response>(() => undefined);
+    }
+    return baseFetch(input);
+  }));
+  render(<App />);
+  await screen.findByText("HouseHunter");
+  const trigger = screen.getByRole("button", { name: "Lowest / Highest" });
+  fireEvent.click(trigger);
+  expect(screen.getByRole("status")).toHaveTextContent("Loading lowest and highest");
+  expect(screen.queryByRole("heading", { name: "Lowest" })).not.toBeInTheDocument();
+  expect(extremeRequests).toBe(2);
+  fireEvent.click(trigger);
+  expect(screen.queryByRole("region", { name: "Lowest and highest risk" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  expect(extremeRequests).toBe(2);
 });
 
 it("applies state and county filters and changes geography levels", async () => {

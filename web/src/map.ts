@@ -58,6 +58,21 @@ export interface CameraState {
   z: number;
 }
 
+interface TransformLike {
+  k: number;
+  x: number;
+  y: number;
+}
+
+export function relativeTransform(current: TransformLike, rendered: TransformLike): TransformLike {
+  const k = current.k / rendered.k;
+  return {
+    k,
+    x: current.x - k * rendered.x,
+    y: current.y - k * rendered.y,
+  };
+}
+
 export function cameraFromTransform(transform: ZoomTransform, width: number, height: number): CameraState {
   return {
     cx: Math.max(0, Math.min(1, (width / 2 - transform.x) / transform.k / width)),

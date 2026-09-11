@@ -1,5 +1,6 @@
 .DS_Store
 .env
+.cursor/
 .venv/
 .pytest_cache/
 .ruff_cache/
@@ -10,4 +11,3 @@ web/node_modules/
 web/coverage/
 web/playwright-report/
 web/test-results/
-

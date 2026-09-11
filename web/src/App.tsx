@@ -27,6 +27,10 @@ export function mapFocusTarget(place: string, state: string): Omit<FocusTarget, 
   return place ? { kind: "place", id: place } : state ? { kind: "state", id: state } : null;
 }
 
+export function mapTooltipClass(x: number, y: number, width: number, height: number): string {
+  return `map-tooltip${x > width / 2 ? " tooltip-left" : ""}${y > height / 2 ? " tooltip-up" : ""}`;
+}
+
 async function json<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, options);
   const body = await response.json();
@@ -120,10 +124,12 @@ function DetailDrawer({ detail, loading, error, level, onClose, onRetry, onViewT
   </aside>;
 }
 
-type Overlay = "filters" | "extremes" | "exports" | "info" | "search" | null;
+type Overlay = "filters" | "extremes" | "exports" | "info" | "more" | "search" | null;
 
 function ResultGroup({ title, items, onChoose }: { title: string; items: PlaceSummary[]; onChoose: (item: PlaceSummary) => void }) {
-  return <section><h3>{title}</h3><ol className="result-list">{items.map((item) => <li key={item.place_id}><button onClick={() => onChoose(item)}><span><strong>{item.name}</strong><small>{item.state} · {item.place_id}</small></span><b>{scoreLabel(item)}</b></button></li>)}</ol></section>;
+  return <section><h3>{title}</h3>{items.length
+    ? <ol className="result-list">{items.map((item) => <li key={item.place_id}><button onClick={() => onChoose(item)}><span><strong>{item.name}</strong><small>{item.state} · {item.place_id}</small></span><b>{scoreLabel(item)}</b></button></li>)}</ol>
+    : <p className="empty-copy">No ranked geographies</p>}</section>;
 }
 
 function Workspace({ meta }: { meta: Meta }) {
@@ -158,6 +164,7 @@ function Workspace({ meta }: { meta: Meta }) {
   const [draftUnranked, setDraftUnranked] = useState(showUnranked);
   const [lowest, setLowest] = useState<PlaceSummary[]>([]);
   const [highest, setHighest] = useState<PlaceSummary[]>([]);
+  const [extremesLoading, setExtremesLoading] = useState(false);
   const camera = useRef<CameraState>(initial.camera);
   const [cameraTarget, setCameraTarget] = useState<(CameraState & { nonce: number }) | undefined>();
   const firstSemantic = useRef(true);
@@ -167,6 +174,7 @@ function Workspace({ meta }: { meta: Meta }) {
   const restoreOverlayFocus = useRef(true);
   const previousOverlay = useRef<Overlay>(null);
   const detailTrigger = useRef<HTMLElement | null>(null);
+  const extremesGeneration = useRef(0);
 
   function toggleOverlay(next: Exclude<Overlay, null>, trigger: HTMLElement) {
     overlayTrigger.current = trigger;
@@ -268,14 +276,20 @@ function Workspace({ meta }: { meta: Meta }) {
   }, [closeDetail, overlay, selected]);
 
   async function openExtremes(trigger: HTMLElement) {
-    toggleOverlay("extremes", trigger); setSearchError("");
+    if (overlay === "extremes") { extremesGeneration.current += 1; setExtremesLoading(false); setOverlay(null); return; }
+    const generation = ++extremesGeneration.current;
+    toggleOverlay("extremes", trigger); setSearchError(""); setLowest([]); setHighest([]); setExtremesLoading(true);
     const base = new URLSearchParams({ limit: "5", sort: "risk_score" });
     if (state) base.set("state", state); if (level === "tract" && county) base.set("county", county);
     const path = level === "tract" ? "/api/v1/places" : "/api/v1/counties";
     try {
       const [low, high] = await Promise.all([json<{ items: PlaceSummary[] }>(`${path}?${base}&direction=asc`), json<{ items: PlaceSummary[] }>(`${path}?${base}&direction=desc`)]);
-      setLowest(low.items); setHighest(high.items);
-    } catch (caught) { setSearchError((caught as Error).message); }
+      if (generation === extremesGeneration.current) { setLowest(low.items); setHighest(high.items); }
+    } catch (caught) {
+      if (generation === extremesGeneration.current) setSearchError((caught as Error).message);
+    } finally {
+      if (generation === extremesGeneration.current) setExtremesLoading(false);
+    }
   }
   function choose(place: PlaceSummary) { detailTrigger.current = overlayTrigger.current; restoreOverlayFocus.current = false; setSelected(place.place_id); setFocusTarget({ kind: "place", id: place.place_id, nonce: Date.now() }); setOverlay(null); setQuery(""); }
   function switchLevel(next: Geography) { setLevel(next); setCounty(""); setDraftCounty(""); setSelected(""); setDetail(null); setFocusTarget(null); setOverlay(null); setPreview(null); }
@@ -315,16 +329,18 @@ function Workspace({ meta }: { meta: Meta }) {
 
   const mapRows = scores?.level === level ? scores.rows : EMPTY_MAP_ROWS;
   const tooltipBand = preview?.score ? scoreBand(preview.score.risk_score) : null;
+  const tooltipClass = preview ? mapTooltipClass(preview.x, preview.y, window.innerWidth, window.innerHeight) : "";
   const activeFilter = state || county;
   return <main className="map-shell">
     <RiskMap manifestUrl={meta.map_assets.manifest_url} level={level} rows={mapRows} selected={selected} state={state} county={county} showUnranked={showUnranked} neutralOnly={Boolean(scoreError)} focusTarget={focusTarget} cameraTarget={cameraTarget} initialCamera={initial.camera} onSelect={selectFromMap} onPreview={setPreview} onCamera={cameraChanged} onStatus={setStatus} />
-    <header className="top-dock"><div className="brand"><strong>HouseHunter</strong><span>FEMA ALR_NPCTL</span></div><div className="level-toggle" aria-label="Geography level"><button aria-pressed={level === "tract"} onClick={() => switchLevel("tract")}>Tracts</button><button aria-pressed={level === "county"} onClick={() => switchLevel("county")}>Counties</button></div><div className="dock-actions"><button aria-expanded={overlay === "search"} onClick={(event) => toggleOverlay("search", event.currentTarget)}>Search</button><button onClick={(event) => void openExtremes(event.currentTarget)}>Lowest / Highest</button><button className={activeFilter ? "active" : ""} onClick={(event) => toggleOverlay("filters", event.currentTarget)}>Filters{activeFilter ? " · On" : ""}</button><button onClick={(event) => toggleOverlay("exports", event.currentTarget)}>Exports</button><button aria-label="Information" onClick={(event) => toggleOverlay("info", event.currentTarget)}>ⓘ</button></div><div className={`build-pill ${scoreError ? "failed" : ""}`} title={meta.build?.build_id}>{scoreError ? "Score error" : status}</div></header>
-    {overlay === "search" && <section className="floating-panel search-panel" aria-label="Search"><form onSubmit={lookupAddress}><label>Street address<input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Street, city, state, ZIP" /></label><p className="privacy-note">Find tract contacts the US Census geocoder through this loopback server and may send it to OpenStreetMap only after a valid Census no-match. Addresses are not written to disk. The map shows tract risk, never a property marker or score.</p><button className="primary" disabled={searching || !query.trim()}>{searching ? "Looking…" : "Find tract"}</button>{confirmation && <div className="confirm-card" role="region" aria-label="Approximate street match"><strong>Confirm approximate street match</strong><p>{confirmation.message}</p>{confirmation.candidates.map((candidate) => <button type="button" className="secondary" key={candidate.candidate_id} onClick={() => void confirmAddress(candidate.candidate_id)}>Use approximate street location: {candidate.matched_address}</button>)}<small>{confirmation.attribution}</small></div>}</form>{searchError && <p role="alert" className="error">{searchError}</p>}</section>}
-    {overlay === "filters" && <section className="floating-panel filters-panel" aria-label="Map filters"><h2>Filters</h2><label>State<select value={draftState} disabled={Boolean(builtState)} onChange={(event) => { setDraftState(event.target.value); setDraftCounty(""); }}><option value="">All states & territories</option>{STATE_ABBREVIATIONS.map((item) => <option key={item}>{item}</option>)}</select></label>{level === "tract" && <label>County<select value={draftCounty} disabled={!draftState} onChange={(event) => setDraftCounty(event.target.value)}><option value="">All counties</option>{countyOptions.map((item) => <option value={item.place_id} key={item.place_id}>{item.name}</option>)}</select></label>}<label className="check"><input type="checkbox" checked={draftUnranked} onChange={(event) => setDraftUnranked(event.target.checked)} />Show FEMA-unranked geographies</label><div className="panel-buttons"><button className="primary" onClick={applyFilters}>Apply</button><button className="secondary" onClick={clearFilters}>Clear</button></div></section>}
-    {overlay === "extremes" && <section className="floating-panel extremes-panel" aria-label="Lowest and highest risk"><h2>Explore the range</h2><div><ResultGroup title="Lowest" items={lowest} onChoose={choose} /><ResultGroup title="Highest" items={highest} onChoose={choose} /></div>{searchError && <p role="alert" className="error">{searchError}</p>}</section>}
-    {overlay === "exports" && <nav className="floating-panel export-panel" aria-label="Exports"><h2>Export snapshot</h2><a href="/api/v1/exports/places.csv" download>Tracts CSV</a><a href="/api/v1/exports/places.parquet" download>Tracts Parquet</a><a href="/api/v1/exports/counties.csv" download>Counties CSV</a><a href="/api/v1/exports/counties.parquet" download>Counties Parquet</a></nav>}
-    {overlay === "info" && <section className="floating-panel info-panel" aria-label="About this map"><h2>About this map</h2><p>Every geography is drawn from the pinned FEMA National Risk Index December 2025 release. Dense tracts become distinguishable as you zoom; none are aggregated or enlarged.</p><p>Tracts and counties use separate FEMA percentile universes. County values are never tract averages. Hazard percentiles appear only in details.</p><p>HouseHunter is local-only and uses no basemap, telemetry, account, or hosted database.</p></section>}
-    {preview && <div className="map-tooltip" style={{ left: preview.x, top: preview.y }}><strong>{preview.name}</strong><span>{preview.state} · {preview.placeId}</span><b>{preview.score?.risk_score === null || !preview.score ? "Not ranked / unavailable" : `${preview.score.risk_score.toFixed(1)} · ${tooltipBand ? SCORE_BAND_LABELS[tooltipBand] : ""}`}</b></div>}
+    <header className={`top-dock${overlay ? " overlay-open" : ""}`}><div className="brand"><strong>HouseHunter</strong><span>FEMA ALR_NPCTL</span></div><div className="level-toggle" aria-label="Geography level"><button aria-pressed={level === "tract"} onClick={() => switchLevel("tract")}>Tracts</button><button aria-pressed={level === "county"} onClick={() => switchLevel("county")}>Counties</button></div><div className="dock-actions"><button aria-expanded={overlay === "search"} aria-controls="search-panel" onClick={(event) => toggleOverlay("search", event.currentTarget)}>Search</button><button aria-expanded={overlay === "extremes"} aria-controls="extremes-panel" onClick={(event) => void openExtremes(event.currentTarget)}>Lowest / Highest</button><button aria-expanded={overlay === "filters"} aria-controls="filters-panel" className={activeFilter ? "active" : ""} onClick={(event) => toggleOverlay("filters", event.currentTarget)}>Filters{activeFilter ? " · On" : ""}</button><button className="desktop-dock-action" aria-expanded={overlay === "exports"} aria-controls="exports-panel" onClick={(event) => toggleOverlay("exports", event.currentTarget)}>Exports</button><button className="desktop-dock-action" aria-expanded={overlay === "info"} aria-controls="info-panel" aria-label="Information" onClick={(event) => toggleOverlay("info", event.currentTarget)}>ⓘ</button><button className={`mobile-more${overlay === "exports" || overlay === "info" ? " active" : ""}`} aria-expanded={overlay === "more"} aria-controls="more-panel" onClick={(event) => toggleOverlay("more", event.currentTarget)}>More</button></div><div className={`build-pill ${scoreError ? "failed" : ""}`} title={meta.build?.build_id}>{scoreError ? "Score error" : status}</div></header>
+    {overlay === "search" && <section id="search-panel" className="floating-panel search-panel" aria-label="Search"><form onSubmit={lookupAddress} aria-busy={searching}><label>Street address<input autoFocus autoComplete="street-address" autoCapitalize="words" enterKeyHint="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Street, city, state, ZIP" /></label><p className="privacy-note">Find tract contacts the US Census geocoder through this loopback server and may send it to OpenStreetMap only after a valid Census no-match. Addresses are not written to disk. The map shows tract risk, never a property marker or score.</p><button className="primary" disabled={searching || !query.trim()}>{searching ? "Looking…" : "Find tract"}</button>{confirmation && <div className="confirm-card" role="region" aria-label="Approximate street match"><strong>Confirm approximate street match</strong><p>{confirmation.message}</p>{confirmation.candidates.map((candidate) => <button type="button" className="secondary" key={candidate.candidate_id} onClick={() => void confirmAddress(candidate.candidate_id)}>Use approximate street location: {candidate.matched_address}</button>)}<small>{confirmation.attribution}</small></div>}</form>{searchError && <p role="alert" className="error">{searchError}</p>}</section>}
+    {overlay === "filters" && <section id="filters-panel" className="floating-panel filters-panel" aria-label="Map filters"><h2>Filters</h2><label>State<select value={draftState} disabled={Boolean(builtState)} onChange={(event) => { setDraftState(event.target.value); setDraftCounty(""); }}><option value="">All states & territories</option>{STATE_ABBREVIATIONS.map((item) => <option key={item}>{item}</option>)}</select></label>{level === "tract" && <label>County<select value={draftCounty} disabled={!draftState} onChange={(event) => setDraftCounty(event.target.value)}><option value="">All counties</option>{countyOptions.map((item) => <option value={item.place_id} key={item.place_id}>{item.name}</option>)}</select></label>}<label className="check"><input type="checkbox" checked={draftUnranked} onChange={(event) => setDraftUnranked(event.target.checked)} />Show FEMA-unranked geographies</label><div className="panel-buttons"><button className="primary" onClick={applyFilters}>Apply</button><button className="secondary" onClick={clearFilters}>Clear</button></div></section>}
+    {overlay === "extremes" && <section id="extremes-panel" className="floating-panel extremes-panel" aria-label="Lowest and highest risk" aria-busy={extremesLoading}><h2>Explore the range</h2>{extremesLoading ? <p className="loading-copy" role="status">Loading lowest and highest…</p> : <div><ResultGroup title="Lowest" items={lowest} onChoose={choose} /><ResultGroup title="Highest" items={highest} onChoose={choose} /></div>}{searchError && <p role="alert" className="error">{searchError}</p>}</section>}
+    {overlay === "more" && <section id="more-panel" className="floating-panel more-panel" aria-label="More actions"><h2>More</h2><button className="secondary" onClick={() => setOverlay("exports")}>Export snapshot</button><button className="secondary" onClick={() => setOverlay("info")}>About this map</button></section>}
+    {overlay === "exports" && <nav id="exports-panel" className="floating-panel export-panel" aria-label="Exports"><h2>Export snapshot</h2><a href="/api/v1/exports/places.csv" download>Tracts CSV</a><a href="/api/v1/exports/places.parquet" download>Tracts Parquet</a><a href="/api/v1/exports/counties.csv" download>Counties CSV</a><a href="/api/v1/exports/counties.parquet" download>Counties Parquet</a></nav>}
+    {overlay === "info" && <section id="info-panel" className="floating-panel info-panel" aria-label="About this map"><h2>About this map</h2><p>Every geography is drawn from the pinned FEMA National Risk Index December 2025 release. Dense tracts become distinguishable as you zoom; none are aggregated or enlarged.</p><p>Tracts and counties use separate FEMA percentile universes. County values are never tract averages. Hazard percentiles appear only in details.</p><p>HouseHunter is local-only and uses no basemap, telemetry, account, or hosted database.</p></section>}
+    {preview && <div className={tooltipClass} style={{ left: preview.x, top: preview.y }}><strong>{preview.name}</strong><span>{preview.state} · {preview.placeId}</span><b>{preview.score?.risk_score === null || !preview.score ? "Not ranked / unavailable" : `${preview.score.risk_score.toFixed(1)} · ${tooltipBand ? SCORE_BAND_LABELS[tooltipBand] : ""}`}</b></div>}
     {scoreError && <section className="recovery-card" role="alert"><strong>Scores could not be loaded</strong><span>{scoreError}</span><button className="secondary" onClick={() => void loadScores()}>Retry scores</button></section>}
     <div className="legend" aria-label="Score color scale, lower is better"><div>{SCORE_BANDS.map((band) => <span key={band.id}><i style={{ background: MAP_COLORS[band.id] }} />{band.label}</span>)}<span><i className="hatched" />Unranked</span></div><p><strong>FEMA ALR_NPCTL</strong> · lower is better · national percentile · not property-level risk</p></div>
     {selected && <DetailDrawer detail={detail} loading={detailLoading} error={detailError} level={level} onClose={closeDetail} onRetry={() => { const value = selected; setSelected(""); window.setTimeout(() => setSelected(value)); }} onViewTracts={(countyFips, nextState) => { setLevel("tract"); setState(nextState); setDraftState(nextState); setCounty(countyFips); setDraftCounty(countyFips); setSelected(""); setFocusTarget({ kind: "county", id: countyFips, nonce: Date.now() }); }} onViewCounty={(countyFips) => { setLevel("county"); setCounty(""); setDraftCounty(""); setSelected(countyFips); setFocusTarget({ kind: "place", id: countyFips, nonce: Date.now() }); }} />}

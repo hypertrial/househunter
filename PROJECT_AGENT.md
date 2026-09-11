@@ -37,7 +37,7 @@ and local Pad state out of this public repository.
 
 - Fast: `uv run ruff check .`, `uv run pytest`, `npm test` in `web/`.
 - Completion: also `npm ci`, `npm run build`, `git diff --exit-code -- web/dist`,
-  Playwright Chromium e2e in `web/`.
+  and Playwright Chromium and WebKit e2e in `web/`.
 
 These commands are wrapped by `scripts/verify-fast` and `scripts/verify`.
 Native GitHub CI is the independent verification source.

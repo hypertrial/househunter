@@ -41,6 +41,14 @@ const polygon = {
   arcs: [[[-109, 41], [-102, 41], [-102, 37], [-109, 37], [-109, 41]]],
 };
 
+const detailPolygon = {
+  ...polygon,
+  arcs: [[
+    [-109, 41], [-102, 41], [-102, 39.3], [-103.5, 39.3], [-103.5, 38.7],
+    [-102, 38.7], [-102, 37], [-109, 37], [-109, 41],
+  ]],
+};
+
 const countyPolygon = {
   ...polygon,
   objects: { geography: { type: "GeometryCollection", geometries: [{
@@ -68,7 +76,7 @@ const manifest = {
   ],
 };
 
-async function installRoutes(page: Page, initiallyPrepared = true, failDetailOnce = false) {
+async function installRoutes(page: Page, initiallyPrepared = true, failDetailOnce = false, detailDelayMs = 0) {
   let prepared = initiallyPrepared;
   let detailFailed = false;
   await page.route("**/map-assets/**", async (route) => {
@@ -79,7 +87,12 @@ async function installRoutes(page: Page, initiallyPrepared = true, failDetailOnc
     else if (name === "tracts-co.topojson.gz" && failDetailOnce && !detailFailed) {
       detailFailed = true;
       await route.fulfill({ status: 503, json: { detail: "corrupt detail asset" } });
-    } else await route.fulfill({ json: polygon });
+    } else {
+      if (name === "tracts-co.topojson.gz" && detailDelayMs) {
+        await new Promise((resolve) => setTimeout(resolve, detailDelayMs));
+      }
+      await route.fulfill({ json: name === "tracts-co.topojson.gz" ? detailPolygon : polygon });
+    }
   });
   await page.route("**/api/v1/**", async (route: Route) => {
     const url = new URL(route.request().url());
@@ -181,7 +194,7 @@ test("is keyboard operable and never overflows the viewport", async ({ page }, t
   await expect.poll(() => regionalRequests.length).toBeGreaterThan(1);
   await page.getByRole("button", { name: "Reset map" }).click();
   await expect(page).toHaveURL(/z=1\.000/);
-  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await expect(page.locator(".build-pill")).toContainText("interactive");
   const bounds = await canvas.boundingBox();
   if (!bounds) throw new Error("Map canvas has no bounds");
   await canvas.focus();
@@ -197,14 +210,14 @@ test("is keyboard operable and never overflows the viewport", async ({ page }, t
   await page.getByRole("button", { name: "Close tract detail" }).click();
   await expect(canvas).toBeFocused();
   await page.getByRole("button", { name: "Reset map" }).click();
-  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await expect(page.locator(".build-pill")).toContainText("interactive");
   await canvas.focus();
   await page.keyboard.press("Enter");
   await expect(page.getByRole("dialog", { name: "Tract detail" })).toBeVisible();
   await page.getByRole("button", { name: "Close tract detail" }).click();
   await expect(canvas).toBeFocused();
   await page.getByRole("button", { name: "Reset map" }).click();
-  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await expect(page.locator(".build-pill")).toContainText("interactive");
   await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
   await page.mouse.down();
   await page.mouse.move(bounds.x + bounds.width / 2 + 24, bounds.y + bounds.height / 2);
@@ -230,4 +243,94 @@ test("is keyboard operable and never overflows the viewport", async ({ page }, t
     .withTags(["wcag2a", "wcag2aa", "wcag21aa", "wcag22aa"])
     .analyze();
   expect(accessibility.violations).toEqual([]);
+});
+
+test("deduplicates regional geometry while repeated zooms settle", async ({ page }) => {
+  const regionalRequests: string[] = [];
+  page.on("request", (request) => {
+    if (request.url().includes("tracts-co.topojson.gz")) regionalRequests.push(request.url());
+  });
+  await installRoutes(page, true, false, 1_000);
+  const detailLoaded = page.waitForResponse((response) => response.url().includes("tracts-co.topojson.gz"));
+  await page.goto("/#level=tract&cx=0.5&cy=0.5&z=1");
+  await expect(page.locator(".build-pill")).toContainText("interactive");
+  const canvas = page.locator("canvas");
+  const nationalFrame = await canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL());
+  await canvas.focus();
+  await page.keyboard.press("+");
+  await page.keyboard.press("+");
+  await page.keyboard.press("+");
+  expect(regionalRequests).toHaveLength(0);
+  await page.keyboard.press("+");
+  await expect.poll(() => regionalRequests.length).toBe(1);
+  const loadingFrame = await canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL());
+  const loadingColors = await canvas.evaluate((element) => {
+    const target = element as HTMLCanvasElement;
+    const context = target.getContext("2d")!;
+    const colors = new Set<string>();
+    for (let y = 0; y < target.height; y += 24) {
+      for (let x = 0; x < target.width; x += 24) {
+        colors.add([...context.getImageData(x, y, 1, 1).data].join(","));
+      }
+    }
+    return colors.size;
+  });
+  expect(loadingColors).toBeGreaterThan(2);
+  await page.waitForTimeout(250);
+  expect(await canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL())).toBe(loadingFrame);
+  await page.keyboard.press("+");
+  await page.keyboard.press("-");
+  await page.keyboard.press("+");
+  await page.keyboard.press("-");
+  await detailLoaded;
+  await expect(page.locator(".build-pill")).toContainText("interactive");
+  expect(await canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL())).not.toBe(loadingFrame);
+  const canvasBounds = await canvas.boundingBox();
+  if (!canvasBounds) throw new Error("Map canvas has no bounds");
+  await canvas.click({ position: { x: canvasBounds.width / 2, y: canvasBounds.height / 2 } });
+  await expect(page.getByRole("dialog", { name: "Tract detail" })).toBeVisible();
+  await page.getByRole("button", { name: "Close tract detail" }).click();
+  await page.getByRole("button", { name: "Reset map" }).click();
+  await expect(page.locator(".build-pill")).toContainText("interactive");
+  expect(await canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL())).toBe(nationalFrame);
+  expect(regionalRequests).toHaveLength(1);
+});
+
+test("keeps narrow map actions, status, and controls fully usable", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 700 });
+  await installRoutes(page);
+  await page.goto("/#level=tract&cx=0.5&cy=0.5&z=1");
+  await expect(page.locator(".build-pill")).toContainText("interactive");
+  await expect(page.locator(".build-pill")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Exports" })).toBeHidden();
+  await expect(page.getByRole("button", { name: "Information" })).toBeHidden();
+  const more = page.getByRole("button", { name: "More" });
+  await expect(more).toBeVisible();
+  await expect(more).toHaveAttribute("aria-expanded", "false");
+  const layout = await page.evaluate(() => {
+    const rect = (selector: string) => document.querySelector(selector)!.getBoundingClientRect().toJSON();
+    const actions = document.querySelector(".dock-actions")!;
+    return {
+      pageWidth: document.documentElement.scrollWidth,
+      viewportWidth: innerWidth,
+      actionsWidth: actions.scrollWidth,
+      actionsViewport: actions.clientWidth,
+      dock: rect(".top-dock"),
+      status: rect(".build-pill"),
+      controls: rect(".map-zoom"),
+      legend: rect(".legend"),
+    };
+  });
+  expect(layout.pageWidth).toBe(layout.viewportWidth);
+  expect(layout.actionsWidth).toBeLessThanOrEqual(layout.actionsViewport);
+  expect(layout.controls.top).toBeGreaterThanOrEqual(layout.dock.bottom);
+  expect(layout.controls.bottom).toBeLessThan(layout.legend.top);
+  expect(layout.controls.right <= layout.status.left || layout.status.right <= layout.controls.left).toBe(true);
+  await more.click();
+  await expect(more).toHaveAttribute("aria-expanded", "true");
+  await page.getByRole("button", { name: "Export snapshot" }).click();
+  await expect(page.getByRole("navigation", { name: "Exports" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("navigation", { name: "Exports" })).toHaveCount(0);
+  await expect(more).toBeFocused();
 });

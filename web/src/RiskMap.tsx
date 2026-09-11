@@ -5,7 +5,7 @@ import { zoom, zoomIdentity, type ZoomBehavior, type ZoomTransform } from "d3-zo
 import { feature as topoFeature } from "topojson-client";
 import type { Feature, FeatureCollection, Geometry, GeoJsonProperties } from "geojson";
 import type { GeometryCollection, Topology } from "topojson-specification";
-import { cameraFromTransform, detailAsset, nationalAsset, scoreColor, type CameraState } from "./map";
+import { cameraFromTransform, detailAsset, nationalAsset, relativeTransform, scoreColor, type CameraState } from "./map";
 import type { MapManifest, MapScore } from "./types";
 
 type MapFeature = Feature<Geometry, GeoJsonProperties & {
@@ -48,6 +48,16 @@ interface Props {
   onCamera: (camera: CameraState) => void;
   onStatus: (message: string) => void;
 }
+
+interface RenderFrame {
+  canvas: HTMLCanvasElement;
+  transform: ZoomTransform;
+  width: number;
+  height: number;
+  ratio: number;
+}
+
+const DETAIL_ZOOM = 4;
 
 const TERRITORY_BOXES: Record<string, [number, number, number, number]> = {
   GU: [0.04, 0.76, 0.10, 0.89],
@@ -112,7 +122,7 @@ function hitColor(index: number): string {
   return `rgb(${value & 255},${(value >> 8) & 255},${(value >> 16) & 255})`;
 }
 
-function hatch(context: CanvasRenderingContext2D): CanvasPattern | string {
+function hatch(context: CanvasRenderingContext2D, scale: number): CanvasPattern | string {
   const tile = document.createElement("canvas");
   tile.width = tile.height = 8;
   const brush = tile.getContext("2d");
@@ -125,7 +135,11 @@ function hatch(context: CanvasRenderingContext2D): CanvasPattern | string {
   brush.moveTo(-2, 8);
   brush.lineTo(8, -2);
   brush.stroke();
-  return context.createPattern(tile, "repeat") || "#566169";
+  const pattern = context.createPattern(tile, "repeat");
+  if (pattern && typeof pattern !== "string" && typeof pattern.setTransform === "function") {
+    pattern.setTransform({ a: 1 / scale, d: 1 / scale });
+  }
+  return pattern || "#566169";
 }
 
 export default function RiskMap({
@@ -146,8 +160,8 @@ export default function RiskMap({
   onStatus,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const baseRef = useRef<HTMLCanvasElement>(document.createElement("canvas"));
-  const hitRef = useRef<HTMLCanvasElement>(document.createElement("canvas"));
+  const baseRef = useRef<RenderFrame | null>(null);
+  const hitRef = useRef<RenderFrame | null>(null);
   const transformRef = useRef<ZoomTransform>(zoomIdentity);
   const zoomRef = useRef<ZoomBehavior<HTMLCanvasElement, unknown> | null>(null);
   const featuresRef = useRef<MapFeature[]>([]);
@@ -156,13 +170,23 @@ export default function RiskMap({
   const dimensionsRef = useRef({ width: 1, height: 1, ratio: 1 });
   const colorIdsRef = useRef<string[]>([]);
   const featureByIdRef = useRef(new Map<string, MapFeature>());
+  const geometryByIdRef = useRef(new Map<string, MapFeature>());
+  const detailByIdRef = useRef(new Map<string, MapFeature>());
   const detailRef = useRef(new Map<string, MapFeature[]>());
+  const detailPendingRef = useRef(new Map<string, Promise<void>>());
   const manifestRef = useRef<MapManifest | null>(null);
   const loadedLevelRef = useRef<"tract" | "county" | "">("");
   const hitBuildRef = useRef(0);
   const drawFrameRef = useRef(0);
   const renderKeyRef = useRef("");
+  const hitSemanticKeyRef = useRef("");
   const gestureRef = useRef(false);
+  const zoomChangedRef = useRef(false);
+  const pickingRef = useRef(false);
+  const settleGenerationRef = useRef(0);
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
+  const cursorRef = useRef({ x: 0.5, y: 0.5 });
   const rowsIdentityRef = useRef(rows);
   const rowsVersionRef = useRef(0);
   if (rowsIdentityRef.current !== rows) {
@@ -172,24 +196,38 @@ export default function RiskMap({
   const [geometryVersion, setGeometryVersion] = useState(0);
   const [error, setError] = useState("");
   const [reloadNonce, setReloadNonce] = useState(0);
-  const [cursor, setCursor] = useState({ x: 0.5, y: 0.5 });
   const scores = useMemo(() => new Map(rows.map((row) => [row.place_id, row])), [rows]);
   const scoresRef = useRef(scores);
   scoresRef.current = scores;
-
-  const effectiveFeatures = useCallback(() => {
-    if (level !== "tract" || detailRef.current.size === 0) return featuresRef.current;
-    const loaded = new Set(detailRef.current.keys());
-    return [
-      ...featuresRef.current.filter((item) => !loaded.has(String(item.properties?.state))),
-      ...[...detailRef.current.values()].flat(),
-    ];
-  }, [level]);
 
   const projectionFor = useCallback((item: MapFeature) => {
     const stateCode = String(item.properties?.state || item.id || "");
     return projectorsRef.current?.byState.get(stateCode) || projectorsRef.current?.main || null;
   }, []);
+
+  const visibleStates = useCallback((transform = transformRef.current) => {
+    const { width, height } = dimensionsRef.current;
+    return new Set(statesRef.current.filter((item) => {
+      const projection = projectionFor(item);
+      if (!projection) return false;
+      const [[x0, y0], [x1, y1]] = geoPath(projection).bounds(item);
+      return x1 * transform.k + transform.x >= 0 && x0 * transform.k + transform.x <= width
+        && y1 * transform.k + transform.y >= 0 && y0 * transform.k + transform.y <= height;
+    }).map((item) => String(item.properties?.state || item.id)));
+  }, [projectionFor]);
+
+  const effectiveFeatures = useCallback((transform = transformRef.current) => {
+    if (level !== "tract" || transform.k < DETAIL_ZOOM) return featuresRef.current;
+    const visible = visibleStates(transform);
+    const detailed = new Set([...visible].filter((code) => detailRef.current.has(code)));
+    return [
+      ...featuresRef.current.filter((item) => {
+        const code = String(item.properties?.state);
+        return visible.has(code) && !detailed.has(code);
+      }),
+      ...[...detailed].flatMap((code) => detailRef.current.get(code) || []),
+    ];
+  }, [level, visibleStates]);
 
   const drawTransformed = useCallback(() => {
     const canvas = canvasRef.current;
@@ -200,11 +238,37 @@ export default function RiskMap({
     const transform = transformRef.current;
     context.setTransform(1, 0, 0, 1, 0, 0);
     context.clearRect(0, 0, canvas.width, canvas.height);
-    context.setTransform(
-      ratio * transform.k, 0, 0, ratio * transform.k,
-      ratio * transform.x, ratio * transform.y,
-    );
-    context.drawImage(baseRef.current, 0, 0, width, height);
+    const frame = baseRef.current;
+    if (frame) {
+      const relative = relativeTransform(transform, frame.transform);
+      context.setTransform(
+        ratio * relative.k, 0, 0, ratio * relative.k,
+        ratio * relative.x, ratio * relative.y,
+      );
+      context.drawImage(frame.canvas, 0, 0, frame.width, frame.height);
+    } else {
+      context.setTransform(ratio, 0, 0, ratio, 0, 0);
+      context.fillStyle = "#10191e";
+      context.fillRect(0, 0, width, height);
+    }
+    const selectedFeature = (
+      level === "tract" && transform.k >= DETAIL_ZOOM
+        ? detailByIdRef.current.get(selectedRef.current)
+        : null
+    ) || geometryByIdRef.current.get(selectedRef.current);
+    const selectedProjection = selectedFeature ? projectionFor(selectedFeature) : null;
+    if (selectedFeature && selectedProjection) {
+      context.setTransform(
+        ratio * transform.k, 0, 0, ratio * transform.k,
+        ratio * transform.x, ratio * transform.y,
+      );
+      context.beginPath();
+      geoPath(selectedProjection, context)(selectedFeature);
+      context.strokeStyle = "#f7f4e8";
+      context.lineWidth = 2.2 / transform.k;
+      context.stroke();
+    }
+    const cursor = cursorRef.current;
     context.setTransform(ratio, 0, 0, ratio, 0, 0);
     context.strokeStyle = "rgba(255,255,255,.9)";
     context.lineWidth = 1.5;
@@ -214,16 +278,21 @@ export default function RiskMap({
     context.moveTo(cursor.x * width, cursor.y * height - 7);
     context.lineTo(cursor.x * width, cursor.y * height + 7);
     context.stroke();
-  }, [cursor]);
+  }, [level, projectionFor]);
 
   const drawBase = useCallback(() => {
     const { width, height, ratio } = dimensionsRef.current;
-    const renderKey = [width, height, ratio, geometryVersion, rowsVersionRef.current, level, state, county, showUnranked, selected, neutralOnly].join("|");
+    const renderTransform = transformRef.current;
+    const hitSemanticKey = [
+      geometryVersion, rowsVersionRef.current, level, state, county, showUnranked, neutralOnly,
+    ].join("|");
+    const renderKey = [
+      width, height, ratio, hitSemanticKey, renderTransform.k, renderTransform.x, renderTransform.y,
+    ].join("|");
     if (renderKeyRef.current === renderKey) return;
-    renderKeyRef.current = renderKey;
     profile(`draw start ${renderKey}`);
-    const base = baseRef.current;
-    const hit = hitRef.current;
+    const base = document.createElement("canvas");
+    const hit = document.createElement("canvas");
     for (const target of [base, hit]) {
       target.width = Math.max(1, Math.round(width * ratio));
       target.height = Math.max(1, Math.round(height * ratio));
@@ -236,12 +305,16 @@ export default function RiskMap({
     context.fillRect(0, 0, width, height);
     hitContext.setTransform(ratio, 0, 0, ratio, 0, 0);
     hitContext.clearRect(0, 0, width, height);
-    const missingPattern = hatch(context);
+    const setMapTransform = (target: CanvasRenderingContext2D) => target.setTransform(
+      ratio * renderTransform.k, 0, 0, ratio * renderTransform.k,
+      ratio * renderTransform.x, ratio * renderTransform.y,
+    );
+    const missingPattern = hatch(context, renderTransform.k);
     const geographies = neutralOnly || rowsIdentityRef.current.length === 0 || loadedLevelRef.current !== level
       ? []
-      : effectiveFeatures();
-    colorIdsRef.current = geographies.map((item) => String(item.id || item.properties?.place_id || ""));
-    featureByIdRef.current = new Map(geographies.map((item, index) => [colorIdsRef.current[index], item]));
+      : effectiveFeatures(renderTransform);
+    const colorIds = geographies.map((item) => String(item.id || item.properties?.place_id || ""));
+    const featureById = new Map(geographies.map((item, index) => [colorIds[index], item]));
     type PaintGroup = {
       items: MapFeature[];
       projection: GeoProjection;
@@ -271,7 +344,7 @@ export default function RiskMap({
     };
     const hittable: Array<{ item: MapFeature; index: number; projection: GeoProjection }> = [];
     geographies.forEach((item, index) => {
-      const placeId = colorIdsRef.current[index];
+      const placeId = colorIds[index];
       const featureState = String(item.properties?.state || "");
       const countyFips = String(item.properties?.county_fips || (level === "county" ? placeId : ""));
       const filtered = (state && featureState !== state) || (county && countyFips !== county);
@@ -298,25 +371,22 @@ export default function RiskMap({
     });
     profile("groups built");
     const buildId = ++hitBuildRef.current;
+    if (hitSemanticKeyRef.current !== hitSemanticKey) pickingRef.current = false;
     let paintIndex = 0;
-    const finishVisibleLayer = () => {
+    const commitVisibleLayer = () => {
       if (buildId !== hitBuildRef.current) return;
-      profile("groups painted");
-      context.globalAlpha = 1;
-      const selectedFeature = selected ? featureByIdRef.current.get(selected) : null;
-      if (selectedFeature) {
-        const projection = projectionFor(selectedFeature);
-        if (projection) {
-          context.beginPath();
-          pathFor(projection)(selectedFeature);
-          context.strokeStyle = "#f7f4e8";
-          context.lineWidth = 2.2;
-          context.stroke();
-        }
-      }
+      pickingRef.current = false;
+      baseRef.current = { canvas: base, transform: renderTransform, width, height, ratio };
+      renderKeyRef.current = renderKey;
       drawTransformed();
       profile("visible canvas painted");
       if (geographies.length) onStatus(`${geographies.length.toLocaleString()} ${level}s mapped`);
+      if (neutralOnly || !geographies.length) {
+        hitRef.current = null;
+        colorIdsRef.current = [];
+        featureByIdRef.current.clear();
+        return;
+      }
       let index = 0;
       const buildHitLayer = () => {
         if (buildId !== hitBuildRef.current) return;
@@ -324,6 +394,7 @@ export default function RiskMap({
           window.requestAnimationFrame(buildHitLayer);
           return;
         }
+        setMapTransform(hitContext);
         const started = performance.now();
         while (index < hittable.length && performance.now() - started < 24) {
           const target = hittable[index];
@@ -334,9 +405,21 @@ export default function RiskMap({
           index += 1;
         }
         if (index < hittable.length) window.requestAnimationFrame(buildHitLayer);
-        else if (geographies.length) onStatus(`${geographies.length.toLocaleString()} ${level}s interactive`);
+        else {
+          hitRef.current = { canvas: hit, transform: renderTransform, width, height, ratio };
+          colorIdsRef.current = colorIds;
+          featureByIdRef.current = featureById;
+          hitSemanticKeyRef.current = hitSemanticKey;
+          pickingRef.current = true;
+          onStatus(`${geographies.length.toLocaleString()} ${level}s interactive`);
+        }
       };
-      if (!neutralOnly && !geographies.length) return;
+      window.requestAnimationFrame(buildHitLayer);
+    };
+    const finishVisibleLayer = () => {
+      if (buildId !== hitBuildRef.current) return;
+      profile("groups painted");
+      context.globalAlpha = 1;
       let stateIndex = 0;
       const paintStateLayer = () => {
         if (buildId !== hitBuildRef.current) return;
@@ -350,31 +433,37 @@ export default function RiskMap({
           const projection = projectionFor(item);
           if (!projection) continue;
           const path = pathFor(projection);
+          setMapTransform(context);
           context.beginPath();
           path(item);
           context.strokeStyle = "rgba(223,231,230,.52)";
-          context.lineWidth = 0.8;
+          context.lineWidth = 0.8 / renderTransform.k;
           context.stroke();
           const stateCode = String(item.properties?.state || item.id || "");
           const label = item.properties?.label;
           const projectedLabel = label ? projection(label) : null;
           const [x, y] = projectedLabel || path.centroid(item);
           const [[x0, y0], [x1, y1]] = path.bounds(item);
-          if (!Number.isFinite(x) || !Number.isFinite(y) || ((x1 - x0 < 24 || y1 - y0 < 16) && !TERRITORY_BOXES[stateCode])) continue;
+          if (!Number.isFinite(x) || !Number.isFinite(y)
+            || (((x1 - x0) * renderTransform.k < 24 || (y1 - y0) * renderTransform.k < 16) && !TERRITORY_BOXES[stateCode])) continue;
+          const screenX = x * renderTransform.k + renderTransform.x;
+          const screenY = y * renderTransform.k + renderTransform.y;
+          if (screenX < -24 || screenX > width + 24 || screenY < -16 || screenY > height + 16) continue;
+          context.setTransform(ratio, 0, 0, ratio, 0, 0);
           context.font = "600 10px ui-sans-serif, system-ui";
           context.textAlign = "center";
           context.fillStyle = "rgba(231,238,236,.72)";
-          context.fillText(stateCode, x, y);
+          context.fillText(stateCode, screenX, screenY);
         }
-        drawTransformed();
         if (stateIndex < statesRef.current.length) window.requestAnimationFrame(paintStateLayer);
-        else window.requestAnimationFrame(buildHitLayer);
+        else commitVisibleLayer();
       };
       window.requestAnimationFrame(paintStateLayer);
     };
     const paintVisibleLayer = () => {
       if (buildId !== hitBuildRef.current) return;
       const started = performance.now();
+      setMapTransform(context);
       while (paintIndex < visibleGroups.length && performance.now() - started < 38) {
         const group = visibleGroups[paintIndex];
         context.beginPath();
@@ -382,20 +471,19 @@ export default function RiskMap({
         context.globalAlpha = group.alpha;
         context.fillStyle = group.fill;
         context.fill();
-        if (level === "county" || detailRef.current.size > 0) {
+        if (level === "county" || renderTransform.k >= DETAIL_ZOOM) {
           context.strokeStyle = group.stroke;
-          context.lineWidth = level === "county" ? 0.5 : 0.18;
+          context.lineWidth = (level === "county" ? 0.5 : 0.18) / renderTransform.k;
           context.stroke();
         }
         paintIndex += 1;
       }
-      drawTransformed();
       if (paintIndex < visibleGroups.length) window.requestAnimationFrame(paintVisibleLayer);
       else finishVisibleLayer();
     };
     if (geographies.length) onStatus(`Rendering ${geographies.length.toLocaleString()} ${level}s`);
     window.requestAnimationFrame(paintVisibleLayer);
-  }, [county, drawTransformed, effectiveFeatures, geometryVersion, level, neutralOnly, onStatus, projectionFor, selected, showUnranked, state]);
+  }, [county, drawTransformed, effectiveFeatures, geometryVersion, level, neutralOnly, onStatus, projectionFor, showUnranked, state]);
 
   const scheduleDraw = useCallback(() => {
     window.cancelAnimationFrame(drawFrameRef.current);
@@ -406,9 +494,18 @@ export default function RiskMap({
     let cancelled = false;
     async function load() {
       setError("");
+      ++hitBuildRef.current;
+      ++settleGenerationRef.current;
       featuresRef.current = [];
       detailRef.current.clear();
+      geometryByIdRef.current.clear();
+      detailByIdRef.current.clear();
       loadedLevelRef.current = "";
+      baseRef.current = null;
+      hitRef.current = null;
+      pickingRef.current = false;
+      renderKeyRef.current = "";
+      hitSemanticKeyRef.current = "";
       setGeometryVersion((value) => value + 1);
       onStatus("Loading map boundaries");
       try {
@@ -431,6 +528,9 @@ export default function RiskMap({
         manifestRef.current = manifest;
         statesRef.current = featuresFrom(payloads[0]);
         featuresRef.current = payloads[1] ? featuresFrom(payloads[1]) : [];
+        geometryByIdRef.current = new Map(featuresRef.current.map((item) => [
+          String(item.id || item.properties?.place_id || ""), item,
+        ]));
         loadedLevelRef.current = level;
         profile("topologies converted");
         setGeometryVersion((value) => value + 1);
@@ -463,21 +563,27 @@ export default function RiskMap({
           .translate(width / 2 - initialCamera.cx * width * initialCamera.z, height / 2 - initialCamera.cy * height * initialCamera.z)
           .scale(initialCamera.z);
       }
+      drawTransformed();
       scheduleDraw();
     };
     const observer = new ResizeObserver(resize);
     observer.observe(canvas);
     resize();
     return () => observer.disconnect();
-  }, [geometryVersion, initialCamera, scheduleDraw]);
+  }, [drawTransformed, geometryVersion, initialCamera, scheduleDraw]);
 
   const pick = useCallback((x: number, y: number) => {
-    if (gestureRef.current) return "";
-    const { ratio } = dimensionsRef.current;
-    const point = transformRef.current.invert([x, y]);
-    const context = hitRef.current.getContext("2d", { willReadFrequently: true });
-    if (!context || point[0] < 0 || point[1] < 0) return "";
-    const pixel = context.getImageData(Math.round(point[0] * ratio), Math.round(point[1] * ratio), 1, 1).data;
+    const frame = hitRef.current;
+    if (gestureRef.current || !pickingRef.current || !frame) return "";
+    const live = transformRef.current;
+    const mapX = (x - live.x) / live.k;
+    const mapY = (y - live.y) / live.k;
+    const hitX = mapX * frame.transform.k + frame.transform.x;
+    const hitY = mapY * frame.transform.k + frame.transform.y;
+    if (hitX < 0 || hitY < 0 || hitX >= frame.width || hitY >= frame.height) return "";
+    const context = frame.canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) return "";
+    const pixel = context.getImageData(Math.round(hitX * frame.ratio), Math.round(hitY * frame.ratio), 1, 1).data;
     const value = pixel[0] + (pixel[1] << 8) + (pixel[2] << 16);
     const placeId = value ? colorIdsRef.current[value - 1] || "" : "";
     const item = featureByIdRef.current.get(placeId);
@@ -488,34 +594,40 @@ export default function RiskMap({
   }, [county, level, state]);
 
   const loadVisibleDetails = useCallback(async () => {
-    if (level !== "tract" || transformRef.current.k < 4 || !manifestRef.current) return;
-    const { width, height } = dimensionsRef.current;
-    const visible = statesRef.current.filter((item) => {
-      const projection = projectionFor(item);
-      if (!projection) return false;
-      const [[x0, y0], [x1, y1]] = geoPath(projection).bounds(item);
-      const transform = transformRef.current;
-      return x1 * transform.k + transform.x >= 0 && x0 * transform.k + transform.x <= width
-        && y1 * transform.k + transform.y >= 0 && y0 * transform.k + transform.y <= height;
-    }).map((item) => String(item.properties?.state || item.id));
-    const pending = visible.filter((code) => !detailRef.current.has(code));
-    try {
-      await Promise.all(pending.map(async (code) => {
+    if (level !== "tract" || transformRef.current.k < DETAIL_ZOOM || !manifestRef.current) return;
+    await Promise.all([...visibleStates()].map((code) => {
+      if (detailRef.current.has(code)) return Promise.resolve();
+      const existing = detailPendingRef.current.get(code);
+      if (existing) return existing;
+      const request = (async () => {
         const asset = detailAsset(manifestRef.current!, code);
         if (!asset) throw new Error(`Detailed tract asset is missing for ${code}`);
         const response = await fetch(`/map-assets/${asset.filename}`);
         if (!response.ok) throw new Error(`Detailed tract request failed for ${code} (${response.status})`);
-        detailRef.current.set(code, featuresFrom(await response.json() as Topology));
-      }));
-      if (pending.length) {
-        setGeometryVersion((value) => value + 1);
-        onStatus(`Detailed tract boundaries loaded for ${pending.join(", ")}`);
-      }
+        const detailed = featuresFrom(await response.json() as Topology);
+        detailRef.current.set(code, detailed);
+        for (const item of detailed) {
+          detailByIdRef.current.set(String(item.id || item.properties?.place_id || ""), item);
+        }
+      })().finally(() => detailPendingRef.current.delete(code));
+      detailPendingRef.current.set(code, request);
+      return request;
+    }));
+  }, [level, visibleStates]);
+
+  const settleView = useCallback(async () => {
+    const generation = ++settleGenerationRef.current;
+    try {
+      await loadVisibleDetails();
+      if (generation !== settleGenerationRef.current) return;
+      setError("");
     } catch (caught) {
+      if (generation !== settleGenerationRef.current) return;
       setError((caught as Error).message);
       onStatus("Detailed tract boundaries failed to load");
     }
-  }, [level, onStatus, projectionFor]);
+    if (generation === settleGenerationRef.current) scheduleDraw();
+  }, [loadVisibleDetails, onStatus, scheduleDraw]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -525,13 +637,29 @@ export default function RiskMap({
     const behavior = zoom<HTMLCanvasElement, unknown>()
       .scaleExtent([1, 12])
       .filter((event) => !event.button && (!event.ctrlKey || event.type === "wheel"))
-      .on("start", () => { gestureRef.current = true; onPreview(null); })
-      .on("zoom", (event) => { transformRef.current = event.transform; drawTransformed(); })
+      .on("start", () => {
+        gestureRef.current = true;
+        zoomChangedRef.current = false;
+        onPreview(null);
+      })
+      .on("zoom", (event) => {
+        if (!zoomChangedRef.current) {
+          zoomChangedRef.current = true;
+          ++hitBuildRef.current;
+          ++settleGenerationRef.current;
+          pickingRef.current = false;
+          onStatus("Settling map view");
+          window.cancelAnimationFrame(drawFrameRef.current);
+        }
+        transformRef.current = event.transform;
+        drawTransformed();
+      })
       .on("end", () => {
         gestureRef.current = false;
+        if (!zoomChangedRef.current) return;
         const { width, height } = dimensionsRef.current;
         onCamera(cameraFromTransform(transformRef.current, width, height));
-        void loadVisibleDetails();
+        void settleView();
       });
     zoomRef.current = behavior;
     select(canvas).call(behavior).on("dblclick.zoom", null);
@@ -573,12 +701,13 @@ export default function RiskMap({
         y,
       });
     };
+    const leave = () => onPreview(null);
     canvas.addEventListener("pointerdown", down);
     canvas.addEventListener("pointerup", up);
     canvas.addEventListener("pointercancel", cancel);
     canvas.addEventListener("pointermove", move);
     canvas.addEventListener("click", clicked);
-    canvas.addEventListener("pointerleave", () => onPreview(null));
+    canvas.addEventListener("pointerleave", leave);
     return () => {
       select(canvas).on(".zoom", null);
       canvas.removeEventListener("pointerdown", down);
@@ -586,12 +715,13 @@ export default function RiskMap({
       canvas.removeEventListener("pointercancel", cancel);
       canvas.removeEventListener("pointermove", move);
       canvas.removeEventListener("click", clicked);
+      canvas.removeEventListener("pointerleave", leave);
     };
-  }, [drawTransformed, effectiveFeatures, loadVisibleDetails, onCamera, onPreview, onSelect, pick]);
+  }, [drawTransformed, onCamera, onPreview, onSelect, onStatus, pick, settleView]);
 
   useEffect(() => {
-    if (geometryVersion && transformRef.current.k >= 4) void loadVisibleDetails();
-  }, [geometryVersion, loadVisibleDetails]);
+    if (geometryVersion) void settleView();
+  }, [geometryVersion, settleView]);
 
   useEffect(() => {
     scheduleDraw();
@@ -599,14 +729,19 @@ export default function RiskMap({
   }, [geometryVersion, rows, scheduleDraw]);
 
   useEffect(() => {
+    drawTransformed();
+  }, [drawTransformed, selected]);
+
+  useEffect(() => {
     if (!focusTarget || !featuresRef.current.length || !canvasRef.current || !zoomRef.current) return;
     let targets: MapFeature[] = [];
     if (focusTarget.kind === "place") {
-      targets = effectiveFeatures().filter((item) => String(item.id) === focusTarget.id);
+      const target = geometryByIdRef.current.get(focusTarget.id);
+      targets = target ? [target] : [];
     } else if (focusTarget.kind === "state") {
-      targets = effectiveFeatures().filter((item) => item.properties?.state === focusTarget.id);
+      targets = featuresRef.current.filter((item) => item.properties?.state === focusTarget.id);
     } else {
-      targets = effectiveFeatures().filter((item) => (
+      targets = featuresRef.current.filter((item) => (
         String(item.properties?.county_fips || (level === "county" ? item.id : "")) === focusTarget.id
       ));
     }
@@ -623,7 +758,7 @@ export default function RiskMap({
     const scale = Math.max(1, Math.min(10, 0.76 / Math.max((x1 - x0) / width, (y1 - y0) / height, 0.01)));
     const target = zoomIdentity.translate(width / 2 - scale * (x0 + x1) / 2, height / 2 - scale * (y0 + y1) / 2).scale(scale);
     select(canvasRef.current).call(zoomRef.current.transform, target);
-  }, [effectiveFeatures, focusTarget, geometryVersion, level, projectionFor]);
+  }, [focusTarget, geometryVersion, level, projectionFor]);
 
   useEffect(() => {
     if (!cameraTarget || !canvasRef.current || !zoomRef.current) return;
@@ -638,10 +773,12 @@ export default function RiskMap({
     const step = event.shiftKey ? 0.08 : 0.035;
     if (event.key.startsWith("Arrow")) {
       event.preventDefault();
-      setCursor((value) => ({
-        x: Math.max(0, Math.min(1, value.x + (event.key === "ArrowRight" ? step : event.key === "ArrowLeft" ? -step : 0))),
-        y: Math.max(0, Math.min(1, value.y + (event.key === "ArrowDown" ? step : event.key === "ArrowUp" ? -step : 0))),
-      }));
+      const cursor = cursorRef.current;
+      cursorRef.current = {
+        x: Math.max(0, Math.min(1, cursor.x + (event.key === "ArrowRight" ? step : event.key === "ArrowLeft" ? -step : 0))),
+        y: Math.max(0, Math.min(1, cursor.y + (event.key === "ArrowDown" ? step : event.key === "ArrowUp" ? -step : 0))),
+      };
+      drawTransformed();
     } else if ((event.key === "+" || event.key === "=") && zoomRef.current) {
       event.preventDefault();
       select(event.currentTarget).call(zoomRef.current.scaleBy, 1.5);
@@ -651,6 +788,7 @@ export default function RiskMap({
     } else if (event.key === "Enter") {
       event.preventDefault();
       const { width, height } = dimensionsRef.current;
+      const cursor = cursorRef.current;
       const placeId = pick(cursor.x * width, cursor.y * height);
       if (placeId) onSelect(placeId);
     }
@@ -675,9 +813,9 @@ export default function RiskMap({
       onKeyDown={keyboard}
     />
     <div className="map-zoom" aria-label="Map controls">
-      <button type="button" onClick={() => zoomBy(1.5)} aria-label="Zoom in">+</button>
-      <button type="button" onClick={() => zoomBy(1 / 1.5)} aria-label="Zoom out">−</button>
-      <button type="button" onClick={reset} aria-label="Reset map">⌂</button>
+      <button type="button" onClick={() => zoomBy(1.5)} aria-label="Zoom in" title="Zoom in">+</button>
+      <button type="button" onClick={() => zoomBy(1 / 1.5)} aria-label="Zoom out" title="Zoom out">−</button>
+      <button type="button" onClick={reset} aria-label="Reset map" title="Reset map">⌂</button>
     </div>
     {error && <div className="map-error" role="alert"><strong>Map unavailable</strong><span>{error}</span><button className="secondary" onClick={() => setReloadNonce((value) => value + 1)}>Retry map</button></div>}
   </div>;
