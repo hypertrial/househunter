@@ -14,6 +14,7 @@ from .build import build_snapshot
 from .config import RuntimePaths, load_config
 from .download import download_fema, download_fema_counties, source_statuses
 from .errors import AmbiguousPlaceError, HouseHunterError
+from .geocode import lookup_address
 from .locking import exclusive_lock
 from .store import Store
 
@@ -142,6 +143,20 @@ def rank(
                 )
             else:
                 typer.echo(f"{row['place_id']:<12} {score:>5}  {row['state']}")
+    except HouseHunterError as exc:
+        _abort(exc)
+
+
+@app.command("lookup")
+def lookup_place(address: str) -> None:
+    """Map a US address to a FEMA tract via the Census geocoder."""
+    try:
+        typer.echo(json.dumps(lookup_address(_paths(), address), indent=2, sort_keys=True))
+    except AmbiguousPlaceError as exc:
+        typer.echo(
+            json.dumps({"error": str(exc), "candidates": exc.candidates}, indent=2), err=True
+        )
+        raise typer.Exit(2) from exc
     except HouseHunterError as exc:
         _abort(exc)
 

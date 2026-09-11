@@ -51,13 +51,24 @@ State abbreviations for tracts are derived from the first two `TRACTFIPS` digits
 a bundled map. Unknown prefixes are retained as `??` / `Unknown` and are excluded from
 known `--state` scopes.
 
+## Address lookup
+
+On explicit user action (`househunter lookup` or Find tract in the UI), the loopback
+server calls the public [Census geocoder](https://geocoding.geo.census.gov/geocoder/)
+with `vintage=Census2020_Current` and no API key. The browser never contacts
+census.gov. Addresses are not written under `data/`. Prepare, download, and build
+still do not use this service.
+
+The returned 11-digit GEOID is the HouseHunter tract `place_id`. The score remains
+that tract's published FEMA `ALR_NPCTL`, not a property-level rating.
+
 ## Census reference assets
 
 Runtime ranking does **not** download or require Census Place/housing assets.
 `./scripts/run-app` uses only the pinned FEMA caches.
 
 Maintainer-only Place-generation scripts remain in the tree for historical release assets
-and are unused by the local app. Ordinary setup never contacts census.gov.
+and are unused by the local app. Prepare, download, and build never contact census.gov.
 
 ## Limitations
 

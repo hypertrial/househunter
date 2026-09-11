@@ -7,6 +7,8 @@ from fastapi.testclient import TestClient
 from househunter.api import create_app
 from househunter.build import build_snapshot
 from househunter.config import RuntimePaths
+from househunter.errors import AmbiguousPlaceError, HouseHunterError
+from househunter.geocode import AddressMatch
 
 
 def test_api_filters_details_exports_and_token(
@@ -122,3 +124,77 @@ def test_api_rejects_non_loopback_host(fixture_environment: tuple[RuntimePaths, 
         assert response.status_code == 400
         malformed = client.get("/api/v1/meta", headers={"host": "localhost:80@attacker.example"})
         assert malformed.status_code == 400
+
+
+def test_lookup_maps_an_address_to_tract_detail(
+    fixture_environment: tuple[RuntimePaths, object], monkeypatch: object
+) -> None:
+    paths, _ = fixture_environment
+    build_snapshot(paths)
+
+    def fake_geocode(address: str, *, client: object = None) -> AddressMatch:
+        query = address.strip()
+        if not query:
+            raise HouseHunterError("Address is required")
+        return AddressMatch(
+            query=query,
+            matched_address="1 MAIN ST, AUTAUGA, AL, 36003",
+            tract_id="01001000100",
+        )
+
+    monkeypatch.setattr("househunter.geocode.geocode_tract", fake_geocode)
+    with TestClient(create_app(paths, testing=True)) as client:
+        empty = client.post("/api/v1/lookup", json={"address": "   "})
+        assert empty.status_code == 400
+        assert empty.json()["detail"] == "Address is required"
+        response = client.post("/api/v1/lookup", json={"address": "1 Main St, Autauga, AL"})
+        assert response.status_code == 200
+        body = response.json()
+        assert body["tract_id"] == "01001000100"
+        assert body["matched_address"] == "1 MAIN ST, AUTAUGA, AL, 36003"
+        assert body["detail"]["summary"]["risk_score"] == 10.0
+        assert "alr_npctl_wfir" not in body["detail"]["summary"]
+        assert len(body["detail"]["hazard_percentiles"]) == 18
+
+
+def test_lookup_reports_a_geoid_missing_from_the_snapshot(
+    fixture_environment: tuple[RuntimePaths, object], monkeypatch: object
+) -> None:
+    paths, _ = fixture_environment
+    build_snapshot(paths)
+    monkeypatch.setattr(
+        "househunter.geocode.geocode_tract",
+        lambda address, client=None: AddressMatch(
+            query=address, matched_address="1 MAIN ST", tract_id="08013012101"
+        ),
+    )
+    with TestClient(create_app(paths, testing=True)) as client:
+        response = client.post("/api/v1/lookup", json={"address": "1 Main St, Boulder, CO"})
+        assert response.status_code == 400
+        assert response.json()["detail"] == "Tract not found: 08013012101"
+
+
+def test_lookup_returns_candidates_when_matches_disagree(
+    fixture_environment: tuple[RuntimePaths, object], monkeypatch: object
+) -> None:
+    paths, _ = fixture_environment
+
+    def fake_geocode(address: str, *, client: object = None) -> AddressMatch:
+        raise AmbiguousPlaceError(
+            address,
+            [
+                {"place_id": "08013012101", "matched_address": "1 MAIN ST, BOULDER, CO"},
+                {"place_id": "01001000100", "matched_address": "1 MAIN ST, AUTAUGA, AL"},
+            ],
+        )
+
+    monkeypatch.setattr("househunter.geocode.geocode_tract", fake_geocode)
+    with TestClient(create_app(paths, testing=True)) as client:
+        response = client.post("/api/v1/lookup", json={"address": "1 Main St"})
+        assert response.status_code == 400
+        body = response.json()
+        assert body["detail"].startswith("Ambiguous place name:")
+        assert [item["place_id"] for item in body["candidates"]] == [
+            "08013012101",
+            "01001000100",
+        ]

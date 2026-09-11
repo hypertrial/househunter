@@ -16,9 +16,17 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from . import __version__
 from .config import RuntimePaths
-from .contracts import JobStatus, PlaceDetail, PlacePage, SourceStatus
+from .contracts import (
+    AddressLookup,
+    AddressLookupRequest,
+    JobStatus,
+    PlaceDetail,
+    PlacePage,
+    SourceStatus,
+)
 from .download import source_statuses
 from .errors import AmbiguousPlaceError, BuildNotFoundError, HouseHunterError
+from .geocode import lookup_address
 from .jobs import JobKind, JobManager
 from .store import Store, current_build
 
@@ -203,6 +211,10 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
     def place(place_id: str) -> dict[str, object]:
         with Store(runtime) as store:
             return store.place_detail(store.resolve_place(place_id))
+
+    @app.post("/api/v1/lookup", response_model=AddressLookup)
+    def lookup(request: AddressLookupRequest) -> dict[str, object]:
+        return lookup_address(runtime, request.address)
 
     @app.get("/api/v1/counties", response_model=PlacePage)
     def counties(

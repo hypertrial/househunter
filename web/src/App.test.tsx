@@ -256,6 +256,96 @@ describe("ranking workflow", () => {
     await waitFor(() => expect(screen.getByLabelText("County")).toHaveDisplayValue("Autauga"));
   });
 
+  it("maps an address to tract detail without calling census.gov from the browser", async () => {
+    const request = vi.fn(async (input: RequestInfo | URL, options?: RequestInit) => {
+      const url = String(input);
+      const tractSummary = {
+        ...place,
+        place_id: "01001000100",
+        name: "01001000100",
+        state: "AL",
+        place_type: "tract",
+        population_2020: 0,
+        housing_units_2020: 0,
+      };
+      let body: unknown = { items: [tractSummary], total: 1 };
+      if (url.includes("/meta")) {
+        body = {
+          app_version: "1.0.0",
+          mutation_token: "token",
+          reference_assets_ready: true,
+          reference_assets_error: null,
+          build: {
+            build_id: "fixture",
+            place_count: 1,
+            ranked_place_count: 1,
+            source_vintages: { fema: "December 2025" },
+            scope: { kind: "national", state: null },
+          },
+        };
+      } else if (url.includes("/api/v1/lookup")) {
+        expect(options?.method).toBe("POST");
+        expect(url.startsWith("http") ? new URL(url).host : "127.0.0.1").not.toContain("census.gov");
+        expect(url).toContain("/api/v1/lookup");
+        body = {
+          query: "1 Main St, Autauga, AL",
+          matched_address: "1 MAIN ST, AUTAUGA, AL, 36003",
+          tract_id: "01001000100",
+          detail: {
+            summary: tractSummary,
+            total_weighted_housing: 0,
+            coverage_ratio: 1,
+            methodology_notice: "HouseHunter ranks FEMA tracts by published ALR_NPCTL.",
+            tract_contributions: [],
+            hazard_percentiles: [],
+            member_tract_count: null,
+          },
+        };
+      } else if (url.includes("/api/v1/counties?")) {
+        body = {
+          items: [
+            {
+              ...place,
+              place_id: "01001",
+              name: "Autauga",
+              state: "AL",
+              place_type: "county",
+              population_2020: 0,
+              housing_units_2020: 0,
+              county_fips: "01001",
+              county_name: "Autauga",
+            },
+          ],
+          total: 1,
+        };
+      } else if (url.includes("/api/v1/places/01001000100")) {
+        body = {
+          summary: tractSummary,
+          total_weighted_housing: 0,
+          coverage_ratio: 1,
+          methodology_notice: "HouseHunter ranks FEMA tracts by published ALR_NPCTL.",
+          tract_contributions: [],
+          hazard_percentiles: [],
+          member_tract_count: null,
+        };
+      }
+      return new Response(JSON.stringify(body), { status: 200 });
+    });
+    vi.stubGlobal("fetch", request);
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: /lower risk/i })).toBeVisible();
+    expect(screen.getByLabelText("Address")).toHaveAttribute("maxLength", "200");
+    fireEvent.click(screen.getByRole("button", { name: "Find tract" }));
+    expect(request.mock.calls.some(([url]) => String(url).includes("/api/v1/lookup"))).toBe(false);
+    fireEvent.change(screen.getByLabelText("Address"), { target: { value: "1 Main St, Autauga, AL" } });
+    fireEvent.click(screen.getByRole("button", { name: "Find tract" }));
+    expect(await screen.findByRole("heading", { name: "01001000100, AL" })).toBeVisible();
+    expect(request.mock.calls.some(([url]) => String(url).includes("census.gov"))).toBe(false);
+    expect(request.mock.calls.some(([url]) => String(url).includes("/api/v1/lookup"))).toBe(true);
+    await waitFor(() => expect(screen.getByLabelText("State")).toHaveDisplayValue("AL"));
+    await waitFor(() => expect(screen.getByLabelText("County")).toHaveDisplayValue("Autauga"));
+  });
+
   it("starts preparation with the per-launch token", async () => {
     const request = vi.fn(async (input: RequestInfo | URL, options?: RequestInit) => {
       const url = String(input);

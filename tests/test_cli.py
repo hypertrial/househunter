@@ -66,3 +66,28 @@ def test_cli_build_rank_inspect_export_and_sources(
     assert source_status["fema"]["version"] == "December 2025"
     assert source_status["fema_counties"]["version"] == "December 2025"
     assert "census" not in source_status
+
+
+def test_cli_lookup_prints_tract_detail(
+    fixture_environment: tuple[RuntimePaths, Path], monkeypatch: object
+) -> None:
+    from househunter.geocode import AddressMatch
+
+    _, _ = fixture_environment
+    runner = CliRunner()
+    built = runner.invoke(app, ["build"])
+    assert built.exit_code == 0, built.output
+    monkeypatch.setattr(
+        "househunter.geocode.geocode_tract",
+        lambda address, client=None: AddressMatch(
+            query=address,
+            matched_address="1 MAIN ST, AUTAUGA, AL, 36003",
+            tract_id="01001000100",
+        ),
+    )
+    looked = runner.invoke(app, ["lookup", "1 Main St, Autauga, AL"])
+    assert looked.exit_code == 0, looked.output
+    payload = json.loads(looked.output)
+    assert payload["tract_id"] == "01001000100"
+    assert payload["matched_address"] == "1 MAIN ST, AUTAUGA, AL, 36003"
+    assert payload["detail"]["summary"]["place_id"] == "01001000100"

@@ -118,6 +118,24 @@ test("prepares, ranks, inspects, and exports", async ({ page }) => {
           member_tract_count: null,
         },
       });
+    } else if (url.pathname === "/api/v1/lookup") {
+      expect(route.request().method()).toBe("POST");
+      await route.fulfill({
+        json: {
+          query: "1 Main St, Boulder, CO",
+          matched_address: "1 MAIN ST, BOULDER, CO, 80302",
+          tract_id: "08013012101",
+          detail: {
+            summary,
+            total_weighted_housing: 0,
+            coverage_ratio: 1,
+            methodology_notice: "HouseHunter ranks FEMA tracts by published ALR_NPCTL.",
+            tract_contributions: [],
+            hazard_percentiles: hazards,
+            member_tract_count: null,
+          },
+        },
+      });
     } else if (url.pathname.endsWith("places.csv") || url.pathname.endsWith("counties.csv")) {
       await route.fulfill({
         body: "place_id,name\n08013012101,08013012101\n",
@@ -154,6 +172,10 @@ test("prepares, ranks, inspects, and exports", async ({ page }) => {
   await page.getByRole("button", { name: "View 12 tracts" }).click();
   await expect(page.getByRole("button", { name: "Tracts" })).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByLabel("County")).toHaveValue("08013");
+  await page.getByLabel("Address").fill("1 Main St, Boulder, CO");
+  await page.getByRole("button", { name: "Find tract" }).click();
+  await expect(page.getByRole("heading", { name: "08013012101, CO" })).toBeVisible();
+  await page.getByRole("button", { name: "Close tract detail" }).first().click();
   const downloaded = page.waitForEvent("download");
   await page.getByRole("link", { name: "Tracts CSV" }).click();
   await expect(await downloaded).toBeTruthy();

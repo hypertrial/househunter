@@ -11,7 +11,9 @@ comparable. Detail views and exports also show FEMA's 18 published
 `{CODE}_ALR_NPCTL` hazard percentiles at the same grain. Those bars explain the
 composite; they are not a HouseHunter blend, and lists still rank only on
 composite `ALR_NPCTL`. A HouseHunter score is **not** a property-level
-assessment, a loss probability, an insurance quote, or a prediction.
+assessment, a loss probability, an insurance quote, or a prediction. Address lookup
+maps a house to its 2020 Census tract via the public Census geocoder, then shows
+that tract's FEMA score.
 
 ## Quick start
 
@@ -38,6 +40,7 @@ uv run househunter rank --state CO --limit 20
 uv run househunter rank --level county --state CO
 uv run househunter inspect 08013012101
 uv run househunter inspect 08013
+uv run househunter lookup "123 Main St, Denver, CO"
 uv run househunter app
 ```
 
@@ -54,6 +57,7 @@ househunter download [--source fema|fema_counties|all]
 househunter build [--state CO]
 househunter rank [--state CO] [--county STCOFIPS] [--level tract|county] [--limit N] [--include-unranked]
 househunter inspect TRACT_FIPS|COUNTY_FIPS
+househunter lookup "123 Main St, Denver, CO"
 househunter export --format parquet|csv [--level tract|county] [--output PATH]
 househunter app [--port PORT] [--no-open]
 ```

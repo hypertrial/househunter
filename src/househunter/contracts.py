@@ -47,6 +47,17 @@ class PlaceDetail(BaseModel):
     member_tract_count: int | None = None
 
 
+class AddressLookupRequest(BaseModel):
+    address: str = Field(max_length=200)
+
+
+class AddressLookup(BaseModel):
+    query: str
+    matched_address: str
+    tract_id: str
+    detail: PlaceDetail
+
+
 class PlacePage(BaseModel):
     items: list[PlaceSummary]
     total: int

@@ -1,5 +1,5 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
-import type { HazardPercentile, JobStatus, PlaceDetail, PlaceSummary } from "./types";
+import type { AddressLookup, HazardPercentile, JobStatus, PlaceDetail, PlaceSummary } from "./types";
 
 interface Meta {
   app_version: string;
@@ -184,6 +184,8 @@ function Rankings({ meta }: { meta: Meta }) {
   const [county, setCounty] = useState("");
   const [countyOptions, setCountyOptions] = useState<PlaceSummary[]>([]);
   const [level, setLevel] = useState<Geography>("tract");
+  const [address, setAddress] = useState("");
+  const [looking, setLooking] = useState(false);
   const [includeUnranked, setIncludeUnranked] = useState(false);
   const [sort, setSort] = useState("risk_score");
   const [direction, setDirection] = useState("asc");
@@ -244,6 +246,35 @@ function Rankings({ meta }: { meta: Meta }) {
     setSelected(countyFips);
     setOffset(0);
   }
+  async function findTract(event: FormEvent) {
+    event.preventDefault();
+    const query = address.trim();
+    if (!query) {
+      setError("Address is required");
+      return;
+    }
+    if (looking) return;
+    setLooking(true);
+    setError(null);
+    try {
+      const result = await json<AddressLookup>("/api/v1/lookup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ address: query }),
+      });
+      const nextState = result.detail.summary.state;
+      const nextCounty = result.detail.summary.county_fips;
+      setLevel("tract");
+      setState((STATE_ABBREVIATIONS as readonly string[]).includes(nextState) ? nextState : "");
+      setCounty(/^\d{5}$/.test(nextCounty) ? nextCounty : "");
+      setSelected(result.tract_id);
+      setOffset(0);
+    } catch (caught) {
+      setError((caught as Error).message);
+    } finally {
+      setLooking(false);
+    }
+  }
   const scopeKind = meta.build?.scope.kind === "state" ? `${meta.build.scope.state} ` : "";
   const noun = level === "county" ? "counties" : "tracts";
   return <>
@@ -266,6 +297,10 @@ function Rankings({ meta }: { meta: Meta }) {
           <button type="button" aria-pressed={level === "tract"} onClick={() => changeLevel("tract")}>Tracts</button>
           <button type="button" aria-pressed={level === "county"} onClick={() => changeLevel("county")}>Counties</button>
         </div>
+        <form className="lookup" onSubmit={(event) => { void findTract(event); }}>
+          <label>Address<input value={address} onChange={(e) => setAddress(e.target.value)} placeholder="123 Main St, Denver, CO" maxLength={200} autoComplete="off" /></label>
+          <button className="primary" type="submit" disabled={looking}>Find tract</button>
+        </form>
         <form className="filters" onSubmit={submit}>
           <label>Search<input value={search} onChange={(e) => setSearch(e.target.value)} placeholder={level === "county" ? "County name or FIPS" : "Tract FIPS or county name"} /></label>
           <label>State<select value={state} onChange={(e) => changeState(e.target.value)}>

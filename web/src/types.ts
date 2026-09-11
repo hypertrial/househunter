@@ -39,6 +39,13 @@ export interface PlaceDetail {
   member_tract_count: number | null;
 }
 
+export interface AddressLookup {
+  query: string;
+  matched_address: string;
+  tract_id: string;
+  detail: PlaceDetail;
+}
+
 export interface JobStatus {
   job_id: string;
   state: "queued" | "running" | "succeeded" | "failed" | "cancelled";
