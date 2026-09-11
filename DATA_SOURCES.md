@@ -55,12 +55,28 @@ known `--state` scopes.
 
 On explicit user action (`househunter lookup` or Find tract in the UI), the loopback
 server calls the public [Census geocoder](https://geocoding.geo.census.gov/geocoder/)
-with `vintage=Census2020_Current` and no API key. The browser never contacts
-census.gov. Addresses are not written under `data/`. Prepare, download, and build
-still do not use this service.
+with `vintage=Census2020_Current` and no API key. If that response is valid and
+contains zero `addressMatches`, the server may then query public
+[Nominatim](https://nominatim.openstreetmap.org/) (`format=jsonv2`, 1 request/second,
+identifying User-Agent). Accepted coordinates are converted through Census
+`geographies/coordinates` (`Census2020_Current`) so the tract GEOID stays a 2020
+Census identifier. The browser never contacts census.gov or nominatim.openstreetmap.org.
+Addresses are not written under `data/`. Prepare, download, and build still do not
+use these services.
+
+House/building Nominatim results resolve automatically only when the returned house
+number agrees with the query. Road matches are approximate: the UI requires
+“Use approximate street location”, and the CLI requires `--allow-approximate`.
+Street names must be spelled correctly; a complete Census outage is not covered.
+
+Set `HOUSEHUNTER_NOMINATIM_URL` to a HTTPS Nominatim endpoint, or `off` to disable
+fallback without a software release. OpenStreetMap data is © OpenStreetMap
+contributors (ODbL).
 
 The returned 11-digit GEOID is the HouseHunter tract `place_id`. The score remains
-that tract's published FEMA `ALR_NPCTL`, not a property-level rating.
+that tract's published FEMA `ALR_NPCTL`, not a property-level rating. The public
+Census geocoder only matches streets in its address-range file, so new
+subdivisions often need the Nominatim street confirmation.
 
 ## Census reference assets
 

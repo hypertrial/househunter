@@ -148,10 +148,22 @@ def rank(
 
 
 @app.command("lookup")
-def lookup_place(address: str) -> None:
-    """Map a US address to a FEMA tract via the Census geocoder."""
+def lookup_place(
+    address: str,
+    allow_approximate: Annotated[
+        bool,
+        typer.Option(
+            "--allow-approximate",
+            help="Resolve an OpenStreetMap street match without confirmation",
+        ),
+    ] = False,
+) -> None:
+    """Map a US address to a FEMA tract via Census, with Nominatim fallback."""
     try:
-        typer.echo(json.dumps(lookup_address(_paths(), address), indent=2, sort_keys=True))
+        payload = lookup_address(_paths(), address, allow_approximate=allow_approximate)
+        typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+        if payload.get("status") == "confirmation_required":
+            raise typer.Exit(2)
     except AmbiguousPlaceError as exc:
         typer.echo(
             json.dumps({"error": str(exc), "candidates": exc.candidates}, indent=2), err=True

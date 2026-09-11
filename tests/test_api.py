@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import time
 
+import httpx
 from fastapi.testclient import TestClient
 
 from househunter.api import create_app
 from househunter.build import build_snapshot
 from househunter.config import RuntimePaths
 from househunter.errors import AmbiguousPlaceError, HouseHunterError
-from househunter.geocode import AddressMatch
+from househunter.geocode import OSM_ATTRIBUTION, AddressMatch, reset_geocode_runtime
 
 
 def test_api_filters_details_exports_and_token(
@@ -198,3 +199,102 @@ def test_lookup_returns_candidates_when_matches_disagree(
             "08013012101",
             "01001000100",
         ]
+
+
+def test_lookup_confirms_a_street_fallback_and_rejects_tampering(
+    fixture_environment: tuple[RuntimePaths, object], monkeypatch: object
+) -> None:
+    paths, _ = fixture_environment
+    build_snapshot(paths)
+    reset_geocode_runtime()
+    nominatim_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal nominatim_calls
+        if request.url.path.endswith("/search"):
+            nominatim_calls += 1
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "lat": "32.5",
+                        "lon": "-86.5",
+                        "display_name": "Lazy Cat Lane, Monument, Colorado, United States",
+                        "addresstype": "road",
+                        "category": "highway",
+                        "address": {"country_code": "us"},
+                    }
+                ],
+            )
+        if "coordinates" in request.url.path:
+            return httpx.Response(
+                200,
+                json={"result": {"geographies": {"Census Tracts": [{"GEOID": "01001000100"}]}}},
+            )
+        return httpx.Response(200, json={"result": {"addressMatches": []}})
+
+    class FakeClient(httpx.Client):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            kwargs["transport"] = httpx.MockTransport(handler)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr("househunter.geocode.httpx.Client", FakeClient)
+    with TestClient(create_app(paths, testing=True)) as client:
+        first = client.post(
+            "/api/v1/lookup",
+            json={"address": "1720 Lazy Cat Ln, Monument, CO 80132"},
+        )
+        assert first.status_code == 200
+        body = first.json()
+        assert body["status"] == "confirmation_required"
+        assert body["attribution"] == OSM_ATTRIBUTION
+        assert "detail" not in body
+        assert "lat" not in body["candidates"][0]
+        candidate_id = body["candidates"][0]["candidate_id"]
+        tampered = client.post(
+            "/api/v1/lookup",
+            json={
+                "address": "1720 Lazy Cat Ln, Monument, CO 80132",
+                "candidate_id": "forged",
+            },
+        )
+        assert tampered.status_code == 400
+        confirmed = client.post(
+            "/api/v1/lookup",
+            json={
+                "address": "1720 Lazy Cat Ln, Monument, CO 80132",
+                "candidate_id": candidate_id,
+            },
+        )
+        assert confirmed.status_code == 200
+        resolved = confirmed.json()
+        assert resolved["status"] == "resolved"
+        assert resolved["tract_id"] == "01001000100"
+        assert resolved["provider"] == "nominatim"
+        assert resolved["precision"] == "street"
+        assert resolved["approximate"] is True
+        assert resolved["detail"]["summary"]["place_id"] == "01001000100"
+    assert nominatim_calls == 1
+
+
+def test_lookup_does_not_fallback_when_census_is_down(
+    fixture_environment: tuple[RuntimePaths, object], monkeypatch: object
+) -> None:
+    paths, _ = fixture_environment
+    hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        hosts.append(request.url.host or "")
+        return httpx.Response(500, text="nope")
+
+    class FakeClient(httpx.Client):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            kwargs["transport"] = httpx.MockTransport(handler)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr("househunter.geocode.httpx.Client", FakeClient)
+    with TestClient(create_app(paths, testing=True)) as client:
+        response = client.post("/api/v1/lookup", json={"address": "1 Main St, Autauga, AL"})
+        assert response.status_code == 400
+        assert response.json()["detail"] == "Census geocoder request failed"
+    assert hosts == ["geocoding.geo.census.gov"]

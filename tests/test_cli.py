@@ -91,3 +91,62 @@ def test_cli_lookup_prints_tract_detail(
     assert payload["tract_id"] == "01001000100"
     assert payload["matched_address"] == "1 MAIN ST, AUTAUGA, AL, 36003"
     assert payload["detail"]["summary"]["place_id"] == "01001000100"
+    assert payload["provider"] == "census"
+
+
+def test_cli_lookup_requires_opt_in_for_street_matches(
+    fixture_environment: tuple[RuntimePaths, Path], monkeypatch: object
+) -> None:
+    _, _ = fixture_environment
+    runner = CliRunner()
+    built = runner.invoke(app, ["build"])
+    assert built.exit_code == 0, built.output
+
+    def fake_lookup(
+        paths: object,
+        address: str,
+        *,
+        allow_approximate: bool = False,
+        candidate_id: str | None = None,
+        client: object = None,
+    ) -> dict[str, object]:
+        if allow_approximate:
+            return {
+                "status": "resolved",
+                "query": address,
+                "matched_address": "Lazy Cat Lane, Monument, Colorado, United States",
+                "tract_id": "01001000100",
+                "detail": {"summary": {"place_id": "01001000100"}},
+                "provider": "nominatim",
+                "precision": "street",
+                "approximate": True,
+                "attribution": "© OpenStreetMap contributors",
+            }
+        return {
+            "status": "confirmation_required",
+            "query": address,
+            "message": "Census has no street range for that address.",
+            "attribution": "© OpenStreetMap contributors",
+            "candidates": [
+                {
+                    "candidate_id": "abc",
+                    "matched_address": "Lazy Cat Lane, Monument, Colorado, United States",
+                    "precision": "street",
+                }
+            ],
+        }
+
+    monkeypatch.setattr("househunter.cli.lookup_address", fake_lookup)
+    blocked = runner.invoke(app, ["lookup", "1720 Lazy Cat Ln, Monument, CO 80132"])
+    assert blocked.exit_code == 2
+    blocked_payload = json.loads(blocked.output)
+    assert blocked_payload["status"] == "confirmation_required"
+    assert blocked_payload["attribution"] == "© OpenStreetMap contributors"
+    allowed = runner.invoke(
+        app, ["lookup", "1720 Lazy Cat Ln, Monument, CO 80132", "--allow-approximate"]
+    )
+    assert allowed.exit_code == 0, allowed.output
+    allowed_payload = json.loads(allowed.output)
+    assert allowed_payload["provider"] == "nominatim"
+    assert allowed_payload["precision"] == "street"
+    assert allowed_payload["approximate"] is True

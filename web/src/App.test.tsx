@@ -586,9 +586,14 @@ describe("ranking workflow", () => {
         expect(url.startsWith("http") ? new URL(url).host : "127.0.0.1").not.toContain("census.gov");
         expect(url).toContain("/api/v1/lookup");
         body = {
+          status: "resolved",
           query: "1 Main St, Autauga, AL",
           matched_address: "1 MAIN ST, AUTAUGA, AL, 36003",
           tract_id: "01001000100",
+          provider: "census",
+          precision: "house",
+          approximate: false,
+          attribution: null,
           detail: {
             summary: tractSummary,
             total_weighted_housing: 0,
@@ -639,9 +644,201 @@ describe("ranking workflow", () => {
     fireEvent.click(screen.getByRole("button", { name: "Find tract" }));
     expect(await screen.findByRole("heading", { name: "01001000100, AL" })).toBeVisible();
     expect(request.mock.calls.some(([url]) => String(url).includes("census.gov"))).toBe(false);
+    expect(request.mock.calls.some(([url]) => String(url).includes("nominatim"))).toBe(false);
     expect(request.mock.calls.some(([url]) => String(url).includes("/api/v1/lookup"))).toBe(true);
+    expect(screen.getByText(/may send it to OpenStreetMap/i)).toBeVisible();
     await waitFor(() => expect(screen.getByLabelText("State")).toHaveDisplayValue("AL"));
     await waitFor(() => expect(screen.getByLabelText("County")).toHaveDisplayValue("Autauga"));
+  });
+
+  it("requires confirmation for an approximate street match and never contacts geocoders", async () => {
+    const tractSummary = {
+      ...place,
+      place_id: "08041007301",
+      name: "08041007301",
+      state: "CO",
+      place_type: "tract",
+      population_2020: 0,
+      housing_units_2020: 0,
+      county_fips: "08041",
+      county_name: "El Paso",
+    };
+    const request = vi.fn(async (input: RequestInfo | URL, options?: RequestInit) => {
+      const url = String(input);
+      let body: unknown = { items: [tractSummary], total: 1 };
+      if (url.includes("/meta")) {
+        body = {
+          app_version: "1.0.0",
+          mutation_token: "token",
+          reference_assets_ready: true,
+          reference_assets_error: null,
+          build: {
+            build_id: "fixture",
+            place_count: 1,
+            ranked_place_count: 1,
+            source_vintages: { fema: "December 2025" },
+            scope: { kind: "national", state: null },
+          },
+        };
+      } else if (url.includes("/api/v1/lookup")) {
+        const payload = JSON.parse(String(options?.body ?? "{}")) as { candidate_id?: string };
+        expect(url).toContain("/api/v1/lookup");
+        if (payload.candidate_id) {
+          body = {
+            status: "resolved",
+            query: "1720 Lazy Cat Ln, Monument, CO 80132",
+            matched_address: "Lazy Cat Lane, Monument, Colorado, United States",
+            tract_id: "08041007301",
+            provider: "nominatim",
+            precision: "street",
+            approximate: true,
+            attribution: "© OpenStreetMap contributors",
+            detail: {
+              summary: tractSummary,
+              total_weighted_housing: 0,
+              coverage_ratio: 1,
+              methodology_notice: "HouseHunter ranks FEMA tracts by published ALR_NPCTL.",
+              tract_contributions: [],
+              hazard_percentiles: [],
+              member_tract_count: null,
+            },
+          };
+        } else {
+          body = {
+            status: "confirmation_required",
+            query: "1720 Lazy Cat Ln, Monument, CO 80132",
+            message: "Census has no street range for that address. OpenStreetMap matched a road. A road representative point may cross tract boundaries.",
+            attribution: "© OpenStreetMap contributors",
+            candidates: [
+              {
+                candidate_id: "cand-1",
+                matched_address: "Lazy Cat Lane, Monument, Colorado, United States",
+                precision: "street",
+              },
+            ],
+          };
+        }
+      } else if (url.includes("/api/v1/counties?")) {
+        body = {
+          items: [
+            {
+              ...place,
+              place_id: "08041",
+              name: "El Paso",
+              state: "CO",
+              place_type: "county",
+              population_2020: 0,
+              housing_units_2020: 0,
+              county_fips: "08041",
+              county_name: "El Paso",
+            },
+          ],
+          total: 1,
+        };
+      } else if (url.includes("/api/v1/places/08041007301")) {
+        body = {
+          summary: tractSummary,
+          total_weighted_housing: 0,
+          coverage_ratio: 1,
+          methodology_notice: "HouseHunter ranks FEMA tracts by published ALR_NPCTL.",
+          tract_contributions: [],
+          hazard_percentiles: [],
+          member_tract_count: null,
+        };
+      }
+      return new Response(JSON.stringify(body), { status: 200 });
+    });
+    vi.stubGlobal("fetch", request);
+    render(<App />);
+    expect(await screen.findByText(/may send it to OpenStreetMap/i)).toBeVisible();
+    fireEvent.change(screen.getByLabelText("Address"), {
+      target: { value: "1720 Lazy Cat Ln, Monument, CO 80132" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Find tract" }));
+    expect(await screen.findByRole("region", { name: "Approximate street match" })).toBeVisible();
+    expect(screen.getByText("Lazy Cat Lane, Monument, Colorado, United States")).toBeVisible();
+    expect(screen.getByText(/road representative point may cross tract boundaries/i)).toBeVisible();
+    expect(screen.getByText("© OpenStreetMap contributors")).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "08041007301, CO" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Use approximate street location" }));
+    expect(await screen.findByRole("heading", { name: "08041007301, CO" })).toBeVisible();
+    expect(request.mock.calls.some(([url]) => String(url).includes("census.gov"))).toBe(false);
+    expect(request.mock.calls.some(([url]) => String(url).includes("nominatim"))).toBe(false);
+    expect(request.mock.calls.some(([url]) => String(url).includes("openstreetmap"))).toBe(false);
+    const lookupBodies = request.mock.calls
+      .filter(([url]) => String(url).includes("/api/v1/lookup"))
+      .map(([, options]) => JSON.parse(String((options as RequestInit | undefined)?.body ?? "{}")));
+    expect(lookupBodies[0].candidate_id).toBeUndefined();
+    expect(lookupBodies[1].candidate_id).toBe("cand-1");
+  });
+
+  it("opens an exact Nominatim house match without confirmation", async () => {
+    const tractSummary = {
+      ...place,
+      place_id: "01001000100",
+      name: "01001000100",
+      state: "AL",
+      place_type: "tract",
+      population_2020: 0,
+      housing_units_2020: 0,
+    };
+    const request = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      let body: unknown = { items: [tractSummary], total: 1 };
+      if (url.includes("/meta")) {
+        body = {
+          app_version: "1.0.0",
+          mutation_token: "token",
+          reference_assets_ready: true,
+          reference_assets_error: null,
+          build: {
+            build_id: "fixture",
+            place_count: 1,
+            ranked_place_count: 1,
+            source_vintages: { fema: "December 2025" },
+            scope: { kind: "national", state: null },
+          },
+        };
+      } else if (url.includes("/api/v1/lookup")) {
+        body = {
+          status: "resolved",
+          query: "1 Main St, Autauga, AL",
+          matched_address: "1 Main Street, Autauga, Alabama, United States",
+          tract_id: "01001000100",
+          provider: "nominatim",
+          precision: "house",
+          approximate: false,
+          attribution: "© OpenStreetMap contributors",
+          detail: {
+            summary: tractSummary,
+            total_weighted_housing: 0,
+            coverage_ratio: 1,
+            methodology_notice: "HouseHunter ranks FEMA tracts by published ALR_NPCTL.",
+            tract_contributions: [],
+            hazard_percentiles: [],
+            member_tract_count: null,
+          },
+        };
+      } else if (url.includes("/api/v1/places/01001000100")) {
+        body = {
+          summary: tractSummary,
+          total_weighted_housing: 0,
+          coverage_ratio: 1,
+          methodology_notice: "HouseHunter ranks FEMA tracts by published ALR_NPCTL.",
+          tract_contributions: [],
+          hazard_percentiles: [],
+          member_tract_count: null,
+        };
+      }
+      return new Response(JSON.stringify(body), { status: 200 });
+    });
+    vi.stubGlobal("fetch", request);
+    render(<App />);
+    fireEvent.change(await screen.findByLabelText("Address"), { target: { value: "1 Main St, Autauga, AL" } });
+    fireEvent.click(screen.getByRole("button", { name: "Find tract" }));
+    expect(await screen.findByRole("heading", { name: "01001000100, AL" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Use approximate street location" })).not.toBeInTheDocument();
+    expect(request.mock.calls.some(([url]) => String(url).includes("nominatim"))).toBe(false);
   });
 
   it("starts preparation with the per-launch token", async () => {

@@ -4,7 +4,19 @@ import httpx
 import pytest
 
 from househunter.errors import AmbiguousPlaceError, HouseHunterError
-from househunter.geocode import GEOCODER_BENCHMARK, GEOCODER_URL, GEOCODER_VINTAGE, geocode_tract
+from househunter.geocode import (
+    CENSUS_COORDINATES_URL,
+    GEOCODER_BENCHMARK,
+    GEOCODER_URL,
+    GEOCODER_VINTAGE,
+    MAX_NOMINATIM_BYTES,
+    OSM_ATTRIBUTION,
+    USER_AGENT,
+    AddressMatch,
+    geocode_tract,
+    reset_geocode_runtime,
+    resolve_address,
+)
 
 
 def _match(
@@ -151,3 +163,465 @@ def test_geocode_owned_client_disables_redirects_and_env_proxies(
         "?address=1+Main+St%2C+Boulder%2C+CO&benchmark=Public_AR_Current"
         "&vintage=Census2020_Current&format=json"
     ]
+
+
+@pytest.fixture(autouse=True)
+def _reset_geocode_runtime() -> object:
+    reset_geocode_runtime()
+    yield
+    reset_geocode_runtime()
+
+
+def _empty_census() -> httpx.Response:
+    return httpx.Response(200, json={"result": {"addressMatches": []}})
+
+
+def _coordinate_tract(tract_id: str) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={"result": {"geographies": {"Census Tracts": [{"GEOID": tract_id}]}}},
+    )
+
+
+def _nominatim_row(
+    *,
+    lat: str,
+    lon: str,
+    display: str,
+    addresstype: str,
+    house_number: str | None = None,
+    country: str = "us",
+    category: str | None = None,
+) -> dict[str, object]:
+    address: dict[str, object] = {"country_code": country}
+    if house_number is not None:
+        address["house_number"] = house_number
+    row: dict[str, object] = {
+        "lat": lat,
+        "lon": lon,
+        "display_name": display,
+        "addresstype": addresstype,
+        "address": address,
+    }
+    if category:
+        row["category"] = category
+    return row
+
+
+def test_census_match_does_not_call_nominatim() -> None:
+    hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        hosts.append(request.url.host or "")
+        return httpx.Response(
+            200,
+            json={"result": {"addressMatches": [_match("08013012101")]}},
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        match = resolve_address("1 Main St, Boulder, CO", client=client)
+    assert isinstance(match, AddressMatch)
+    assert match.tract_id == "08013012101"
+    assert match.provider == "census"
+    assert "nominatim" not in "".join(hosts)
+
+
+def test_census_zero_match_auto_resolves_matching_house() -> None:
+    hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        hosts.append(request.url.host or "")
+        if request.url.path.endswith("/search"):
+            assert request.url.params["format"] == "jsonv2"
+            assert request.url.params["addressdetails"] == "1"
+            assert request.url.params["countrycodes"] == "us"
+            assert request.headers["user-agent"] == USER_AGENT
+            return httpx.Response(
+                200,
+                json=[
+                    _nominatim_row(
+                        lat="32.5",
+                        lon="-86.5",
+                        display="1 Main Street, Autauga, Alabama, United States",
+                        addresstype="house",
+                        house_number="1",
+                    )
+                ],
+            )
+        if str(request.url).startswith(CENSUS_COORDINATES_URL):
+            assert request.url.params["x"] == "-86.5000000"
+            assert request.url.params["y"] == "32.5000000"
+            assert request.url.params["vintage"] == GEOCODER_VINTAGE
+            return _coordinate_tract("01001000100")
+        return _empty_census()
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        match = resolve_address("1 Main St, Autauga, AL", client=client)
+    assert isinstance(match, AddressMatch)
+    assert match.tract_id == "01001000100"
+    assert match.provider == "nominatim"
+    assert match.precision == "house"
+    assert match.approximate is False
+    assert match.attribution == OSM_ATTRIBUTION
+    assert hosts.count("nominatim.openstreetmap.org") == 1
+
+
+def test_lazy_cat_street_requires_confirmation_then_resolves_tract() -> None:
+    query = "1720 Lazy Cat Ln, Monument, CO 80132"
+    nominatim_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal nominatim_calls
+        if request.url.path.endswith("/search"):
+            nominatim_calls += 1
+            return httpx.Response(
+                200,
+                json=[
+                    _nominatim_row(
+                        lat="39.0695903",
+                        lon="-104.7976434",
+                        display="Lazy Cat Lane, Monument, El Paso County, Colorado, United States",
+                        addresstype="road",
+                        category="highway",
+                    )
+                ],
+            )
+        if str(request.url).startswith(CENSUS_COORDINATES_URL):
+            return _coordinate_tract("08041007301")
+        return _empty_census()
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        first = resolve_address(query, client=client)
+        assert isinstance(first, dict)
+        assert first["status"] == "confirmation_required"
+        assert first["attribution"] == OSM_ATTRIBUTION
+        assert "lat" not in first["candidates"][0]
+        assert first["candidates"][0]["precision"] == "street"
+        assert "Lazy Cat" in first["candidates"][0]["matched_address"]
+        candidate_id = first["candidates"][0]["candidate_id"]
+        resolved = resolve_address(query, candidate_id=candidate_id, client=client)
+    assert isinstance(resolved, AddressMatch)
+    assert resolved.tract_id == "08041007301"
+    assert resolved.provider == "nominatim"
+    assert resolved.precision == "street"
+    assert resolved.approximate is True
+    assert nominatim_calls == 1
+
+
+def test_typo_street_stays_a_no_match() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/search"):
+            return httpx.Response(200, json=[])
+        return _empty_census()
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(HouseHunterError, match="spelled correctly"),
+    ):
+        resolve_address("1720 Lazt Cat, Monument, CO 80132", client=client)
+
+
+def test_census_http_failure_does_not_call_nominatim() -> None:
+    hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        hosts.append(request.url.host or "")
+        if "nominatim" in (request.url.host or ""):
+            raise AssertionError("Nominatim must not run during a Census outage")
+        return httpx.Response(500, text="nope")
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(HouseHunterError, match="Census geocoder request failed"),
+    ):
+        resolve_address("1 Main St, Boulder, CO", client=client)
+    assert hosts == ["geocoding.geo.census.gov"]
+
+
+def test_malformed_census_payload_does_not_call_nominatim() -> None:
+    hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        hosts.append(request.url.host or "")
+        return httpx.Response(200, json={"result": {}})
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(HouseHunterError, match="malformed"),
+    ):
+        resolve_address("1 Main St, Boulder, CO", client=client)
+    assert "nominatim" not in "".join(hosts)
+
+
+def test_conflicting_nominatim_candidates_stay_ambiguous() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/search"):
+            return httpx.Response(
+                200,
+                json=[
+                    _nominatim_row(
+                        lat="39.0",
+                        lon="-104.8",
+                        display="Lazy Cat Lane, Monument, CO",
+                        addresstype="road",
+                        category="highway",
+                    ),
+                    _nominatim_row(
+                        lat="39.2",
+                        lon="-104.9",
+                        display="Lazy Cat Lane, Other, CO",
+                        addresstype="road",
+                        category="highway",
+                    ),
+                ],
+            )
+        return _empty_census()
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(AmbiguousPlaceError),
+    ):
+        resolve_address("1720 Lazy Cat Ln, Monument, CO 80132", client=client)
+
+
+def test_nominatim_house_auto_resolve_requires_house_type_and_matching_number() -> None:
+    query = "1 Main St, Autauga, AL"
+
+    def shop(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/search"):
+            return httpx.Response(
+                200,
+                json=[
+                    _nominatim_row(
+                        lat="32.5",
+                        lon="-86.5",
+                        display="A Shop, 1 Main Street, Autauga, Alabama",
+                        addresstype="shop",
+                        house_number="1",
+                        category="shop",
+                    )
+                ],
+            )
+        return _empty_census()
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(shop)) as client,
+        pytest.raises(HouseHunterError, match="Address not found"),
+    ):
+        resolve_address(query, client=client)
+
+    def wrong_number(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/search"):
+            return httpx.Response(
+                200,
+                json=[
+                    _nominatim_row(
+                        lat="32.5",
+                        lon="-86.5",
+                        display="9 Main Street, Autauga, Alabama",
+                        addresstype="house",
+                        house_number="9",
+                    )
+                ],
+            )
+        return _empty_census()
+
+    reset_geocode_runtime()
+    with (
+        httpx.Client(transport=httpx.MockTransport(wrong_number)) as client,
+        pytest.raises(HouseHunterError, match="Address not found"),
+    ):
+        resolve_address(query, client=client)
+
+
+def test_nominatim_rejects_locality_non_us_malformed_and_oversized() -> None:
+    query = "1 Main St, Autauga, AL"
+
+    def locality(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/search"):
+            return httpx.Response(
+                200,
+                json=[
+                    _nominatim_row(
+                        lat="32.5",
+                        lon="-86.5",
+                        display="Autauga, Alabama",
+                        addresstype="city",
+                    )
+                ],
+            )
+        return _empty_census()
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(locality)) as client,
+        pytest.raises(HouseHunterError, match="Address not found"),
+    ):
+        resolve_address(query, client=client)
+
+    def foreign(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/search"):
+            return httpx.Response(
+                200,
+                json=[
+                    _nominatim_row(
+                        lat="51.5",
+                        lon="-0.1",
+                        display="1 Main Street, London",
+                        addresstype="house",
+                        house_number="1",
+                        country="gb",
+                    )
+                ],
+            )
+        return _empty_census()
+
+    reset_geocode_runtime()
+    with (
+        httpx.Client(transport=httpx.MockTransport(foreign)) as client,
+        pytest.raises(HouseHunterError, match="Address not found"),
+    ):
+        resolve_address(query, client=client)
+
+    def bad_point(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/search"):
+            return httpx.Response(
+                200,
+                json=[
+                    _nominatim_row(
+                        lat="nan",
+                        lon="-86.5",
+                        display="1 Main Street",
+                        addresstype="house",
+                        house_number="1",
+                    )
+                ],
+            )
+        return _empty_census()
+
+    reset_geocode_runtime()
+    with (
+        httpx.Client(transport=httpx.MockTransport(bad_point)) as client,
+        pytest.raises(HouseHunterError, match="Address not found"),
+    ):
+        resolve_address(query, client=client)
+
+    def oversized(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/search"):
+            return httpx.Response(200, content=b"x" * (MAX_NOMINATIM_BYTES + 1))
+        return _empty_census()
+
+    reset_geocode_runtime()
+    with (
+        httpx.Client(transport=httpx.MockTransport(oversized)) as client,
+        pytest.raises(HouseHunterError, match="malformed"),
+    ):
+        resolve_address(query, client=client)
+
+
+def test_nominatim_cache_and_rate_limit_use_injected_clock() -> None:
+    nominatim_calls = 0
+    now = [0.0]
+    sleeps: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal nominatim_calls
+        if request.url.path.endswith("/search"):
+            nominatim_calls += 1
+            return httpx.Response(200, json=[])
+        return _empty_census()
+
+    def sleeper(wait: float) -> None:
+        sleeps.append(wait)
+        now[0] += wait
+
+    reset_geocode_runtime(clock=lambda: now[0], sleeper=sleeper)
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(HouseHunterError, match="Address not found"):
+            resolve_address("1 Main St, Autauga, AL", client=client)
+        with pytest.raises(HouseHunterError, match="Address not found"):
+            resolve_address("1 Main St, Autauga, AL", client=client)
+        assert nominatim_calls == 1
+        now[0] = 0.2
+        with pytest.raises(HouseHunterError, match="Address not found"):
+            resolve_address("2 Main St, Autauga, AL", client=client)
+    assert nominatim_calls == 2
+    assert sleeps == [pytest.approx(0.8)]
+
+
+def test_nominatim_can_be_disabled_without_a_release(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOUSEHUNTER_NOMINATIM_URL", "off")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "nominatim" in (request.url.host or ""):
+            raise AssertionError("disabled Nominatim must not be called")
+        return _empty_census()
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(HouseHunterError, match="Address not found"),
+    ):
+        resolve_address("1 Main St, Autauga, AL", client=client)
+
+
+def test_nominatim_url_must_be_https(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOUSEHUNTER_NOMINATIM_URL", "http://nominatim.example")
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return _empty_census()
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(HouseHunterError, match="must be https"),
+    ):
+        resolve_address("1 Main St, Autauga, AL", client=client)
+
+
+def test_confirmation_rejects_a_tampered_candidate() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/search"):
+            return httpx.Response(
+                200,
+                json=[
+                    _nominatim_row(
+                        lat="39.0695903",
+                        lon="-104.7976434",
+                        display="Lazy Cat Lane, Monument, Colorado, United States",
+                        addresstype="road",
+                        category="highway",
+                    )
+                ],
+            )
+        return _empty_census()
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        first = resolve_address("1720 Lazy Cat Ln, Monument, CO 80132", client=client)
+        assert isinstance(first, dict)
+        with pytest.raises(HouseHunterError, match="no longer available"):
+            resolve_address(
+                "1720 Lazy Cat Ln, Monument, CO 80132",
+                candidate_id="not-a-real-candidate",
+                client=client,
+            )
+
+
+def test_owned_lookup_client_disables_redirects_and_env_proxies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"result": {"addressMatches": [_match("08013012101")]}})
+
+    class CapturingClient(httpx.Client):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            captured.update(kwargs)
+            kwargs["transport"] = httpx.MockTransport(handler)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr("househunter.geocode.httpx.Client", CapturingClient)
+    match = resolve_address("1 Main St, Boulder, CO")
+    assert isinstance(match, AddressMatch)
+    assert match.tract_id == "08013012101"
+    assert captured.get("follow_redirects") is False
+    assert captured.get("trust_env") is False
+    assert captured.get("headers", {}).get("User-Agent") == USER_AGENT

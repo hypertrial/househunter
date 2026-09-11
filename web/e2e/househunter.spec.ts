@@ -122,9 +122,14 @@ test("prepares, ranks, inspects, and exports", async ({ page }) => {
       expect(route.request().method()).toBe("POST");
       await route.fulfill({
         json: {
+          status: "resolved",
           query: "1 Main St, Boulder, CO",
           matched_address: "1 MAIN ST, BOULDER, CO, 80302",
           tract_id: "08013012101",
+          provider: "census",
+          precision: "house",
+          approximate: false,
+          attribution: null,
           detail: {
             summary,
             total_weighted_housing: 0,
@@ -152,6 +157,7 @@ test("prepares, ranks, inspects, and exports", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Prepare national data" }).click();
   await expect(page.getByRole("heading", { name: "Lower risk, plainly ranked." })).toBeVisible();
+  await expect(page.getByText(/may send it to OpenStreetMap/i)).toBeVisible();
   await expect(page.getByLabel("Score color scale, lower is better")).toBeVisible();
   await expect(page.getByText("0–20")).toBeVisible();
   await expect(page.getByText("20–40")).toBeVisible();
@@ -193,4 +199,111 @@ test("prepares, ranks, inspects, and exports", async ({ page }) => {
   const downloaded = page.waitForEvent("download");
   await page.getByRole("link", { name: "Tracts CSV" }).click();
   await expect(await downloaded).toBeTruthy();
+});
+
+test("confirms an approximate street match without contacting geocoders", async ({ page }) => {
+  const streetSummary = {
+    ...summary,
+    place_id: "08041007301",
+    name: "08041007301",
+    county_fips: "08041",
+    county_name: "El Paso",
+  };
+  const external: string[] = [];
+  page.on("request", (request) => {
+    const host = new URL(request.url()).hostname;
+    if (host.includes("census.gov") || host.includes("nominatim") || host.includes("openstreetmap.org")) {
+      external.push(request.url());
+    }
+  });
+  await page.route("**/api/v1/**", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/v1/meta") {
+      await route.fulfill({
+        json: {
+          app_version: "1.0.0",
+          mutation_token: "test-token",
+          reference_assets_ready: true,
+          reference_assets_error: null,
+          build: {
+            build_id: "national-fixture",
+            place_count: 1,
+            ranked_place_count: 1,
+            source_vintages: { fema: "December 2025" },
+            scope: { kind: "national", state: null },
+          },
+        },
+      });
+    } else if (url.pathname === "/api/v1/places") {
+      await route.fulfill({ json: { total: 1, items: [streetSummary] } });
+    } else if (url.pathname === "/api/v1/counties") {
+      await route.fulfill({ json: { total: 0, items: [] } });
+    } else if (url.pathname === "/api/v1/lookup") {
+      const posted = route.request().postDataJSON() as { candidate_id?: string };
+      if (posted.candidate_id) {
+        await route.fulfill({
+          json: {
+            status: "resolved",
+            query: "1720 Lazy Cat Ln, Monument, CO 80132",
+            matched_address: "Lazy Cat Lane, Monument, Colorado, United States",
+            tract_id: "08041007301",
+            provider: "nominatim",
+            precision: "street",
+            approximate: true,
+            attribution: "© OpenStreetMap contributors",
+            detail: {
+              summary: streetSummary,
+              total_weighted_housing: 0,
+              coverage_ratio: 1,
+              methodology_notice: "HouseHunter ranks FEMA tracts by published ALR_NPCTL.",
+              tract_contributions: [],
+              hazard_percentiles: hazards,
+              member_tract_count: null,
+            },
+          },
+        });
+      } else {
+        await route.fulfill({
+          json: {
+            status: "confirmation_required",
+            query: "1720 Lazy Cat Ln, Monument, CO 80132",
+            message: "Census has no street range for that address. OpenStreetMap matched a road. A road representative point may cross tract boundaries.",
+            attribution: "© OpenStreetMap contributors",
+            candidates: [
+              {
+                candidate_id: "cand-1",
+                matched_address: "Lazy Cat Lane, Monument, Colorado, United States",
+                precision: "street",
+              },
+            ],
+          },
+        });
+      }
+    } else if (url.pathname === "/api/v1/places/08041007301") {
+      await route.fulfill({
+        json: {
+          summary: streetSummary,
+          total_weighted_housing: 0,
+          coverage_ratio: 1,
+          methodology_notice: "HouseHunter ranks FEMA tracts by published ALR_NPCTL.",
+          tract_contributions: [],
+          hazard_percentiles: hazards,
+          member_tract_count: null,
+        },
+      });
+    } else {
+      await route.abort();
+    }
+  });
+
+  await page.goto("/");
+  await expect(page.getByText(/may send it to OpenStreetMap/i)).toBeVisible();
+  await page.getByLabel("Address").fill("1720 Lazy Cat Ln, Monument, CO 80132");
+  await page.getByRole("button", { name: "Find tract" }).click();
+  await expect(page.getByRole("region", { name: "Approximate street match" })).toBeVisible();
+  await expect(page.getByText("© OpenStreetMap contributors")).toBeVisible();
+  await expect(page.getByText(/road representative point may cross tract boundaries/i)).toBeVisible();
+  await page.getByRole("button", { name: "Use approximate street location" }).click();
+  await expect(page.getByRole("heading", { name: "08041007301, CO" })).toBeVisible();
+  expect(external).toEqual([]);
 });

@@ -26,8 +26,12 @@ and local Pad state out of this public repository.
 - Never commit credentials or fetched FEMA payloads.
 - Runtime ranking uses FEMA only. Do not contact census.gov from prepare,
   download, or build. Tract and county layers are both required.
-- Address lookup may contact `geocoding.geo.census.gov` on explicit user action.
-  The browser never does; the loopback API proxies the geocoder.
+- Address lookup may contact `geocoding.geo.census.gov` on explicit user action,
+  and may contact Nominatim (`HOUSEHUNTER_NOMINATIM_URL`, default
+  `nominatim.openstreetmap.org`) only after a valid Census empty match list.
+  The browser never does; the loopback API proxies both. Nominatim is not a
+  Census-outage backup. Street-level OSM matches require confirmation.
+  Addresses are not persisted.
 
 ## Verification
 

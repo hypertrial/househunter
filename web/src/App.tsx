@@ -1,5 +1,5 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
-import type { AddressLookup, HazardPercentile, JobStatus, PlaceDetail, PlaceSummary } from "./types";
+import type { AddressConfirmation, AddressLookup, HazardPercentile, JobStatus, LookupResult, PlaceDetail, PlaceSummary } from "./types";
 
 interface Meta {
   app_version: string;
@@ -224,6 +224,7 @@ function Rankings({ meta }: { meta: Meta }) {
   const [level, setLevel] = useState<Geography>("tract");
   const [address, setAddress] = useState("");
   const [looking, setLooking] = useState(false);
+  const [pending, setPending] = useState<AddressConfirmation | null>(null);
   const [includeUnranked, setIncludeUnranked] = useState(false);
   const [sort, setSort] = useState("risk_score");
   const [direction, setDirection] = useState("asc");
@@ -284,7 +285,17 @@ function Rankings({ meta }: { meta: Meta }) {
     setSelected(countyFips);
     setOffset(0);
   }
-  async function findTract(event: FormEvent) {
+  function openResolved(result: AddressLookup) {
+    const nextState = result.detail.summary.state;
+    const nextCounty = result.detail.summary.county_fips;
+    setPending(null);
+    setLevel("tract");
+    setState((STATE_ABBREVIATIONS as readonly string[]).includes(nextState) ? nextState : "");
+    setCounty(/^\d{5}$/.test(nextCounty) ? nextCounty : "");
+    setSelected(result.tract_id);
+    setOffset(0);
+  }
+  async function findTract(event: FormEvent, candidateId?: string) {
     event.preventDefault();
     const query = address.trim();
     if (!query) {
@@ -295,19 +306,22 @@ function Rankings({ meta }: { meta: Meta }) {
     setLooking(true);
     setError(null);
     try {
-      const result = await json<AddressLookup>("/api/v1/lookup", {
+      const result = await json<LookupResult>("/api/v1/lookup", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ address: query }),
+        body: JSON.stringify({
+          address: query,
+          ...(candidateId ? { candidate_id: candidateId } : {}),
+        }),
       });
-      const nextState = result.detail.summary.state;
-      const nextCounty = result.detail.summary.county_fips;
-      setLevel("tract");
-      setState((STATE_ABBREVIATIONS as readonly string[]).includes(nextState) ? nextState : "");
-      setCounty(/^\d{5}$/.test(nextCounty) ? nextCounty : "");
-      setSelected(result.tract_id);
-      setOffset(0);
+      if (result.status === "confirmation_required") {
+        setPending(result);
+        setSelected(null);
+        return;
+      }
+      openResolved(result);
     } catch (caught) {
+      setPending(null);
       setError((caught as Error).message);
     } finally {
       setLooking(false);
@@ -336,8 +350,15 @@ function Rankings({ meta }: { meta: Meta }) {
           <button type="button" aria-pressed={level === "county"} onClick={() => changeLevel("county")}>Counties</button>
         </div>
         <form className="lookup" onSubmit={(event) => { void findTract(event); }}>
-          <label>Address<input value={address} onChange={(e) => setAddress(e.target.value)} placeholder="1670 Broadway, Denver, CO" maxLength={200} autoComplete="off" /></label>
+          <label>Address<input value={address} onChange={(e) => { setAddress(e.target.value); setPending(null); }} placeholder="1670 Broadway, Denver, CO" maxLength={200} autoComplete="off" /></label>
           <button className="primary" type="submit" disabled={looking}>Find tract</button>
+          <p className="fine lookup-note">A lookup sends this address to the U.S. Census Bureau and may send it to OpenStreetMap. Do not submit confidential addresses.</p>
+          {pending && pending.candidates[0] && <div className="confirm-card" role="region" aria-label="Approximate street match">
+            <p><strong>{pending.candidates[0].matched_address}</strong></p>
+            <p>{pending.message}</p>
+            <p className="fine">{pending.attribution}</p>
+            <button className="primary" type="button" disabled={looking} onClick={(event) => { const candidateId = pending.candidates[0]?.candidate_id; if (candidateId) void findTract(event, candidateId); }}>Use approximate street location</button>
+          </div>}
         </form>
         <form className="filters" onSubmit={submit}>
           <label>Search<input value={search} onChange={(e) => setSearch(e.target.value)} placeholder={level === "county" ? "County name or FIPS" : "Tract FIPS or county name"} /></label>

@@ -49,13 +49,33 @@ class PlaceDetail(BaseModel):
 
 class AddressLookupRequest(BaseModel):
     address: str = Field(max_length=200)
+    candidate_id: str | None = Field(default=None, max_length=64)
 
 
 class AddressLookup(BaseModel):
+    status: Literal["resolved"] = "resolved"
     query: str
     matched_address: str
     tract_id: str
     detail: PlaceDetail
+    provider: Literal["census", "nominatim"] = "census"
+    precision: Literal["house", "street"] = "house"
+    approximate: bool = False
+    attribution: str | None = None
+
+
+class FallbackCandidate(BaseModel):
+    candidate_id: str
+    matched_address: str
+    precision: Literal["street"]
+
+
+class AddressConfirmation(BaseModel):
+    status: Literal["confirmation_required"]
+    query: str
+    message: str
+    attribution: str
+    candidates: list[FallbackCandidate]
 
 
 class PlacePage(BaseModel):

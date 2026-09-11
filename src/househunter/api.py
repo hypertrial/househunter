@@ -17,6 +17,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from . import __version__
 from .config import RuntimePaths
 from .contracts import (
+    AddressConfirmation,
     AddressLookup,
     AddressLookupRequest,
     JobStatus,
@@ -212,9 +213,9 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
         with Store(runtime) as store:
             return store.place_detail(store.resolve_place(place_id))
 
-    @app.post("/api/v1/lookup", response_model=AddressLookup)
+    @app.post("/api/v1/lookup", response_model=AddressLookup | AddressConfirmation)
     def lookup(request: AddressLookupRequest) -> dict[str, object]:
-        return lookup_address(runtime, request.address)
+        return lookup_address(runtime, request.address, candidate_id=request.candidate_id)
 
     @app.get("/api/v1/counties", response_model=PlacePage)
     def counties(

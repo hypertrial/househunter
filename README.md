@@ -13,7 +13,10 @@ composite; they are not a HouseHunter blend, and lists still rank only on
 composite `ALR_NPCTL`. A HouseHunter score is **not** a property-level
 assessment, a loss probability, an insurance quote, or a prediction. Address lookup
 maps a house to its 2020 Census tract via the public Census geocoder, then shows
-that tract's FEMA score.
+that tract's FEMA score. If Census returns no street match, the loopback server
+may query OpenStreetMap Nominatim and convert accepted coordinates back through
+Census. Street-level matches need confirmation because a road point can cross
+tract boundaries.
 
 ## Quick start
 
@@ -40,13 +43,21 @@ uv run househunter rank --state CO --limit 20
 uv run househunter rank --level county --state CO
 uv run househunter inspect 08013012101
 uv run househunter inspect 08013
-uv run househunter lookup "123 Main St, Denver, CO"
+uv run househunter lookup "1670 Broadway, Denver, CO"
+uv run househunter lookup "1720 Lazy Cat Ln, Monument, CO 80132" --allow-approximate
 uv run househunter app
 ```
 
 Runtime data is written beneath `data/` by default. Set `HOUSEHUNTER_DATA_DIR` to use a
 different local directory. The server listens only on `127.0.0.1`; it has no telemetry,
 accounts, hosted database, or external browser requests.
+
+A lookup first asks Census. If Census returns a valid empty match list, the
+server may query Nominatim (`HOUSEHUNTER_NOMINATIM_URL`, default
+`https://nominatim.openstreetmap.org`; set to `off` to disable). Nominatim is
+not used for Census outages, malformed Census responses, or ambiguous Census
+matches. Street names must be spelled correctly. Do not submit confidential
+addresses.
 
 ## Commands
 
@@ -57,7 +68,7 @@ househunter download [--source fema|fema_counties|all]
 househunter build [--state CO]
 househunter rank [--state CO] [--county STCOFIPS] [--level tract|county] [--limit N] [--include-unranked]
 househunter inspect TRACT_FIPS|COUNTY_FIPS
-househunter lookup "123 Main St, Denver, CO"
+househunter lookup "1670 Broadway, Denver, CO" [--allow-approximate]
 househunter export --format parquet|csv [--level tract|county] [--output PATH]
 househunter app [--port PORT] [--no-open]
 ```

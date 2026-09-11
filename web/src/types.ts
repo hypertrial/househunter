@@ -40,11 +40,32 @@ export interface PlaceDetail {
 }
 
 export interface AddressLookup {
+  status: "resolved";
   query: string;
   matched_address: string;
   tract_id: string;
   detail: PlaceDetail;
+  provider: "census" | "nominatim";
+  precision: "house" | "street";
+  approximate: boolean;
+  attribution: string | null;
 }
+
+export interface FallbackCandidate {
+  candidate_id: string;
+  matched_address: string;
+  precision: "street";
+}
+
+export interface AddressConfirmation {
+  status: "confirmation_required";
+  query: string;
+  message: string;
+  attribution: string;
+  candidates: FallbackCandidate[];
+}
+
+export type LookupResult = AddressLookup | AddressConfirmation;
 
 export interface JobStatus {
   job_id: string;

@@ -10,6 +10,10 @@ class BuildNotFoundError(HouseHunterError):
     """No usable published build exists."""
 
 
+class CensusNoMatchError(HouseHunterError):
+    """Census returned a valid empty address match list."""
+
+
 class AmbiguousPlaceError(HouseHunterError):
     def __init__(self, query: str, candidates: list[dict[str, str]]) -> None:
         self.query = query
