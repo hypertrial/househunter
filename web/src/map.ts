@@ -1,4 +1,4 @@
-import type { ZoomTransform } from "d3-zoom";
+import { zoomIdentity, type ZoomTransform } from "d3-zoom";
 import type { Geography, MapManifest, MapScore } from "./types";
 
 export const MAP_COLORS = {
@@ -79,6 +79,12 @@ export function cameraFromTransform(transform: ZoomTransform, width: number, hei
     cy: Math.max(0, Math.min(1, (height / 2 - transform.y) / transform.k / height)),
     z: Math.max(1, Math.min(12, transform.k)),
   };
+}
+
+export function transformFromCamera(camera: CameraState, width: number, height: number): ZoomTransform {
+  return zoomIdentity
+    .translate(width / 2 - camera.cx * width * camera.z, height / 2 - camera.cy * height * camera.z)
+    .scale(camera.z);
 }
 
 export function readHash(hash: string) {

@@ -101,6 +101,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .detail-drawer h3 { margin-top: 30px; font-size: 15px; }
 .score { display: flex; align-items: center; gap: 18px; padding: 18px 0; border-block: 1px solid rgba(221, 231, 228, .14); }
 .score > span { font: 700 52px/1 Georgia, serif; color: #f2e6c0; }.score small { color: #9caca7; line-height: 1.45; }
+.score.score-low > span { color: #7fa87e; }.score.score-below > span { color: #c4b04a; }.score.score-typical > span { color: #d2a727; }.score.score-high > span { color: #c56a42; }.score.score-highest > span { color: #b14a3c; }
 .facts { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; margin: 20px 0; background: rgba(224, 234, 231, .12); }
 .facts div { padding: 12px; background: #151f24; }.facts dt { color: #849692; font-size: 9px; letter-spacing: .1em; text-transform: uppercase; }.facts dd { margin: 6px 0 0; font-weight: 750; }
 .contribution { margin: 15px 0; }.contribution > div:first-child { display: flex; justify-content: space-between; gap: 12px; font-size: 11px; font-weight: 700; }

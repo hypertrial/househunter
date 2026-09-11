@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -536,6 +537,11 @@ def _download_source(
             raise SourceContractError(
                 f"FEMA checksum mismatch: expected {configured_sha}, got {logical_sha}"
             )
+        try:
+            _validate_layer(http, source)
+        except SourceContractError:
+            shutil.rmtree(pages, ignore_errors=True)
+            raise
         if cancelled and cancelled():
             raise InterruptedError("FEMA download cancelled")
         temporary = output.with_suffix(".parquet.tmp")

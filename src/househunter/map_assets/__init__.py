@@ -254,6 +254,15 @@ def load_manifest(directory: Path | None = None, *, verify_files: bool = True) -
     return manifest
 
 
+def topology_ids(
+    manifest: dict[str, Any], key: str, directory: Path | None = None
+) -> set[str]:
+    entry = next((item for item in manifest["files"] if item["key"] == key), None)
+    if entry is None:
+        raise ValueError(f"Map asset manifest is missing {key}")
+    return _topology_ids((directory or asset_directory()) / entry["filename"], entry)
+
+
 def map_asset_status(directory: Path | None = None) -> MapAssetStatus:
     try:
         manifest = load_manifest(directory)

@@ -389,7 +389,7 @@ def _classify_nominatim(query: str, row: dict[str, Any]) -> NominatimHit | None:
     address = row.get("address")
     details = address if isinstance(address, dict) else {}
     country = str(details.get("country_code") or "").lower()
-    if country and country != "us":
+    if country != "us":
         return None
     addresstype = str(row.get("addresstype") or row.get("type") or "").lower()
     category = str(row.get("category") or "").lower()

@@ -27,7 +27,9 @@ def test_api_filters_details_exports_and_token(
         assert "frame-ancestors 'none'" in meta_response.headers["content-security-policy"]
         meta = meta_response.json()
         assert meta["reference_assets_ready"] is True
-        assert meta["methodology"] == "FEMA tract-level ALR_NPCTL"
+        assert meta["methodology"] == (
+            "Separate FEMA tract-level and county-level ALR_NPCTL percentiles"
+        )
         response = client.get("/api/v1/places", params={"state": "AL"})
         assert response.status_code == 200
         assert [row["place_id"] for row in response.json()["items"]] == [

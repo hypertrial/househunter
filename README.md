@@ -123,11 +123,15 @@ Maintainers regenerate boundaries only when the pinned FEMA revisions change:
 
 ```console
 uv run python scripts/generate_map_assets.py
+uv run python scripts/validate_release.py
 ```
 
 The generator validates the live ArcGIS item/revision metadata, exact tract and county
 identifier sets, geometry, jurisdiction coverage, output sizes, and every generated
-topology. It emits deterministic content-addressed files and
+topology. The release validator checks the pinned tract and county caches against the
+packaged map manifest and writes its report under ignored `data/`. The generator emits
+deterministic content-addressed files from a clean staged candidate, validates the full
+candidate before publication, and keeps the prior release usable if validation fails. It writes
 `src/househunter/map_assets/manifest.json`; `--reuse-raw` rebuilds from the ignored local
 geometry download only when its recorded source revisions and digests still match the
 live pinned FEMA layers. A revision mismatch or corrupt packaged asset blocks the map

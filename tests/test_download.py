@@ -54,6 +54,63 @@ def test_geometry_contract_rejects_non_polygon_layer() -> None:
         _validate_layer(client, source, expected_geometry_type="esriGeometryPolygon")
 
 
+def test_attribute_download_rechecks_revision_after_pagination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fields = {
+        "TRACTFIPS": "esriFieldTypeString",
+        "ALR_NPCTL": "esriFieldTypeDouble",
+        "NRI_VER": "esriFieldTypeString",
+    }
+    source = {
+        "item_id": "fixture",
+        "layer_url": "https://example.test/layer/0",
+        "item_modified_ms": 10,
+        "data_last_edit_ms": 20,
+        "layer_last_edit_ms": 30,
+        "expected_row_count": 1,
+        "fields": fields,
+        "schema_fingerprint": _schema_fingerprint(fields),
+        "item_url": "https://example.test/item",
+        "terms_url": "https://example.test/terms",
+        "version": "December 2025",
+        "release": "v1.20",
+        "canonical_sha256": None,
+    }
+    config_path = tmp_path / "sources.yml"
+    config_path.write_text(yaml.safe_dump({"schema_version": 1, "fema": source}))
+    monkeypatch.setenv("HOUSEHUNTER_CONFIG", str(config_path))
+    metadata_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal metadata_calls
+        if "/sharing/" in request.url.path:
+            return httpx.Response(200, json={"modified": 10})
+        if request.url.path.endswith("query"):
+            return httpx.Response(200, json={"features": [{"attributes": {
+                "TRACTFIPS": "01001000100", "ALR_NPCTL": 1.0,
+                "NRI_VER": "December 2025",
+            }}]})
+        metadata_calls += 1
+        return httpx.Response(200, json={
+            "maxRecordCount": 1,
+            "editingInfo": {
+                "lastEditDate": 30 + (metadata_calls - 1),
+                "dataLastEditDate": 20,
+            },
+            "fields": [{"name": name, "type": kind} for name, kind in fields.items()],
+        })
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(SourceContractError, match="source changed"),
+    ):
+        download_fema(RuntimePaths.from_root(tmp_path), client=client)
+    assert metadata_calls == 2
+    assert not (tmp_path / "cache" / "fema_nri_tracts.parquet").exists()
+    assert not page_cache_dir(RuntimePaths.from_root(tmp_path), "fema-pages", source).exists()
+
+
 def test_download_paginates_and_reuses_verified_cache(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     config = {
         "schema_version": 1,
@@ -121,7 +178,7 @@ def test_download_paginates_and_reuses_verified_cache(tmp_path: Path, monkeypatc
         assert len(calls) == first_calls
         pl.DataFrame({"tract_id": ["broken"]}).write_parquet(output)
         download_fema(paths, client=client)
-    assert len(calls) == first_calls + 2
+    assert len(calls) == first_calls + 4
     assert paths.source_manifest.is_file()
     assert pl.read_parquet(paths.source_manifest)["source"].item() == "fema"
 

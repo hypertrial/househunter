@@ -190,10 +190,12 @@ def _nominatim_row(
     display: str,
     addresstype: str,
     house_number: str | None = None,
-    country: str = "us",
+    country: str | None = "us",
     category: str | None = None,
 ) -> dict[str, object]:
-    address: dict[str, object] = {"country_code": country}
+    address: dict[str, object] = {}
+    if country is not None:
+        address["country_code"] = country
     if house_number is not None:
         address["house_number"] = house_number
     row: dict[str, object] = {
@@ -578,6 +580,30 @@ def test_nominatim_rejects_locality_non_us_malformed_and_oversized() -> None:
     reset_geocode_runtime()
     with (
         httpx.Client(transport=httpx.MockTransport(foreign)) as client,
+        pytest.raises(HouseHunterError, match="Address not found"),
+    ):
+        resolve_address(query, client=client)
+
+    def missing_country(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/search"):
+            return httpx.Response(
+                200,
+                json=[
+                    _nominatim_row(
+                        lat="32.5",
+                        lon="-86.5",
+                        display="1 Main Street",
+                        addresstype="house",
+                        house_number="1",
+                        country=None,
+                    )
+                ],
+            )
+        return _empty_census()
+
+    reset_geocode_runtime()
+    with (
+        httpx.Client(transport=httpx.MockTransport(missing_country)) as client,
         pytest.raises(HouseHunterError, match="Address not found"),
     ):
         resolve_address(query, client=client)

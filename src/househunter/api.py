@@ -158,7 +158,7 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
         result: dict[str, object] = {
             "app_version": __version__,
             "mutation_token": token,
-            "methodology": "FEMA tract-level ALR_NPCTL",
+            "methodology": "Separate FEMA tract-level and county-level ALR_NPCTL percentiles",
             "reference_assets_ready": True,
             "reference_assets_error": None,
             "map_assets": assets.as_dict(),

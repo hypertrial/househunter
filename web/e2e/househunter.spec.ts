@@ -157,8 +157,23 @@ test("keeps preparation and retained workflows inside the map shell", async ({ p
   await page.getByRole("button", { name: "Lowest / Highest" }).click();
   await expect(page.getByRole("heading", { name: "Lowest" })).toBeVisible();
   await page.getByRole("button", { name: /Census tract 121.01/ }).first().click();
-  await expect(page.getByRole("dialog", { name: "Tract detail" })).toContainText("Wildfire");
-  await expect(page.getByRole("dialog", { name: "Tract detail" })).toContainText("No rating");
+  const detailDrawer = page.getByRole("dialog", { name: "Tract detail" });
+  await expect(detailDrawer).toContainText("Wildfire");
+  await expect(detailDrawer).toContainText("No rating");
+  const score = detailDrawer.locator(".score");
+  const scoreValue = score.locator("> span");
+  for (const [tone, color] of [
+    ["score-low", "rgb(127, 168, 126)"],
+    ["score-below", "rgb(196, 176, 74)"],
+    ["score-typical", "rgb(210, 167, 39)"],
+    ["score-high", "rgb(197, 106, 66)"],
+    ["score-highest", "rgb(177, 74, 60)"],
+  ]) {
+    await score.evaluate((element, className) => {
+      element.className = `score ${className}`;
+    }, tone);
+    await expect(scoreValue).toHaveCSS("color", color);
+  }
 });
 
 test("uses explicit address confirmation and never calls a geocoder from the browser", async ({ page }) => {
@@ -170,6 +185,7 @@ test("uses explicit address confirmation and never calls a geocoder from the bro
   await page.goto("/");
   await page.getByRole("button", { name: "Search" }).click();
   await expect(page.getByText(/through this loopback server/i)).toBeVisible();
+  await expect(page.getByText(/Do not submit confidential addresses/i)).toBeVisible();
   await page.getByLabel("Street address").fill("1 Main St, Boulder, CO");
   await page.getByRole("button", { name: "Find tract" }).click();
   await expect(page.getByRole("region", { name: "Approximate street match" })).toBeVisible();

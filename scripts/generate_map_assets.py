@@ -6,6 +6,7 @@ import gzip
 import json
 import os
 import subprocess
+import tempfile
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ from househunter.map_assets import (
     MANIFEST_NAME,
     SCHEMA_VERSION,
     asset_directory,
+    load_manifest,
     source_revisions,
     validate_polygon_geometry,
     validate_raw_provenance,
@@ -68,6 +70,7 @@ def fetch_geometry(
             raise RuntimeError("ArcGIS geometry response has no feature list")
         features.extend(page)
         print(f"{source['name']}: {len(features):,}/{source['expected_row_count']:,}", flush=True)
+    _validate_layer(client, source, expected_geometry_type="esriGeometryPolygon")
     return features
 
 
@@ -160,6 +163,35 @@ def validate_topology(path: Path, expected_ids: set[str]) -> None:
             raise RuntimeError(f"Generated asset has an invalid arc reference: {path.name}")
 
 
+def expected_topology_stems() -> set[str]:
+    return {"tracts-national", "counties-national", "states-national"} | {
+        f"tracts-{state.lower()}" for state in JURISDICTIONS
+    }
+
+
+def validate_topology_inventory(work_dir: Path) -> list[Path]:
+    topology_files = sorted(work_dir.glob("*.topojson"))
+    actual_stems = {path.stem for path in topology_files}
+    if actual_stems != expected_topology_stems():
+        raise RuntimeError("Generated topology inventory is incomplete or unexpected")
+    return topology_files
+
+
+def publish_assets(candidate: Path, output: Path, manifest: dict[str, Any]) -> None:
+    expected_files = {entry["filename"] for entry in manifest["files"]} | {MANIFEST_NAME}
+    actual_files = {path.name for path in candidate.iterdir()}
+    if actual_files != expected_files:
+        raise RuntimeError("Generated map candidate has an unexpected file inventory")
+    load_manifest(candidate)
+    output.mkdir(parents=True, exist_ok=True)
+    for filename in sorted(expected_files - {MANIFEST_NAME}):
+        os.replace(candidate / filename, output / filename)
+    os.replace(candidate / MANIFEST_NAME, output / MANIFEST_NAME)
+    for old in output.glob("*.topojson.gz"):
+        if old.name not in expected_files:
+            old.unlink()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate pinned FEMA TopoJSON map assets")
     parser.add_argument("--data-dir", type=Path)
@@ -176,9 +208,7 @@ def main() -> None:
         paths.cache / "fema_nri_counties.parquet", config["fema_counties"]
     )
     raw_dir = paths.cache / "map-geometry"
-    work_dir = raw_dir / "generated"
     raw_dir.mkdir(parents=True, exist_ok=True)
-    work_dir.mkdir(parents=True, exist_ok=True)
     tract_raw = raw_dir / "tracts.geojson"
     county_raw = raw_dir / "counties.geojson"
     if args.reuse_raw:
@@ -209,6 +239,12 @@ def main() -> None:
             counties = fetch_geometry(
                 client, config["fema_counties"], "STCOFIPS,STATEABBRV,STATE,COUNTY"
             )
+            for key in ("fema", "fema_counties"):
+                _validate_layer(
+                    client,
+                    config[key],
+                    expected_geometry_type="esriGeometryPolygon",
+                )
     tract_ids, tract_bounds = prepare_features(tracts, id_field="TRACTFIPS")
     county_ids, county_bounds = prepare_features(counties, id_field="STCOFIPS")
     if tract_ids != set(tract_frame["tract_id"].to_list()):
@@ -227,98 +263,106 @@ def main() -> None:
     tract_raw.write_bytes(canonical_json({"type": "FeatureCollection", "features": tracts}))
     county_raw.write_bytes(canonical_json({"type": "FeatureCollection", "features": counties}))
     write_raw_provenance(raw_dir, source_revisions(config))
-    helper = Path(__file__).resolve().parents[1] / "web" / "scripts" / "build-topologies.mjs"
-    subprocess.run(
-        ["node", str(helper), str(tract_raw), str(county_raw), str(work_dir)], check=True
-    )
-
     output = args.output.resolve()
-    output.mkdir(parents=True, exist_ok=True)
-    for old in output.glob("*.topojson.gz"):
-        old.unlink()
-    entries: list[dict[str, Any]] = []
-    for source_path in sorted(work_dir.glob("*.topojson")):
-        stem = source_path.stem
-        payload = source_path.read_bytes()
-        compressed = gzip_deterministic(payload)
-        digest = sha256_bytes(compressed)
-        filename = f"{stem}.{digest[:16]}.topojson.gz"
-        (output / filename).write_bytes(compressed)
-        if stem == "tracts-national":
-            level, lod, jurisdiction, count, bounds = (
-                "tract",
-                "national",
-                None,
-                len(tracts),
-                tract_bounds,
-            )
-            expected_ids = tract_ids
-        elif stem == "counties-national":
-            level, lod, jurisdiction, count, bounds = (
-                "county",
-                "national",
-                None,
-                len(counties),
-                county_bounds,
-            )
-            expected_ids = county_ids
-        elif stem == "states-national":
-            level, lod, jurisdiction, count, bounds = (
-                "state",
-                "national",
-                None,
-                len(states),
-                county_bounds,
-            )
-            expected_ids = states
-        else:
-            jurisdiction = stem.removeprefix("tracts-").upper()
-            level, lod = "tract", "detail"
-            expected_ids = {
-                feature["id"]
-                for feature in tracts
-                if feature["properties"]["state"] == jurisdiction
-            }
-            count = len(expected_ids)
-            state_points = [
-                point
-                for feature in tracts
-                if feature["properties"]["state"] == jurisdiction
-                for point in coordinates(feature["geometry"])
-            ]
-            bounds = [
-                min(x for x, _ in state_points),
-                min(y for _, y in state_points),
-                max(x for x, _ in state_points),
-                max(y for _, y in state_points),
-            ]
-        validate_topology(source_path, expected_ids)
-        if lod == "detail" and len(compressed) > 5 * 1024 * 1024:
-            raise RuntimeError(f"Regional map asset exceeds 5 MiB: {filename}")
-        entries.append(
-            {
-                "key": stem,
-                "filename": filename,
-                "level": level,
-                "lod": lod,
-                "jurisdiction": jurisdiction,
-                "feature_count": count,
-                "bounds": [round(value, 5) for value in bounds],
-                "compressed_size": len(compressed),
-                "sha256": digest,
-            }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".map-assets-", dir=output.parent) as temporary:
+        temporary_root = Path(temporary)
+        work_dir = temporary_root / "topologies"
+        candidate = temporary_root / "candidate"
+        work_dir.mkdir()
+        candidate.mkdir()
+        helper = Path(__file__).resolve().parents[1] / "web" / "scripts" / "build-topologies.mjs"
+        subprocess.run(
+            ["node", str(helper), str(tract_raw), str(county_raw), str(work_dir)], check=True
         )
-    initial_size = sum(entry["compressed_size"] for entry in entries if entry["lod"] == "national")
-    if initial_size > 15 * 1024 * 1024:
-        raise RuntimeError(f"Initial map assets exceed 15 MiB: {initial_size:,} bytes")
-    manifest = {
-        "schema_version": SCHEMA_VERSION,
-        "release": config["fema"]["release"],
-        "sources": source_revisions(config),
-        "files": entries,
-        "initial_compressed_size": initial_size,
-    }
-    (output / MANIFEST_NAME).write_bytes(canonical_json(manifest) + b"\n")
+        topology_files = validate_topology_inventory(work_dir)
+
+        entries: list[dict[str, Any]] = []
+        for source_path in topology_files:
+            stem = source_path.stem
+            payload = source_path.read_bytes()
+            compressed = gzip_deterministic(payload)
+            digest = sha256_bytes(compressed)
+            filename = f"{stem}.{digest[:16]}.topojson.gz"
+            (candidate / filename).write_bytes(compressed)
+            if stem == "tracts-national":
+                level, lod, jurisdiction, count, bounds = (
+                    "tract",
+                    "national",
+                    None,
+                    len(tracts),
+                    tract_bounds,
+                )
+                expected_ids = tract_ids
+            elif stem == "counties-national":
+                level, lod, jurisdiction, count, bounds = (
+                    "county",
+                    "national",
+                    None,
+                    len(counties),
+                    county_bounds,
+                )
+                expected_ids = county_ids
+            elif stem == "states-national":
+                level, lod, jurisdiction, count, bounds = (
+                    "state",
+                    "national",
+                    None,
+                    len(states),
+                    county_bounds,
+                )
+                expected_ids = states
+            else:
+                jurisdiction = stem.removeprefix("tracts-").upper()
+                level, lod = "tract", "detail"
+                expected_ids = {
+                    feature["id"]
+                    for feature in tracts
+                    if feature["properties"]["state"] == jurisdiction
+                }
+                count = len(expected_ids)
+                state_points = [
+                    point
+                    for feature in tracts
+                    if feature["properties"]["state"] == jurisdiction
+                    for point in coordinates(feature["geometry"])
+                ]
+                bounds = [
+                    min(x for x, _ in state_points),
+                    min(y for _, y in state_points),
+                    max(x for x, _ in state_points),
+                    max(y for _, y in state_points),
+                ]
+            validate_topology(source_path, expected_ids)
+            if lod == "detail" and len(compressed) > 5 * 1024 * 1024:
+                raise RuntimeError(f"Regional map asset exceeds 5 MiB: {filename}")
+            entries.append(
+                {
+                    "key": stem,
+                    "filename": filename,
+                    "level": level,
+                    "lod": lod,
+                    "jurisdiction": jurisdiction,
+                    "feature_count": count,
+                    "bounds": [round(value, 5) for value in bounds],
+                    "compressed_size": len(compressed),
+                    "sha256": digest,
+                }
+            )
+        initial_size = sum(
+            entry["compressed_size"] for entry in entries if entry["lod"] == "national"
+        )
+        if initial_size > 15 * 1024 * 1024:
+            raise RuntimeError(f"Initial map assets exceed 15 MiB: {initial_size:,} bytes")
+        manifest = {
+            "schema_version": SCHEMA_VERSION,
+            "release": config["fema"]["release"],
+            "sources": source_revisions(config),
+            "files": entries,
+            "initial_compressed_size": initial_size,
+        }
+        (candidate / MANIFEST_NAME).write_bytes(canonical_json(manifest) + b"\n")
+        publish_assets(candidate, output, manifest)
     print(f"Wrote {len(entries)} assets; initial payload {initial_size / 1024 / 1024:.2f} MiB")
 
 

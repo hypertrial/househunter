@@ -5,7 +5,7 @@ import { zoom, zoomIdentity, type ZoomBehavior, type ZoomTransform } from "d3-zo
 import { feature as topoFeature } from "topojson-client";
 import type { Feature, FeatureCollection, Geometry, GeoJsonProperties } from "geojson";
 import type { GeometryCollection, Topology } from "topojson-specification";
-import { cameraFromTransform, detailAsset, nationalAsset, relativeTransform, scoreColor, type CameraState } from "./map";
+import { cameraFromTransform, detailAsset, nationalAsset, relativeTransform, scoreColor, transformFromCamera, type CameraState } from "./map";
 import type { MapManifest, MapScore } from "./types";
 
 type MapFeature = Feature<Geometry, GeoJsonProperties & {
@@ -184,6 +184,7 @@ export default function RiskMap({
   const zoomChangedRef = useRef(false);
   const pickingRef = useRef(false);
   const settleGenerationRef = useRef(0);
+  const cameraInitializedRef = useRef(false);
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
   const cursorRef = useRef({ x: 0.5, y: 0.5 });
@@ -554,14 +555,28 @@ export default function RiskMap({
       const width = Math.max(1, bounds.width);
       const height = Math.max(1, bounds.height);
       const ratio = Math.min(window.devicePixelRatio || 1, 2);
+      const previous = dimensionsRef.current;
+      let nextTransform = transformRef.current;
+      if (!cameraInitializedRef.current) {
+        nextTransform = transformFromCamera(initialCamera, width, height);
+        cameraInitializedRef.current = true;
+      } else if (width !== previous.width || height !== previous.height) {
+        nextTransform = transformFromCamera(
+          cameraFromTransform(transformRef.current, previous.width, previous.height),
+          width,
+          height,
+        );
+      }
       dimensionsRef.current = { width, height, ratio };
       canvas.width = Math.round(width * ratio);
       canvas.height = Math.round(height * ratio);
       projectorsRef.current = projectors(width, height, statesRef.current);
-      if (transformRef.current === zoomIdentity) {
-        transformRef.current = zoomIdentity
-          .translate(width / 2 - initialCamera.cx * width * initialCamera.z, height / 2 - initialCamera.cy * height * initialCamera.z)
-          .scale(initialCamera.z);
+      if (nextTransform !== transformRef.current) {
+        transformRef.current = nextTransform;
+        if (zoomRef.current) {
+          select(canvas).call(zoomRef.current.transform, nextTransform);
+          return;
+        }
       }
       drawTransformed();
       scheduleDraw();
@@ -636,7 +651,10 @@ export default function RiskMap({
     const starts = new Map<number, [number, number]>();
     const behavior = zoom<HTMLCanvasElement, unknown>()
       .scaleExtent([1, 12])
-      .filter((event) => !event.button && (!event.ctrlKey || event.type === "wheel"))
+      .filter((event) => !event.button && (!event.ctrlKey || event.type === "wheel"));
+    zoomRef.current = behavior;
+    select(canvas).call(behavior).call(behavior.transform, transformRef.current).on("dblclick.zoom", null);
+    behavior
       .on("start", () => {
         gestureRef.current = true;
         zoomChangedRef.current = false;
@@ -661,8 +679,6 @@ export default function RiskMap({
         onCamera(cameraFromTransform(transformRef.current, width, height));
         void settleView();
       });
-    zoomRef.current = behavior;
-    select(canvas).call(behavior).on("dblclick.zoom", null);
     const down = (event: PointerEvent) => {
       if (!starts.size) dragged = false;
       starts.set(event.pointerId, [event.clientX, event.clientY]);
@@ -763,9 +779,7 @@ export default function RiskMap({
   useEffect(() => {
     if (!cameraTarget || !canvasRef.current || !zoomRef.current) return;
     const { width, height } = dimensionsRef.current;
-    const target = zoomIdentity
-      .translate(width / 2 - cameraTarget.cx * width * cameraTarget.z, height / 2 - cameraTarget.cy * height * cameraTarget.z)
-      .scale(cameraTarget.z);
+    const target = transformFromCamera(cameraTarget, width, height);
     select(canvasRef.current).call(zoomRef.current.transform, target);
   }, [cameraTarget]);
 
