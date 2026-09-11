@@ -140,9 +140,7 @@ function Workspace({ meta }: { meta: Meta }) {
   const [scoreError, setScoreError] = useState("");
   const [status, setStatus] = useState("Loading map");
   const [overlay, setOverlay] = useState<Overlay>(null);
-  const [searchMode, setSearchMode] = useState<"place" | "address">("place");
   const [query, setQuery] = useState("");
-  const [results, setResults] = useState<PlaceSummary[]>([]);
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState("");
   const [confirmation, setConfirmation] = useState<AddressConfirmation | null>(null);
@@ -265,23 +263,6 @@ function Workspace({ meta }: { meta: Meta }) {
   }, [draftState]);
 
   useEffect(() => {
-    if (searchMode !== "place" || !query.trim()) { setResults([]); return; }
-    const controller = new AbortController();
-    const timer = window.setTimeout(async () => {
-      const params = new URLSearchParams({ search: query.trim(), limit: "8", sort: "risk_score", direction: "asc", include_unranked: "true" });
-      if (state) params.set("state", state); if (level === "tract" && county) params.set("county", county);
-      setSearching(true);
-      try {
-        const path = level === "tract" ? "/api/v1/places" : "/api/v1/counties";
-        const value = await json<{ items: PlaceSummary[] }>(`${path}?${params}`, { signal: controller.signal });
-        setResults(value.items); setSearchError("");
-      } catch (caught) { if ((caught as Error).name !== "AbortError") setSearchError((caught as Error).message); }
-      finally { setSearching(false); }
-    }, 180);
-    return () => { window.clearTimeout(timer); controller.abort(); };
-  }, [county, level, query, searchMode, state]);
-
-  useEffect(() => {
     const escape = (event: KeyboardEvent) => { if (event.key === "Escape") { if (overlay) setOverlay(null); else if (selected) closeDetail(); } };
     window.addEventListener("keydown", escape); return () => window.removeEventListener("keydown", escape);
   }, [closeDetail, overlay, selected]);
@@ -296,7 +277,7 @@ function Workspace({ meta }: { meta: Meta }) {
       setLowest(low.items); setHighest(high.items);
     } catch (caught) { setSearchError((caught as Error).message); }
   }
-  function choose(place: PlaceSummary) { detailTrigger.current = overlayTrigger.current; restoreOverlayFocus.current = false; setSelected(place.place_id); setFocusTarget({ kind: "place", id: place.place_id, nonce: Date.now() }); setOverlay(null); setQuery(""); setResults([]); }
+  function choose(place: PlaceSummary) { detailTrigger.current = overlayTrigger.current; restoreOverlayFocus.current = false; setSelected(place.place_id); setFocusTarget({ kind: "place", id: place.place_id, nonce: Date.now() }); setOverlay(null); setQuery(""); }
   function switchLevel(next: Geography) { setLevel(next); setCounty(""); setDraftCounty(""); setSelected(""); setDetail(null); setFocusTarget(null); setOverlay(null); setPreview(null); }
 
   async function lookupAddress(event: FormEvent) {
@@ -321,7 +302,7 @@ function Workspace({ meta }: { meta: Meta }) {
     setCounty(summary.county_fips); setDraftCounty(summary.county_fips);
     setDetail(result.detail); setSelected(result.tract_id);
     setFocusTarget({ kind: "place", id: result.tract_id, nonce: Date.now() });
-    setConfirmation(null); setOverlay(null); setQuery(""); setResults([]);
+    setConfirmation(null); setOverlay(null); setQuery("");
     setStatus(`Matched ${summary.name}; showing tract risk only`);
   }
   function applyFilters() {
@@ -338,7 +319,7 @@ function Workspace({ meta }: { meta: Meta }) {
   return <main className="map-shell">
     <RiskMap manifestUrl={meta.map_assets.manifest_url} level={level} rows={mapRows} selected={selected} state={state} county={county} showUnranked={showUnranked} neutralOnly={Boolean(scoreError)} focusTarget={focusTarget} cameraTarget={cameraTarget} initialCamera={initial.camera} onSelect={selectFromMap} onPreview={setPreview} onCamera={cameraChanged} onStatus={setStatus} />
     <header className="top-dock"><div className="brand"><strong>HouseHunter</strong><span>FEMA ALR_NPCTL</span></div><div className="level-toggle" aria-label="Geography level"><button aria-pressed={level === "tract"} onClick={() => switchLevel("tract")}>Tracts</button><button aria-pressed={level === "county"} onClick={() => switchLevel("county")}>Counties</button></div><div className="dock-actions"><button aria-expanded={overlay === "search"} onClick={(event) => toggleOverlay("search", event.currentTarget)}>Search</button><button onClick={(event) => void openExtremes(event.currentTarget)}>Lowest / Highest</button><button className={activeFilter ? "active" : ""} onClick={(event) => toggleOverlay("filters", event.currentTarget)}>Filters{activeFilter ? " · On" : ""}</button><button onClick={(event) => toggleOverlay("exports", event.currentTarget)}>Exports</button><button aria-label="Information" onClick={(event) => toggleOverlay("info", event.currentTarget)}>ⓘ</button></div><div className={`build-pill ${scoreError ? "failed" : ""}`} title={meta.build?.build_id}>{scoreError ? "Score error" : status}</div></header>
-    {overlay === "search" && <section className="floating-panel search-panel" aria-label="Search"><div className="search-modes" role="tablist" aria-label="Search mode"><button role="tab" aria-selected={searchMode === "place"} onClick={() => { setSearchMode("place"); setQuery(""); setConfirmation(null); }}>Place / FIPS</button><button role="tab" aria-selected={searchMode === "address"} onClick={() => { setSearchMode("address"); setQuery(""); setResults([]); }}>Address</button></div>{searchMode === "place" ? <><label>Search {level === "tract" ? "tract or FIPS" : "county or FIPS"}<input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder={level === "tract" ? "Name, county, or 11-digit FIPS" : "County or 5-digit FIPS"} /></label>{searching && <p className="panel-status">Searching…</p>}{results.length > 0 && <ul className="result-list" aria-label="Search results">{results.map((item) => <li key={item.place_id}><button onClick={() => choose(item)}><span><strong>{item.name}</strong><small>{item.state} · {item.place_id}</small></span><b>{scoreLabel(item)}</b></button></li>)}</ul>}</> : <form onSubmit={lookupAddress}><label>House address<input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Street, city, state, ZIP" /></label><p className="privacy-note">Find tract contacts the US Census geocoder through this loopback server and may send it to OpenStreetMap only after a valid Census no-match. Addresses are not written to disk. The map shows tract risk, never a property marker or score.</p><button className="primary" disabled={searching || !query.trim()}>{searching ? "Looking…" : "Find tract"}</button>{confirmation && <div className="confirm-card" role="region" aria-label="Approximate street match"><strong>Confirm approximate street match</strong><p>{confirmation.message}</p>{confirmation.candidates.map((candidate) => <button type="button" className="secondary" key={candidate.candidate_id} onClick={() => void confirmAddress(candidate.candidate_id)}>Use approximate street location: {candidate.matched_address}</button>)}<small>{confirmation.attribution}</small></div>}</form>}{searchError && <p role="alert" className="error">{searchError}</p>}</section>}
+    {overlay === "search" && <section className="floating-panel search-panel" aria-label="Search"><form onSubmit={lookupAddress}><label>Street address<input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Street, city, state, ZIP" /></label><p className="privacy-note">Find tract contacts the US Census geocoder through this loopback server and may send it to OpenStreetMap only after a valid Census no-match. Addresses are not written to disk. The map shows tract risk, never a property marker or score.</p><button className="primary" disabled={searching || !query.trim()}>{searching ? "Looking…" : "Find tract"}</button>{confirmation && <div className="confirm-card" role="region" aria-label="Approximate street match"><strong>Confirm approximate street match</strong><p>{confirmation.message}</p>{confirmation.candidates.map((candidate) => <button type="button" className="secondary" key={candidate.candidate_id} onClick={() => void confirmAddress(candidate.candidate_id)}>Use approximate street location: {candidate.matched_address}</button>)}<small>{confirmation.attribution}</small></div>}</form>{searchError && <p role="alert" className="error">{searchError}</p>}</section>}
     {overlay === "filters" && <section className="floating-panel filters-panel" aria-label="Map filters"><h2>Filters</h2><label>State<select value={draftState} disabled={Boolean(builtState)} onChange={(event) => { setDraftState(event.target.value); setDraftCounty(""); }}><option value="">All states & territories</option>{STATE_ABBREVIATIONS.map((item) => <option key={item}>{item}</option>)}</select></label>{level === "tract" && <label>County<select value={draftCounty} disabled={!draftState} onChange={(event) => setDraftCounty(event.target.value)}><option value="">All counties</option>{countyOptions.map((item) => <option value={item.place_id} key={item.place_id}>{item.name}</option>)}</select></label>}<label className="check"><input type="checkbox" checked={draftUnranked} onChange={(event) => setDraftUnranked(event.target.checked)} />Show FEMA-unranked geographies</label><div className="panel-buttons"><button className="primary" onClick={applyFilters}>Apply</button><button className="secondary" onClick={clearFilters}>Clear</button></div></section>}
     {overlay === "extremes" && <section className="floating-panel extremes-panel" aria-label="Lowest and highest risk"><h2>Explore the range</h2><div><ResultGroup title="Lowest" items={lowest} onChoose={choose} /><ResultGroup title="Highest" items={highest} onChoose={choose} /></div>{searchError && <p role="alert" className="error">{searchError}</p>}</section>}
     {overlay === "exports" && <nav className="floating-panel export-panel" aria-label="Exports"><h2>Export snapshot</h2><a href="/api/v1/exports/places.csv" download>Tracts CSV</a><a href="/api/v1/exports/places.parquet" download>Tracts Parquet</a><a href="/api/v1/exports/counties.csv" download>Counties CSV</a><a href="/api/v1/exports/counties.parquet" download>Counties Parquet</a></nav>}

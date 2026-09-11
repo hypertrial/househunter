@@ -73,10 +73,13 @@ ignored raw geometry also requires matching recorded revisions and file digests.
 
 ## Address lookup
 
-On explicit user action (`househunter lookup` or Find tract in the UI), the loopback
-server calls the public [Census geocoder](https://geocoding.geo.census.gov/geocoder/)
-with `vintage=Census2020_Current` and no API key. If that response is valid and
-contains zero `addressMatches`, the server may then query public
+On explicit user action (`househunter lookup` or Find tract in the map Search
+panel), the loopback server calls the public
+[Census geocoder](https://geocoding.geo.census.gov/geocoder/) with
+`vintage=Census2020_Current` and no API key. The Search panel accepts a street
+address only; apartment and unit suffixes are stripped before either geocoder.
+If that Census response is valid and contains zero `addressMatches`, the server
+may then query public
 [Nominatim](https://nominatim.openstreetmap.org/) (`format=jsonv2`, 1 request/second,
 identifying User-Agent). Accepted coordinates are converted through Census
 `geographies/coordinates` (`Census2020_Current`) so the tract GEOID stays a 2020

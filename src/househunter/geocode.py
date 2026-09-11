@@ -43,6 +43,12 @@ ADDRESS_NOT_FOUND = (
 )
 _TRACT_ID = re.compile(r"^\d{11}$")
 _HOUSE_NUMBER = re.compile(r"^\s*(\d+[A-Za-z]?)\b")
+_UNIT_DESIGNATOR = re.compile(
+    r"(?:,\s*)?(?:#\s*|"
+    r"\b(?:apt|apartment|unit|ste|suite|bldg|building|rm|room|fl|floor)\.?\s+)"
+    r"[A-Za-z]*\d[A-Za-z0-9-]*(?=\s*,|\s*$)",
+    re.IGNORECASE,
+)
 _HOUSE_TYPES = frozenset({"house", "building", "yes"})
 _STREET_TYPES = frozenset(
     {
@@ -221,6 +227,28 @@ def _query(address: str) -> str:
     if len(query) > MAX_ADDRESS_LENGTH:
         raise HouseHunterError(f"Address must be at most {MAX_ADDRESS_LENGTH} characters")
     return query
+
+
+def _strip_secondary_unit(query: str) -> str:
+    stripped = _UNIT_DESIGNATOR.sub("", query)
+    stripped = re.sub(r"\s+,", ",", stripped)
+    stripped = re.sub(r",\s*,+", ",", stripped)
+    stripped = re.sub(r"\s+", " ", stripped).strip(" ,")
+    return stripped or query
+
+
+def _with_query(match: AddressMatch, query: str) -> AddressMatch:
+    if match.query == query:
+        return match
+    return AddressMatch(
+        query=query,
+        matched_address=match.matched_address,
+        tract_id=match.tract_id,
+        provider=match.provider,
+        precision=match.precision,
+        approximate=match.approximate,
+        attribution=match.attribution,
+    )
 
 
 def _load_json(response: httpx.Response, *, label: str) -> object:
@@ -491,6 +519,7 @@ def _nominatim_fallback(
     *,
     candidate_id: str | None,
     allow_approximate: bool,
+    lookup_text: str,
 ) -> AddressMatch | dict[str, object]:
     if candidate_id:
         record = _load_candidate(query, candidate_id)
@@ -504,7 +533,7 @@ def _nominatim_fallback(
             ),
             http,
         )
-    hits = _search_nominatim(query, http)
+    hits = _search_nominatim(lookup_text, http)
     if not hits:
         raise CensusNoMatchError(ADDRESS_NOT_FOUND)
     houses = [hit for hit in hits if hit.precision == "house"]
@@ -551,17 +580,19 @@ def resolve_address(
     client: httpx.Client | None = None,
 ) -> AddressMatch | dict[str, object]:
     query = _query(address)
+    lookup = _strip_secondary_unit(query)
     owns_client = client is None
     http = client or _http_client()
     try:
         try:
-            return geocode_tract(query, client=http)
+            return _with_query(geocode_tract(lookup, client=http), query)
         except CensusNoMatchError:
             return _nominatim_fallback(
                 query,
                 http,
                 candidate_id=candidate_id,
                 allow_approximate=allow_approximate,
+                lookup_text=lookup,
             )
     finally:
         if owns_client:

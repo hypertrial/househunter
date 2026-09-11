@@ -36,9 +36,9 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .brand { min-width: 162px; padding: 0 8px; line-height: 1; }
 .brand strong { display: block; font: 700 21px/1.1 Georgia, serif; letter-spacing: -.02em; }
 .brand span { display: block; margin-top: 5px; color: #94a5a0; font-size: 9px; letter-spacing: .12em; text-transform: uppercase; }
-.level-toggle, .search-modes { display: inline-flex; padding: 3px; border-radius: 12px; background: #0d1519; }
-.level-toggle button, .search-modes button { min-height: 40px; padding: 0 13px; border: 0; border-radius: 9px; color: #aebdb8; background: transparent; cursor: pointer; font-weight: 750; font-size: 12px; }
-.level-toggle button[aria-pressed="true"], .search-modes button[aria-selected="true"] { color: #101816; background: #dfe8df; }
+.level-toggle { display: inline-flex; padding: 3px; border-radius: 12px; background: #0d1519; }
+.level-toggle button { min-height: 40px; padding: 0 13px; border: 0; border-radius: 9px; color: #aebdb8; background: transparent; cursor: pointer; font-weight: 750; font-size: 12px; }
+.level-toggle button[aria-pressed="true"] { color: #101816; background: #dfe8df; }
 .dock-actions { flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px; }
 .dock-actions button { min-height: 42px; padding: 0 11px; border: 0; border-radius: 10px; color: #dce5e2; background: transparent; cursor: pointer; font-weight: 650; font-size: 12px; white-space: nowrap; }
 .dock-actions button:hover, .dock-actions button[aria-expanded="true"], .dock-actions button.active { background: rgba(218, 230, 226, .10); }
@@ -51,10 +51,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .floating-panel p { color: #aab9b5; line-height: 1.5; }
 .floating-panel label { display: grid; gap: 7px; margin: 12px 0; color: #cbd6d2; font-size: 12px; font-weight: 700; }
 .floating-panel input, .floating-panel select { width: 100%; min-height: 44px; padding: 10px 12px; border: 1px solid #53636a; border-radius: 10px; color: #f4f7f6; background: #0d171c; }
-.search-modes { margin-bottom: 12px; }
-.search-modes button { min-width: 118px; }
 .privacy-note { margin: 8px 0 14px; font-size: 11px; }
-.panel-status { font-size: 11px; }
 .panel-buttons { display: flex; gap: 9px; margin-top: 16px; }
 .check { display: flex !important; grid-template-columns: auto 1fr; align-items: center; gap: 10px !important; }
 .check input { width: 18px; min-height: 18px; accent-color: #d2a727; }

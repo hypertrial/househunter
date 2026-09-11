@@ -52,11 +52,14 @@ Runtime data is written beneath `data/` by default. Set `HOUSEHUNTER_DATA_DIR` t
 different local directory. The server listens only on `127.0.0.1`; it has no telemetry,
 accounts, hosted database, or external browser requests.
 
-A lookup first asks Census. If Census returns a valid empty match list, the
-server may query Nominatim (`HOUSEHUNTER_NOMINATIM_URL`, default
+The map Search panel is a street-address lookup (`Find tract`). It does not
+search tract names or FIPS codes; use `househunter inspect` for those. A lookup
+first asks Census. If Census returns a valid empty match list, the server may
+query Nominatim (`HOUSEHUNTER_NOMINATIM_URL`, default
 `https://nominatim.openstreetmap.org`; set to `off` to disable). Nominatim is
 not used for Census outages, malformed Census responses, or ambiguous Census
-matches. Street names must be spelled correctly. Do not submit confidential
+matches. Apartment and unit suffixes are ignored because they do not change
+the tract. Street names must be spelled correctly. Do not submit confidential
 addresses.
 
 ## Commands

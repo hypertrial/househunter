@@ -127,13 +127,12 @@ it("locks a state-scoped build to its built state and discards incompatible deep
   expect(window.location.hash).not.toContain("place=");
 });
 
-it("keeps place and address searches explicit and opens tract detail", async () => {
+it("looks up a street address and opens tract detail", async () => {
   vi.stubGlobal("fetch", mockFetch()); render(<App />); await screen.findByText("HouseHunter");
   fireEvent.click(screen.getByRole("button", { name: "Search" }));
-  expect(screen.getByRole("tab", { name: "Place / FIPS" })).toHaveAttribute("aria-selected", "true");
-  fireEvent.click(screen.getByRole("tab", { name: "Address" }));
+  expect(screen.queryByRole("tab", { name: "Place / FIPS" })).not.toBeInTheDocument();
   expect(screen.getByText(/Census geocoder through this loopback server/i)).toBeVisible();
-  fireEvent.change(screen.getByLabelText("House address"), { target: { value: "1 Main St, Boulder, CO" } });
+  fireEvent.change(screen.getByLabelText("Street address"), { target: { value: "1 Main St, Boulder, CO" } });
   fireEvent.click(screen.getByRole("button", { name: "Find tract" }));
   const drawer = await screen.findByRole("dialog", { name: "Tract detail" });
   expect(await within(drawer).findByText("Wildfire")).toBeVisible();

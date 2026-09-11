@@ -321,6 +321,106 @@ def test_typo_street_stays_a_no_match() -> None:
         resolve_address("1720 Lazt Cat, Monument, CO 80132", client=client)
 
 
+def test_unit_designator_is_stripped_before_geocoders() -> None:
+    seen: list[str] = []
+    query = "1689 S 870 W #125, Provo, UT 84601"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/search"):
+            seen.append(request.url.params["q"])
+            return httpx.Response(
+                200,
+                json=[
+                    _nominatim_row(
+                        lat="40.2133159",
+                        lon="-111.6739323",
+                        display="870 West, Lakewood, Provo, Utah County, Utah, United States",
+                        addresstype="road",
+                        category="highway",
+                    )
+                ],
+            )
+        if str(request.url).startswith(CENSUS_COORDINATES_URL):
+            return _coordinate_tract("49049001200")
+        seen.append(request.url.params["address"])
+        return _empty_census()
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        first = resolve_address(query, client=client)
+        assert isinstance(first, dict)
+        assert first["status"] == "confirmation_required"
+        assert first["query"] == query
+        assert seen == [
+            "1689 S 870 W, Provo, UT 84601",
+            "1689 S 870 W, Provo, UT 84601",
+        ]
+        resolved = resolve_address(
+            query, candidate_id=first["candidates"][0]["candidate_id"], client=client
+        )
+    assert isinstance(resolved, AddressMatch)
+    assert resolved.query == query
+    assert resolved.tract_id == "49049001200"
+
+
+def test_apartment_word_is_stripped_before_nominatim() -> None:
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/search"):
+            seen.append(request.url.params["q"])
+            return httpx.Response(
+                200,
+                json=[
+                    _nominatim_row(
+                        lat="40.27",
+                        lon="-111.69",
+                        display="1780 South, Orem, Utah, United States",
+                        addresstype="house",
+                        house_number="164",
+                    )
+                ],
+            )
+        if str(request.url).startswith(CENSUS_COORDINATES_URL):
+            return _coordinate_tract("49049000700")
+        return _empty_census()
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        match = resolve_address("164 E 1780 S Apt 10, Orem, UT 84058", client=client)
+    assert isinstance(match, AddressMatch)
+    assert match.query == "164 E 1780 S Apt 10, Orem, UT 84058"
+    assert match.precision == "house"
+    assert seen == ["164 E 1780 S, Orem, UT 84058"]
+
+
+def test_unit_strip_does_not_eat_street_names() -> None:
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/search"):
+            seen.append(request.url.params["q"])
+            return httpx.Response(200, json=[])
+        seen.append(request.url.params["address"])
+        return _empty_census()
+
+    queries = [
+        "1000 Space Park, Houston, TX 77058",
+        "1 Unit Circle, Dallas, TX 75201",
+        "12 Suite B Lane, Austin, TX 78701",
+    ]
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        for query in queries:
+            with pytest.raises(HouseHunterError, match="Address not found"):
+                resolve_address(query, client=client)
+    assert seen == [
+        "1000 Space Park, Houston, TX 77058",
+        "1000 Space Park, Houston, TX 77058",
+        "1 Unit Circle, Dallas, TX 75201",
+        "1 Unit Circle, Dallas, TX 75201",
+        "12 Suite B Lane, Austin, TX 78701",
+        "12 Suite B Lane, Austin, TX 78701",
+    ]
+
+
 def test_census_http_failure_does_not_call_nominatim() -> None:
     hosts: list[str] = []
 

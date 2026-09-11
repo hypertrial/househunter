@@ -156,9 +156,8 @@ test("uses explicit address confirmation and never calls a geocoder from the bro
   });
   await page.goto("/");
   await page.getByRole("button", { name: "Search" }).click();
-  await page.getByRole("tab", { name: "Address" }).click();
   await expect(page.getByText(/through this loopback server/i)).toBeVisible();
-  await page.getByLabel("House address").fill("1 Main St, Boulder, CO");
+  await page.getByLabel("Street address").fill("1 Main St, Boulder, CO");
   await page.getByRole("button", { name: "Find tract" }).click();
   await expect(page.getByRole("region", { name: "Approximate street match" })).toBeVisible();
   await page.getByRole("button", { name: /Use approximate street location/ }).click();
@@ -218,7 +217,7 @@ test("is keyboard operable and never overflows the viewport", async ({ page }, t
   await expect.poll(() => regionalRequests.length).toBeGreaterThan(0);
   await page.getByRole("button", { name: "Search" }).click();
   await page.keyboard.press("Escape");
-  await expect(page.getByRole("tab", { name: "Place / FIPS" })).toHaveCount(0);
+  await expect(page.getByLabel("Street address")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Search" })).toBeFocused();
   if (testInfo.project.name.includes("desktop") || testInfo.project.name.includes("wide")) {
     await page.setViewportSize({ width: Math.floor(bounds.width / 2), height: Math.floor(bounds.height / 2) });
