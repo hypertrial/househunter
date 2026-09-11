@@ -1,9 +1,16 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import App, { scoreLabel } from "./App";
+import App, { scoreLabel, STATE_ABBREVIATIONS } from "./App";
 import type { PlaceSummary } from "./types";
 
 const place = { risk_score: 42.04, coverage_status: "complete" } as PlaceSummary;
+
+function placesParams(calls: unknown[][]): URLSearchParams[] {
+  return calls
+    .map(([url]) => String(url))
+    .filter((url) => url.includes("/api/v1/places?"))
+    .map((url) => new URL(url, "http://127.0.0.1").searchParams);
+}
 
 afterEach(() => {
   cleanup();
@@ -52,7 +59,7 @@ describe("ranking workflow", () => {
                 housing_units_2020: 0,
               },
             ],
-            total: 1,
+            total: 100,
           };
       return new Response(JSON.stringify(body), { status: 200 });
     });
@@ -60,6 +67,27 @@ describe("ranking workflow", () => {
     render(<App />);
     expect(await screen.findByRole("heading", { name: /lower risk/i })).toBeVisible();
     expect(screen.getByLabelText("Search")).toBeVisible();
+    const stateFilter = screen.getByLabelText("State");
+    expect(stateFilter.tagName).toBe("SELECT");
+    expect(stateFilter).toHaveDisplayValue("All states");
+    expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual([
+      "All states",
+      ...STATE_ABBREVIATIONS,
+    ]);
+    expect([...STATE_ABBREVIATIONS]).toEqual([...STATE_ABBREVIATIONS].toSorted());
+    expect(new Set(STATE_ABBREVIATIONS).size).toBe(56);
+    await waitFor(() => expect(placesParams(request.mock.calls).length).toBeGreaterThan(0));
+    expect(placesParams(request.mock.calls).at(-1)?.has("state")).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    await waitFor(() => expect(placesParams(request.mock.calls).at(-1)?.get("offset")).toBe("50"));
+    fireEvent.change(stateFilter, { target: { value: "CO" } });
+    await waitFor(() => {
+      const latest = placesParams(request.mock.calls).at(-1);
+      expect(latest?.get("state")).toBe("CO");
+      expect(latest?.get("offset")).toBe("0");
+    });
+    fireEvent.change(stateFilter, { target: { value: "" } });
+    await waitFor(() => expect(placesParams(request.mock.calls).at(-1)?.has("state")).toBe(false));
     expect(screen.getByLabelText("Include incomplete")).not.toBeChecked();
     const riskHeader = screen.getByRole("columnheader", { name: /risk score/i });
     expect(riskHeader).toHaveAttribute("aria-sort", "ascending");

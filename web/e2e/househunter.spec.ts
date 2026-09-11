@@ -61,6 +61,10 @@ test("prepares, ranks, inspects, and exports", async ({ page }) => {
         },
       });
     } else if (url.pathname === "/api/v1/places") {
+      if (url.searchParams.has("state")) {
+        expect(url.searchParams.get("state")).toBe("CO");
+        expect(url.searchParams.get("offset")).toBe("0");
+      }
       await route.fulfill({ json: { total: 1, items: [summary] } });
     } else if (url.pathname === "/api/v1/places/08013012101") {
       await route.fulfill({
@@ -96,6 +100,9 @@ test("prepares, ranks, inspects, and exports", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Prepare national data" }).click();
   await expect(page.getByRole("heading", { name: "Lower risk, plainly ranked." })).toBeVisible();
+  await expect(page.getByLabel("State")).toHaveValue("");
+  await page.getByLabel("State").selectOption("CO");
+  await expect(page.getByLabel("State")).toHaveValue("CO");
   await page.getByRole("row", { name: /08013012101/ }).click();
   await expect(page.getByRole("heading", { name: "08013012101, CO" })).toBeVisible();
   await page.getByRole("button", { name: "Close tract detail" }).first().click();

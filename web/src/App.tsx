@@ -17,6 +17,14 @@ interface Meta {
 
 const number = new Intl.NumberFormat("en-US");
 
+export const STATE_ABBREVIATIONS = [
+  "AK", "AL", "AR", "AS", "AZ", "CA", "CO", "CT", "DC", "DE", "FL", "GA", "GU",
+  "HI", "IA", "ID", "IL", "IN", "KS", "KY", "LA", "MA", "MD", "ME", "MI", "MN",
+  "MO", "MP", "MS", "MT", "NC", "ND", "NE", "NH", "NJ", "NM", "NV", "NY", "OH",
+  "OK", "OR", "PA", "PR", "RI", "SC", "SD", "TN", "TX", "UT", "VA", "VI", "VT",
+  "WA", "WI", "WV", "WY",
+] as const;
+
 async function json<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, options);
   const body = await response.json();
@@ -161,7 +169,10 @@ function Rankings({ meta }: { meta: Meta }) {
         <div className="intro"><p className="eyebrow">{meta.build?.scope.kind === "state" ? `${meta.build.scope.state} FEMA tracts` : "FEMA National Risk Index tracts"}</p><h1>Lower risk, plainly ranked.</h1><p>One score: each tract's published FEMA Expected Annual Loss Rate national percentile.</p></div>
         <form className="filters" onSubmit={submit}>
           <label>Search<input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Tract FIPS" /></label>
-          <label>State<input value={state} onChange={(e) => setState(e.target.value.toUpperCase().slice(0, 2))} placeholder="CO" /></label>
+          <label>State<select value={state} onChange={(e) => { setState(e.target.value); setOffset(0); }}>
+            <option value="">All states</option>
+            {STATE_ABBREVIATIONS.map((abbreviation) => <option key={abbreviation} value={abbreviation}>{abbreviation}</option>)}
+          </select></label>
           <label className="check"><input type="checkbox" checked={includeUnranked} onChange={(e) => setIncludeUnranked(e.target.checked)} /> Include incomplete</label>
           <button className="primary" type="submit">Apply</button>
         </form>
