@@ -8,9 +8,9 @@ release. A source update requires review, validation, and a HouseHunter release.
 - Dataset: National Risk Index Census Tracts
 - Release: v1.20, December 2025
 - ArcGIS item: `9da4eeb936544335a6db0cd7a8448a51`
-- Requested fields: `TRACTFIPS`, `ALR_NPCTL`, `NRI_VER`
+- Requested fields: `TRACTFIPS`, `ALR_NPCTL`, `NRI_VER`, and the 18 published `{CODE}_ALR_NPCTL` doubles (`AVLN`, `CFLD`, `CWAV`, `DRGT`, `ERQK`, `HAIL`, `HWAV`, `HRCN`, `ISTM`, `LNDS`, `LTNG`, `IFLD`, `SWND`, `TRND`, `TSUN`, `VLCN`, `WFIR`, `WNTW`)
 - Geometry: never requested
-- Metric: composite Expected Annual Loss Rate national percentile (`ALR_NPCTL`)
+- Metric: composite Expected Annual Loss Rate national percentile (`ALR_NPCTL`). Hazard columns are the same layer's published `{CODE}_ALR_NPCTL` values, used for inspect/detail/export only.
 - Cache: `data/cache/fema_nri_tracts.parquet`
 
 Official references: [FEMA technical documentation](https://www.fema.gov/sites/default/files/documents/fema_national-risk-index_technical-documentation.pdf),
@@ -22,9 +22,9 @@ and [FEMA data resources](https://hazards.fema.gov/nri/data-resources).
 - Dataset: National Risk Index Counties
 - Release: v1.20, December 2025
 - ArcGIS item: `39485e8035d446a5bff03259508ae355`
-- Requested fields: `STCOFIPS`, `COUNTY`, `COUNTYTYPE`, `STATEABBRV`, `ALR_NPCTL`, `NRI_VER`
+- Requested fields: `STCOFIPS`, `COUNTY`, `COUNTYTYPE`, `STATEABBRV`, `ALR_NPCTL`, `NRI_VER`, and the same 18 `{CODE}_ALR_NPCTL` doubles as the tract layer
 - Geometry: never requested
-- Metric: FEMA's published **county** `ALR_NPCTL`, ranked among counties
+- Metric: FEMA's published **county** `ALR_NPCTL`, ranked among counties. County hazard percentiles come from this layer, not from averaging tracts.
 - Cache: `data/cache/fema_nri_counties.parquet`
 
 County names and the county ranking come from this layer. Tract rows join
@@ -34,9 +34,12 @@ produce a county score. Tract and county percentiles are not comparable.
 ## Download contract
 
 The downloader validates each layer's edit timestamp, field names and ArcGIS types,
-release label, unique identifiers, row count, range `[0, 100]`, and the canonical
+release label, unique identifiers, row count, composite range `[0, 100]`, optional
+hazard percentiles that are **null or** finite `[0, 100]`, and the canonical
 logical checksum in `config/sources.yml` when one is pinned. Pages are cached
-independently; publication uses a temporary file and atomic rename. The local source
+independently under a directory that includes `schema_fingerprint`, so expanding
+`outFields` cannot reuse an older page cache. Publication uses a temporary file
+and atomic rename. The local source
 manifest records retrieval time, logical and physical SHA-256 checksums, row count,
 schema fingerprint, source URL, and terms URL for each source. On a verified cache
 hit, `download` validates that manifest against the cached Parquet and reconstructs
@@ -58,7 +61,10 @@ and are unused by the local app. Ordinary setup never contacts census.gov.
 
 ## Limitations
 
-The score is FEMA's published percentile for that geography, not risk at a specific
-address. A percentile is a national relative ranking, not a probability or expected
-dollar loss. The composite combines FEMA consequence types and should not be read as
-one particular hazard. County scores are not a summary of the tracts inside the county.
+The score is FEMA's published composite percentile for that geography, not risk at a
+specific address. A percentile is a national relative ranking, not a probability or
+expected dollar loss. The composite combines FEMA consequence types and should not be
+read as one particular hazard. The 18 `{CODE}_ALR_NPCTL` values are FEMA's published
+percentiles at the same grain; HouseHunter does not blend them. Null means FEMA
+published no rating, never zero. County scores and county hazard percentiles are not
+a summary of the tracts inside the county.

@@ -1,5 +1,5 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
-import type { JobStatus, PlaceDetail, PlaceSummary } from "./types";
+import type { HazardPercentile, JobStatus, PlaceDetail, PlaceSummary } from "./types";
 
 interface Meta {
   app_version: string;
@@ -36,6 +36,18 @@ async function json<T>(url: string, options?: RequestInit): Promise<T> {
 
 export function scoreLabel(place: PlaceSummary): string {
   return place.risk_score === null ? "Not ranked" : place.risk_score.toFixed(1);
+}
+
+export function sortedHazardPercentiles(hazards: HazardPercentile[]): HazardPercentile[] {
+  return [...hazards].sort((left, right) => {
+    if (left.percentile === null && right.percentile === null) {
+      return left.label.localeCompare(right.label);
+    }
+    if (left.percentile === null) return 1;
+    if (right.percentile === null) return -1;
+    if (right.percentile !== left.percentile) return right.percentile - left.percentile;
+    return left.label.localeCompare(right.label);
+  });
 }
 
 function Setup({ token, onReady }: { token: string; onReady: () => void }) {
@@ -96,13 +108,37 @@ function Setup({ token, onReady }: { token: string; onReady: () => void }) {
   </main>;
 }
 
-function Detail({ placeId, level, onClose }: { placeId: string; level: Geography; onClose: () => void }) {
+function Detail({
+  placeId,
+  level,
+  onClose,
+  onViewTracts,
+  onViewCounty,
+}: {
+  placeId: string;
+  level: Geography;
+  onClose: () => void;
+  onViewTracts?: (countyFips: string, state: string) => void;
+  onViewCounty?: (countyFips: string) => void;
+}) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [detail, setDetail] = useState<PlaceDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
+    let cancelled = false;
+    setDetail(null);
+    setError(null);
     const path = level === "county" ? `/api/v1/counties/${placeId}` : `/api/v1/places/${placeId}`;
-    json<PlaceDetail>(path).then(setDetail).catch((caught) => setError(caught.message));
+    json<PlaceDetail>(path)
+      .then((result) => {
+        if (!cancelled) setDetail(result);
+      })
+      .catch((caught) => {
+        if (!cancelled) setError((caught as Error).message);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [placeId, level]);
   useEffect(() => {
     const node = dialog.current;
@@ -112,6 +148,7 @@ function Detail({ placeId, level, onClose }: { placeId: string; level: Geography
     };
   }, []);
   const closeLabel = level === "county" ? "Close county detail" : "Close tract detail";
+  const knownCounty = Boolean(detail && /^\d{5}$/.test(detail.summary.county_fips));
   return <dialog ref={dialog} className="detail" aria-label={level === "county" ? "County detail" : "Tract detail"} onCancel={(event) => { event.preventDefault(); onClose(); }}>
     <button autoFocus className="close" onClick={onClose} aria-label={closeLabel}>×</button>
     {error && <p role="alert" className="error">{error}</p>}
@@ -125,15 +162,15 @@ function Detail({ placeId, level, onClose }: { placeId: string; level: Geography
         {level === "tract" && <div><dt>County</dt><dd>{detail.summary.county_name}</dd></div>}
         <div><dt>FEMA vintage</dt><dd>{detail.summary.fema_vintage}</dd></div>
       </dl>
-      {detail.tract_contributions.length > 0 && <>
-        <h3>FEMA value</h3>
-        <div className="contributions">
-          {detail.tract_contributions.map((tract, index) => <div key={tract.tract_id ?? `missing-${index}`} className="contribution">
-            <div><span>{tract.tract_id ?? "Missing tract"}</span><span>{tract.fema_percentile?.toFixed(1) ?? "Missing"}</span></div>
-            <div className="bar"><i style={{ width: `${tract.fema_percentile ?? 0}%` }} /></div>
-          </div>)}
-        </div>
-      </>}
+      {level === "county" && onViewTracts && <button className="secondary" type="button" onClick={() => onViewTracts(detail.summary.place_id, detail.summary.state)}>View {number.format(detail.member_tract_count ?? 0)} tracts</button>}
+      {level === "tract" && knownCounty && onViewCounty && <button className="secondary" type="button" onClick={() => onViewCounty(detail.summary.county_fips)}>View {detail.summary.county_name} county</button>}
+      <h3>Published hazard percentiles</h3>
+      <div className="contributions">
+        {sortedHazardPercentiles(detail.hazard_percentiles).map((hazard) => <div key={hazard.code} className="contribution">
+          <div><span>{hazard.label}</span><span>{hazard.percentile === null ? "No rating" : hazard.percentile.toFixed(1)}</span></div>
+          <div className="bar"><i style={{ width: `${hazard.percentile ?? 0}%` }} /></div>
+        </div>)}
+      </div>
       <p className="notice">{detail.methodology_notice}</p>
     </>}
   </dialog>;
@@ -155,7 +192,6 @@ function Rankings({ meta }: { meta: Meta }) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    setCounty("");
     setCountyOptions([]);
     if (!state) return;
     const params = new URLSearchParams({ state, limit: "500", sort: "name", direction: "asc" });
@@ -190,11 +226,33 @@ function Rankings({ meta }: { meta: Meta }) {
     setOffset(0);
     if (next === "county") setCounty("");
   }
+  function changeState(next: string) {
+    setState(next);
+    setCounty("");
+    setOffset(0);
+  }
+  function viewTracts(countyFips: string, stateAbbr: string) {
+    setLevel("tract");
+    setState(stateAbbr);
+    setCounty(countyFips);
+    setSelected(null);
+    setOffset(0);
+  }
+  function viewCounty(countyFips: string) {
+    setLevel("county");
+    setCounty("");
+    setSelected(countyFips);
+    setOffset(0);
+  }
   const scopeKind = meta.build?.scope.kind === "state" ? `${meta.build.scope.state} ` : "";
   const noun = level === "county" ? "counties" : "tracts";
-  const exportBase = level === "county" ? "/api/v1/exports/counties" : "/api/v1/exports/places";
   return <>
-    <header className="topbar"><div><strong>HouseHunter</strong><span>FEMA ALR_NPCTL</span></div><nav aria-label="Exports"><a href={`${exportBase}.csv`}>CSV</a><a href={`${exportBase}.parquet`}>Parquet</a></nav></header>
+    <header className="topbar"><div><strong>HouseHunter</strong><span>FEMA ALR_NPCTL</span></div><nav aria-label="Exports">
+      <a href="/api/v1/exports/places.csv">Tracts CSV</a>
+      <a href="/api/v1/exports/places.parquet">Tracts Parquet</a>
+      <a href="/api/v1/exports/counties.csv">Counties CSV</a>
+      <a href="/api/v1/exports/counties.parquet">Counties Parquet</a>
+    </nav></header>
     <main className="layout">
       <section className="rankings">
         <div className="intro">
@@ -210,7 +268,7 @@ function Rankings({ meta }: { meta: Meta }) {
         </div>
         <form className="filters" onSubmit={submit}>
           <label>Search<input value={search} onChange={(e) => setSearch(e.target.value)} placeholder={level === "county" ? "County name or FIPS" : "Tract FIPS or county name"} /></label>
-          <label>State<select value={state} onChange={(e) => { setState(e.target.value); setOffset(0); }}>
+          <label>State<select value={state} onChange={(e) => changeState(e.target.value)}>
             <option value="">All states</option>
             {STATE_ABBREVIATIONS.map((abbreviation) => <option key={abbreviation} value={abbreviation}>{abbreviation}</option>)}
           </select></label>
@@ -238,7 +296,13 @@ function Rankings({ meta }: { meta: Meta }) {
         <div className="pager"><button disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 50))}>Previous</button><span>{offset + 1}–{Math.min(offset + 50, total)}</span><button disabled={offset + 50 >= total} onClick={() => setOffset(offset + 50)}>Next</button></div>
         <footer><strong>Provenance</strong><span>{meta.build?.source_vintages.fema}</span><span>Build {meta.build?.build_id} · {meta.build?.scope.kind}</span></footer>
       </section>
-      {selected && <Detail placeId={selected} level={level} onClose={() => setSelected(null)} />}
+      {selected && <Detail
+        placeId={selected}
+        level={level}
+        onClose={() => setSelected(null)}
+        onViewTracts={viewTracts}
+        onViewCounty={viewCounty}
+      />}
     </main>
   </>;
 }

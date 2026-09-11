@@ -7,6 +7,7 @@ import pytest
 import yaml
 
 from househunter.config import RuntimePaths
+from househunter.hazards import with_hazard_columns
 
 
 @pytest.fixture
@@ -69,29 +70,37 @@ def fixture_environment(
     monkeypatch.setenv("HOUSEHUNTER_DATA_DIR", str(tmp_path / "data"))
     paths = RuntimePaths.from_root(tmp_path)
     paths.ensure()
-    fema = pl.DataFrame(
-        {
-            "tract_id": [
-                "01001000100",
-                "01001000200",
-                "01001000300",
-                "02001000100",
-                "99999999999",
-            ],
-            "alr_npctl": [10.0, 50.0, 80.0, 25.0, 99.0],
-            "nri_version": ["December 2025"] * 5,
-        }
+    fema = with_hazard_columns(
+        pl.DataFrame(
+            {
+                "tract_id": [
+                    "01001000100",
+                    "01001000200",
+                    "01001000300",
+                    "02001000100",
+                    "99999999999",
+                ],
+                "alr_npctl": [10.0, 50.0, 80.0, 25.0, 99.0],
+                "nri_version": ["December 2025"] * 5,
+                "alr_npctl_wfir": [8.0, 20.0, 30.0, 15.0, None],
+                "alr_npctl_tsun": [None, None, None, None, None],
+            }
+        )
     )
     fema.write_parquet(paths.cache / "fema_nri_tracts.parquet")
-    counties = pl.DataFrame(
-        {
-            "county_fips": ["01001", "02001"],
-            "county": ["Autauga", "Aleutians East"],
-            "county_type": ["County", "Borough"],
-            "state": ["AL", "AK"],
-            "alr_npctl": [40.0, 12.0],
-            "nri_version": ["December 2025", "December 2025"],
-        }
+    counties = with_hazard_columns(
+        pl.DataFrame(
+            {
+                "county_fips": ["01001", "02001"],
+                "county": ["Autauga", "Aleutians East"],
+                "county_type": ["County", "Borough"],
+                "state": ["AL", "AK"],
+                "alr_npctl": [40.0, 12.0],
+                "nri_version": ["December 2025", "December 2025"],
+                "alr_npctl_wfir": [9.0, 4.0],
+                "alr_npctl_tsun": [None, 50.0],
+            }
+        )
     )
     counties.write_parquet(paths.cache / "fema_nri_counties.parquet")
     return paths, tmp_path

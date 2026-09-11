@@ -15,6 +15,7 @@ from househunter.download import (
     _validate_rows,
     download_fema,
     download_fema_counties,
+    page_cache_dir,
     validate_cached_fema,
 )
 from househunter.errors import SourceContractError
@@ -80,8 +81,9 @@ def test_download_paginates_and_reuses_verified_cache(tmp_path: Path, monkeypatc
         output = download_fema(paths, client=client)
         first_calls = len(calls)
         assert output.is_file()
-        page_cache = paths.cache / "fema-pages-10"
+        page_cache = page_cache_dir(paths, "fema-pages", config["fema"])
         assert json.loads((page_cache / "000000.json").read_text())["features"]
+        assert not (paths.cache / "fema-pages-10").exists()
         pl.DataFrame({"invalid": [True]}).write_parquet(paths.source_manifest)
         download_fema(paths, client=client)
         assert len(calls) == first_calls
@@ -231,6 +233,18 @@ def test_county_contract_rejects_duplicates() -> None:
             ],
             "invalid ALR_NPCTL",
         ),
+        (
+            [
+                {
+                    "TRACTFIPS": "01001000100",
+                    "ALR_NPCTL": 1.0,
+                    "NRI_VER": "December 2025",
+                    "WFIR_ALR_NPCTL": 101.0,
+                },
+                {"TRACTFIPS": "01001000200", "ALR_NPCTL": 2.0, "NRI_VER": "December 2025"},
+            ],
+            "invalid hazard ALR_NPCTL",
+        ),
     ],
 )
 def test_fema_contract_rejects_duplicates_and_invalid_range(
@@ -241,12 +255,52 @@ def test_fema_contract_rejects_duplicates_and_invalid_range(
         _validate_rows(rows, source)
 
 
+def test_fema_contract_allows_null_hazard_percentiles() -> None:
+    frame = _validate_rows(
+        [
+            {
+                "TRACTFIPS": "01001000100",
+                "ALR_NPCTL": 1.0,
+                "NRI_VER": "December 2025",
+                "TSUN_ALR_NPCTL": None,
+            },
+            {
+                "TRACTFIPS": "01001000200",
+                "ALR_NPCTL": 2.0,
+                "NRI_VER": "December 2025",
+                "WFIR_ALR_NPCTL": 12.5,
+            },
+        ],
+        {"expected_row_count": 2, "version": "December 2025"},
+    )
+    assert frame["alr_npctl_tsun"].to_list() == [None, None]
+    assert frame["alr_npctl_wfir"].to_list() == [None, 12.5]
+
+
 def test_cached_fema_rejects_missing_columns(tmp_path: Path) -> None:
     cached = tmp_path / "fema.parquet"
     pl.DataFrame({"tract_id": ["01001000100"]}).write_parquet(cached)
     source = {"expected_row_count": 1, "version": "December 2025"}
     with pytest.raises(SourceContractError, match="missing columns"):
         validate_cached_fema(cached, source)
+
+
+def test_page_cache_dir_changes_with_schema_fingerprint(tmp_path: Path) -> None:
+    paths = RuntimePaths.from_root(tmp_path)
+    first = page_cache_dir(
+        paths,
+        "fema-pages",
+        {"item_modified_ms": 10, "schema_fingerprint": "a" * 64},
+    )
+    second = page_cache_dir(
+        paths,
+        "fema-pages",
+        {"item_modified_ms": 10, "schema_fingerprint": "b" * 64},
+    )
+    assert first != second
+    assert first.name == f"fema-pages-10-{'a' * 16}"
+    assert second.name == f"fema-pages-10-{'b' * 16}"
+    assert not (paths.cache / "fema-pages-10").exists()
 
 
 def test_cancelled_download_does_not_make_network_requests(

@@ -11,6 +11,7 @@ from .build import BUILD_SCHEMA_VERSION
 from .config import RuntimePaths
 from .contracts import COUNTY_METHODOLOGY_NOTICE, METHODOLOGY_NOTICE
 from .errors import AmbiguousPlaceError, BuildNotFoundError, HouseHunterError
+from .hazards import hazard_percentiles_from_record, hazard_select_sql
 
 SUMMARY_COLUMNS = """
 place_id, name, state, place_type, population_2020, housing_units_2020,
@@ -267,7 +268,8 @@ class Store:
         self, table: str, place_id: str, notice: str, label: str
     ) -> dict[str, Any]:
         cursor = self.connection.execute(
-            f"SELECT {SUMMARY_COLUMNS}, total_weighted_housing, coverage_ratio "
+            f"SELECT {SUMMARY_COLUMNS}, total_weighted_housing, coverage_ratio, "
+            f"{hazard_select_sql()} "
             f"FROM {table} WHERE place_id = ?",
             [place_id],
         )
@@ -293,12 +295,20 @@ class Store:
                 dict(zip(contribution_columns, item, strict=True))
                 for item in contribution_cursor.fetchall()
             ]
+        member_tract_count = None
+        if table == "counties":
+            member_tract_count = self.connection.execute(
+                "SELECT count(*) FROM places WHERE county_fips = ?",
+                [place_id],
+            ).fetchone()[0]
         return {
             "summary": summary,
             "total_weighted_housing": record["total_weighted_housing"],
             "coverage_ratio": record["coverage_ratio"],
             "methodology_notice": notice,
             "tract_contributions": contributions,
+            "hazard_percentiles": hazard_percentiles_from_record(record),
+            "member_tract_count": member_tract_count,
         }
 
     def export(self, format: str, output: Path, *, table: str = "places") -> Path:

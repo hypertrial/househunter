@@ -14,6 +14,16 @@ import polars as pl
 from .config import RuntimePaths, canonical_json, load_config, sha256_bytes, sha256_file
 from .contracts import SourceStatus
 from .errors import SourceContractError
+from .hazards import (
+    HAZARD_COLUMNS,
+    county_out_fields,
+    hazard_fields_from_cached_row,
+    hazard_schema,
+    hazard_values_from_row,
+    invalid_optional_hazard_rows,
+    logical_hazard_values,
+    tract_out_fields,
+)
 
 Progress = Callable[[int, str], None]
 Cancelled = Callable[[], bool]
@@ -76,6 +86,23 @@ def _validate_layer(client: httpx.Client, source: dict[str, Any]) -> int:
     return min(int(metadata.get("maxRecordCount", 2000)), 2000)
 
 
+def _invalid_composite_percentile(frame: pl.DataFrame) -> pl.DataFrame:
+    return frame.filter(
+        pl.col("alr_npctl").is_null()
+        | ~pl.col("alr_npctl").is_finite()
+        | (pl.col("alr_npctl") < 0)
+        | (pl.col("alr_npctl") > 100)
+    )
+
+
+def _reject_invalid_hazards(frame: pl.DataFrame) -> None:
+    invalid_hazards = invalid_optional_hazard_rows(frame)
+    if invalid_hazards.height:
+        raise SourceContractError(
+            f"FEMA contains {invalid_hazards.height} invalid hazard ALR_NPCTL values"
+        )
+
+
 def _validate_rows(rows: list[dict[str, Any]], source: dict[str, Any]) -> pl.DataFrame:
     if any(not isinstance(row, dict) for row in rows):
         raise SourceContractError("FEMA returned a malformed data row")
@@ -84,13 +111,19 @@ def _validate_rows(rows: list[dict[str, Any]], source: dict[str, Any]) -> pl.Dat
             "tract_id": str(row.get("TRACTFIPS", "")),
             "alr_npctl": row.get("ALR_NPCTL"),
             "nri_version": row.get("NRI_VER"),
+            **hazard_values_from_row(row),
         }
         for row in rows
     ]
     try:
         frame = pl.DataFrame(
             normalized,
-            schema={"tract_id": pl.String, "alr_npctl": pl.Float64, "nri_version": pl.String},
+            schema={
+                "tract_id": pl.String,
+                "alr_npctl": pl.Float64,
+                "nri_version": pl.String,
+                **hazard_schema(),
+            },
         ).sort("tract_id")
     except (TypeError, ValueError, pl.exceptions.PolarsError) as exc:
         raise SourceContractError(f"FEMA rows do not match the expected types: {exc}") from exc
@@ -103,14 +136,10 @@ def _validate_rows(rows: list[dict[str, Any]], source: dict[str, Any]) -> pl.Dat
     invalid_ids = frame.filter(~pl.col("tract_id").str.contains(r"^\d{11}$"))
     if invalid_ids.height:
         raise SourceContractError(f"FEMA contains {invalid_ids.height} invalid tract identifiers")
-    invalid_values = frame.filter(
-        pl.col("alr_npctl").is_null()
-        | ~pl.col("alr_npctl").is_finite()
-        | (pl.col("alr_npctl") < 0)
-        | (pl.col("alr_npctl") > 100)
-    )
+    invalid_values = _invalid_composite_percentile(frame)
     if invalid_values.height:
         raise SourceContractError(f"FEMA contains {invalid_values.height} invalid ALR_NPCTL values")
+    _reject_invalid_hazards(frame)
     versions = frame["nri_version"].unique().to_list()
     if versions != [source["version"]]:
         raise SourceContractError(f"Expected NRI_VER {source['version']!r}, got {versions!r}")
@@ -128,6 +157,7 @@ def _validate_county_rows(rows: list[dict[str, Any]], source: dict[str, Any]) ->
             "state": "" if row.get("STATEABBRV") is None else str(row.get("STATEABBRV")),
             "alr_npctl": row.get("ALR_NPCTL"),
             "nri_version": row.get("NRI_VER"),
+            **hazard_values_from_row(row),
         }
         for row in rows
     ]
@@ -141,6 +171,7 @@ def _validate_county_rows(rows: list[dict[str, Any]], source: dict[str, Any]) ->
                 "state": pl.String,
                 "alr_npctl": pl.Float64,
                 "nri_version": pl.String,
+                **hazard_schema(),
             },
         ).sort("county_fips")
     except (TypeError, ValueError, pl.exceptions.PolarsError) as exc:
@@ -154,14 +185,10 @@ def _validate_county_rows(rows: list[dict[str, Any]], source: dict[str, Any]) ->
     invalid_ids = frame.filter(~pl.col("county_fips").str.contains(r"^\d{5}$"))
     if invalid_ids.height:
         raise SourceContractError(f"FEMA contains {invalid_ids.height} invalid county identifiers")
-    invalid_values = frame.filter(
-        pl.col("alr_npctl").is_null()
-        | ~pl.col("alr_npctl").is_finite()
-        | (pl.col("alr_npctl") < 0)
-        | (pl.col("alr_npctl") > 100)
-    )
+    invalid_values = _invalid_composite_percentile(frame)
     if invalid_values.height:
         raise SourceContractError(f"FEMA contains {invalid_values.height} invalid ALR_NPCTL values")
+    _reject_invalid_hazards(frame)
     versions = frame["nri_version"].unique().to_list()
     if versions != [source["version"]]:
         raise SourceContractError(f"Expected NRI_VER {source['version']!r}, got {versions!r}")
@@ -170,7 +197,7 @@ def _validate_county_rows(rows: list[dict[str, Any]], source: dict[str, Any]) ->
 
 def _logical_rows(frame: pl.DataFrame) -> list[list[Any]]:
     return [
-        [row["tract_id"], row["alr_npctl"], row["nri_version"]]
+        [row["tract_id"], row["alr_npctl"], row["nri_version"], *logical_hazard_values(row)]
         for row in frame.iter_rows(named=True)
     ]
 
@@ -184,9 +211,15 @@ def _logical_county_rows(frame: pl.DataFrame) -> list[list[Any]]:
             row["state"],
             row["alr_npctl"],
             row["nri_version"],
+            *logical_hazard_values(row),
         ]
         for row in frame.iter_rows(named=True)
     ]
+
+
+def page_cache_dir(paths: RuntimePaths, pages_name: str, source: dict[str, Any]) -> Path:
+    fingerprint = str(source["schema_fingerprint"])[:16]
+    return paths.cache / f"{pages_name}-{source['item_modified_ms']}-{fingerprint}"
 
 
 def validate_cached_fema(path: Path, source: dict[str, Any]) -> tuple[pl.DataFrame, str]:
@@ -194,7 +227,7 @@ def validate_cached_fema(path: Path, source: dict[str, Any]) -> tuple[pl.DataFra
         frame = pl.read_parquet(path)
     except (OSError, pl.exceptions.PolarsError) as exc:
         raise SourceContractError(f"Cannot read cached FEMA data: {exc}") from exc
-    required = {"tract_id", "alr_npctl", "nri_version"}
+    required = {"tract_id", "alr_npctl", "nri_version", *HAZARD_COLUMNS}
     missing = required - set(frame.columns)
     if missing:
         raise SourceContractError(
@@ -206,6 +239,7 @@ def validate_cached_fema(path: Path, source: dict[str, Any]) -> tuple[pl.DataFra
                 "TRACTFIPS": row["tract_id"],
                 "ALR_NPCTL": row["alr_npctl"],
                 "NRI_VER": row["nri_version"],
+                **hazard_fields_from_cached_row(row),
             }
             for row in frame.iter_rows(named=True)
         ],
@@ -223,7 +257,15 @@ def validate_cached_fema_counties(path: Path, source: dict[str, Any]) -> tuple[p
         frame = pl.read_parquet(path)
     except (OSError, pl.exceptions.PolarsError) as exc:
         raise SourceContractError(f"Cannot read cached FEMA data: {exc}") from exc
-    required = {"county_fips", "county", "county_type", "state", "alr_npctl", "nri_version"}
+    required = {
+        "county_fips",
+        "county",
+        "county_type",
+        "state",
+        "alr_npctl",
+        "nri_version",
+        *HAZARD_COLUMNS,
+    }
     missing = required - set(frame.columns)
     if missing:
         raise SourceContractError(
@@ -238,6 +280,7 @@ def validate_cached_fema_counties(path: Path, source: dict[str, Any]) -> tuple[p
                 "STATEABBRV": row["state"],
                 "ALR_NPCTL": row["alr_npctl"],
                 "NRI_VER": row["nri_version"],
+                **hazard_fields_from_cached_row(row),
             }
             for row in frame.iter_rows(named=True)
         ],
@@ -463,7 +506,7 @@ def _download_source(
 
     owns_client = client is None
     http = client or httpx.Client(timeout=httpx.Timeout(30, connect=15), follow_redirects=True)
-    pages = paths.cache / f"{pages_name}-{source['item_modified_ms']}"
+    pages = page_cache_dir(paths, pages_name, source)
     pages.mkdir(exist_ok=True)
     try:
         rows = _fetch_layer_rows(
@@ -512,7 +555,7 @@ def download_fema(
         source_key="fema",
         output=paths.cache / "fema_nri_tracts.parquet",
         pages_name="fema-pages",
-        out_fields="TRACTFIPS,ALR_NPCTL,NRI_VER",
+        out_fields=tract_out_fields(),
         order_by="TRACTFIPS",
         noun="tracts",
         validate_cache=validate_cached_fema,
@@ -538,7 +581,7 @@ def download_fema_counties(
         source_key="fema_counties",
         output=paths.cache / "fema_nri_counties.parquet",
         pages_name="fema-county-pages",
-        out_fields="STCOFIPS,COUNTY,COUNTYTYPE,STATEABBRV,ALR_NPCTL,NRI_VER",
+        out_fields=county_out_fields(),
         order_by="STCOFIPS",
         noun="counties",
         validate_cache=validate_cached_fema_counties,

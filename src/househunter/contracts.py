@@ -31,12 +31,20 @@ class TractContribution(BaseModel):
     weighted_contribution: float | None
 
 
+class HazardPercentile(BaseModel):
+    code: str
+    label: str
+    percentile: float | None
+
+
 class PlaceDetail(BaseModel):
     summary: PlaceSummary
     total_weighted_housing: int
     coverage_ratio: float
     methodology_notice: str
     tract_contributions: list[TractContribution]
+    hazard_percentiles: list[HazardPercentile]
+    member_tract_count: int | None = None
 
 
 class PlacePage(BaseModel):
@@ -70,13 +78,15 @@ class JobStatus(BaseModel):
 
 METHODOLOGY_NOTICE = (
     "HouseHunter ranks FEMA National Risk Index tracts by their published ALR_NPCTL "
-    "percentile. It is not FEMA's broader Risk Index, a property assessment, loss "
-    "probability, insurance quote, or prediction."
+    "percentile. Per-hazard bars are FEMA's published {CODE}_ALR_NPCTL values at the "
+    "tract grain; they are not a HouseHunter blend. This is not FEMA's broader Risk "
+    "Index, a property assessment, loss probability, insurance quote, or prediction."
 )
 
 COUNTY_METHODOLOGY_NOTICE = (
     "HouseHunter ranks FEMA National Risk Index counties by their published county-level "
-    "ALR_NPCTL percentile, ranked among counties. This is not an average of tract "
-    "percentiles, FEMA's broader Risk Index, a property assessment, loss probability, "
-    "insurance quote, or prediction."
+    "ALR_NPCTL percentile, ranked among counties. Per-hazard bars are FEMA's published "
+    "county {CODE}_ALR_NPCTL values, not an average of tract percentiles. This is not "
+    "FEMA's broader Risk Index, a property assessment, loss probability, insurance "
+    "quote, or prediction."
 )

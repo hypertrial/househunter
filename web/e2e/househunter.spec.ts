@@ -30,6 +30,12 @@ const countySummary = {
   county_name: "Boulder",
 };
 
+const hazards = [
+  { code: "WFIR", label: "Wildfire", percentile: 80.5 },
+  { code: "AVLN", label: "Avalanche", percentile: 12 },
+  { code: "TSUN", label: "Tsunami", percentile: null },
+];
+
 test("prepares, ranks, inspects, and exports", async ({ page }) => {
   let prepared = false;
   await page.route("**/api/v1/**", async (route) => {
@@ -82,6 +88,9 @@ test("prepares, ranks, inspects, and exports", async ({ page }) => {
         expect(url.searchParams.get("state")).toBe("CO");
         expect(url.searchParams.get("offset")).toBe("0");
       }
+      if (url.searchParams.has("county")) {
+        expect(url.searchParams.get("county")).toBe("08013");
+      }
       await route.fulfill({ json: { total: 1, items: [summary] } });
     } else if (url.pathname === "/api/v1/counties") {
       await route.fulfill({ json: { total: 1, items: [countySummary] } });
@@ -93,6 +102,8 @@ test("prepares, ranks, inspects, and exports", async ({ page }) => {
           coverage_ratio: 1,
           methodology_notice: "HouseHunter ranks FEMA counties by published county ALR_NPCTL.",
           tract_contributions: [],
+          hazard_percentiles: hazards,
+          member_tract_count: 12,
         },
       });
     } else if (url.pathname === "/api/v1/places/08013012101") {
@@ -102,15 +113,9 @@ test("prepares, ranks, inspects, and exports", async ({ page }) => {
           total_weighted_housing: 0,
           coverage_ratio: 1,
           methodology_notice: "HouseHunter ranks FEMA tracts by published ALR_NPCTL.",
-          tract_contributions: [
-            {
-              tract_id: "08013012101",
-              housing_units: 0,
-              housing_weight: 1,
-              fema_percentile: 21.25,
-              weighted_contribution: 21.25,
-            },
-          ],
+          tract_contributions: [],
+          hazard_percentiles: hazards,
+          member_tract_count: null,
         },
       });
     } else if (url.pathname.endsWith("places.csv") || url.pathname.endsWith("counties.csv")) {
@@ -137,13 +142,19 @@ test("prepares, ranks, inspects, and exports", async ({ page }) => {
   await page.getByLabel("County").selectOption("08013");
   await page.getByRole("row", { name: /08013012101/ }).click();
   await expect(page.getByRole("heading", { name: "08013012101, CO" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Published hazard percentiles" })).toBeVisible();
+  await expect(page.getByText("Wildfire")).toBeVisible();
+  await expect(page.getByText("No rating")).toBeVisible();
   await page.getByRole("button", { name: "Close tract detail" }).first().click();
   await page.getByRole("button", { name: "Counties" }).click();
   await expect(page.getByText(/ranked among counties/i)).toBeVisible();
   await page.getByRole("row", { name: /Boulder/ }).click();
   await expect(page.getByRole("heading", { name: "Boulder, CO" })).toBeVisible();
-  await page.getByRole("button", { name: "Close county detail" }).first().click();
+  await expect(page.getByText("Wildfire")).toBeVisible();
+  await page.getByRole("button", { name: "View 12 tracts" }).click();
+  await expect(page.getByRole("button", { name: "Tracts" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByLabel("County")).toHaveValue("08013");
   const downloaded = page.waitForEvent("download");
-  await page.getByRole("link", { name: "CSV" }).click();
+  await page.getByRole("link", { name: "Tracts CSV" }).click();
   await expect(await downloaded).toBeTruthy();
 });

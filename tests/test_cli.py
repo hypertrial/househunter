@@ -33,16 +33,32 @@ def test_cli_build_rank_inspect_export_and_sources(
 
     inspected = runner.invoke(app, ["inspect", "01001000100"])
     assert inspected.exit_code == 0
-    assert json.loads(inspected.output)["summary"]["place_id"] == "01001000100"
+    tract_detail = json.loads(inspected.output)
+    assert tract_detail["summary"]["place_id"] == "01001000100"
+    assert tract_detail["member_tract_count"] is None
+    tract_hazards = {
+        item["code"]: item["percentile"] for item in tract_detail["hazard_percentiles"]
+    }
+    assert tract_hazards["WFIR"] == 8.0
+    assert tract_hazards["TSUN"] is None
 
     inspected_county = runner.invoke(app, ["inspect", "01001"])
     assert inspected_county.exit_code == 0
-    assert json.loads(inspected_county.output)["summary"]["place_id"] == "01001"
+    county_detail = json.loads(inspected_county.output)
+    assert county_detail["summary"]["place_id"] == "01001"
+    assert county_detail["member_tract_count"] == 3
+    county_hazards = {
+        item["code"]: item["percentile"] for item in county_detail["hazard_percentiles"]
+    }
+    assert county_hazards["WFIR"] == 9.0
 
     output = tmp_path / "places.csv"
     exported = runner.invoke(app, ["export", "--format", "csv", "--output", str(output)])
     assert exported.exit_code == 0
-    assert output.read_text().startswith("place_id,")
+    header = output.read_text().splitlines()[0]
+    assert header.startswith("place_id,")
+    assert "alr_npctl_wfir" in header
+    assert "alr_npctl_tsun" in header
 
     sources = runner.invoke(app, ["sources", "--json"])
     assert sources.exit_code == 0

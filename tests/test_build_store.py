@@ -152,6 +152,19 @@ def test_schema_3_build_is_not_reused(
         build_snapshot(paths)
 
 
+def test_schema_4_build_is_not_reused(
+    fixture_environment: tuple[RuntimePaths, object],
+) -> None:
+    paths, _ = fixture_environment
+    output = build_snapshot(paths)
+    metadata_path = output / "build.json"
+    metadata = json.loads(metadata_path.read_text())
+    metadata["schema_version"] = 4
+    metadata_path.write_text(json.dumps(metadata))
+    with pytest.raises(HouseHunterError, match="immutable build failed validation"):
+        build_snapshot(paths)
+
+
 def test_unknown_state_is_rejected(fixture_environment: tuple[RuntimePaths, object]) -> None:
     paths, _ = fixture_environment
     with pytest.raises(HouseHunterError, match="Unknown state abbreviation"):

@@ -15,8 +15,25 @@ fema:
     TRACTFIPS: esriFieldTypeString
     ALR_NPCTL: esriFieldTypeDouble
     NRI_VER: esriFieldTypeString
-  schema_fingerprint: fdbbc3313928b19a8334cf0883667b996c64e5fc33b956dc42bbff55adf7723e
-  canonical_sha256: 3bed225905e528ac3b5c4443f66e21a4585bdc553f84dd1edd35daefe930fed4
+    AVLN_ALR_NPCTL: esriFieldTypeDouble
+    CFLD_ALR_NPCTL: esriFieldTypeDouble
+    CWAV_ALR_NPCTL: esriFieldTypeDouble
+    DRGT_ALR_NPCTL: esriFieldTypeDouble
+    ERQK_ALR_NPCTL: esriFieldTypeDouble
+    HAIL_ALR_NPCTL: esriFieldTypeDouble
+    HWAV_ALR_NPCTL: esriFieldTypeDouble
+    HRCN_ALR_NPCTL: esriFieldTypeDouble
+    ISTM_ALR_NPCTL: esriFieldTypeDouble
+    LNDS_ALR_NPCTL: esriFieldTypeDouble
+    LTNG_ALR_NPCTL: esriFieldTypeDouble
+    IFLD_ALR_NPCTL: esriFieldTypeDouble
+    SWND_ALR_NPCTL: esriFieldTypeDouble
+    TRND_ALR_NPCTL: esriFieldTypeDouble
+    TSUN_ALR_NPCTL: esriFieldTypeDouble
+    VLCN_ALR_NPCTL: esriFieldTypeDouble
+    WFIR_ALR_NPCTL: esriFieldTypeDouble
+    WNTW_ALR_NPCTL: esriFieldTypeDouble
+  schema_fingerprint: e0b94edbd7b1cde97abc67caa784749673980e538afdb031e3574d5e9482b5cc
 fema_counties:
   name: FEMA National Risk Index Counties
   item_id: 39485e8035d446a5bff03259508ae355
@@ -36,7 +53,25 @@ fema_counties:
     STATEABBRV: esriFieldTypeString
     ALR_NPCTL: esriFieldTypeDouble
     NRI_VER: esriFieldTypeString
-  schema_fingerprint: de3fb9c4dd2b2d7f507f908fce69ab95fc7f20bcfc155e93851a9e2ed85767f2
+    AVLN_ALR_NPCTL: esriFieldTypeDouble
+    CFLD_ALR_NPCTL: esriFieldTypeDouble
+    CWAV_ALR_NPCTL: esriFieldTypeDouble
+    DRGT_ALR_NPCTL: esriFieldTypeDouble
+    ERQK_ALR_NPCTL: esriFieldTypeDouble
+    HAIL_ALR_NPCTL: esriFieldTypeDouble
+    HWAV_ALR_NPCTL: esriFieldTypeDouble
+    HRCN_ALR_NPCTL: esriFieldTypeDouble
+    ISTM_ALR_NPCTL: esriFieldTypeDouble
+    LNDS_ALR_NPCTL: esriFieldTypeDouble
+    LTNG_ALR_NPCTL: esriFieldTypeDouble
+    IFLD_ALR_NPCTL: esriFieldTypeDouble
+    SWND_ALR_NPCTL: esriFieldTypeDouble
+    TRND_ALR_NPCTL: esriFieldTypeDouble
+    TSUN_ALR_NPCTL: esriFieldTypeDouble
+    VLCN_ALR_NPCTL: esriFieldTypeDouble
+    WFIR_ALR_NPCTL: esriFieldTypeDouble
+    WNTW_ALR_NPCTL: esriFieldTypeDouble
+  schema_fingerprint: 557599b73577df1deedfb5946323d0760d200634e5f1ab315c58b703fb1f4b99
 census:
   decennial_vintage: 2020
   terms_url: https://www.census.gov/about/policies/open-gov/open-data.html

@@ -7,8 +7,11 @@ tract scores.
 
 `ALR_NPCTL` is FEMA's national percentile for composite Expected Annual Loss Rate,
 distinct from FEMA's broader Risk Index. Tract and county percentiles are not
-comparable. A HouseHunter score is **not** a property-level assessment, a loss
-probability, an insurance quote, or a prediction.
+comparable. Detail views and exports also show FEMA's 18 published
+`{CODE}_ALR_NPCTL` hazard percentiles at the same grain. Those bars explain the
+composite; they are not a HouseHunter blend, and lists still rank only on
+composite `ALR_NPCTL`. A HouseHunter score is **not** a property-level
+assessment, a loss probability, an insurance quote, or a prediction.
 
 ## Quick start
 
@@ -71,10 +74,12 @@ risk_score[c] = ALR_NPCTL[c]
 
 County names come from the FEMA county layer. Tract rows join `TRACTFIPS[:5]` to
 `STCOFIPS`. The county percentile is FEMA's published county value, ranked among
-counties; it is not the mean of tract percentiles. State is derived from the first two
-digits of `TRACTFIPS` using a bundled FIPS map. HouseHunter does not impute,
-re-percentile, winsorize, or renormalize around missing rows. Unrankable rows remain
-visible as `missing_fema`.
+counties; it is not the mean of tract percentiles. Per-hazard county values are
+that county layer's `{CODE}_ALR_NPCTL`, not an average of tract hazards. Null
+hazard percentiles mean FEMA published no rating; they are not zero. State is
+derived from the first two digits of `TRACTFIPS` using a bundled FIPS map.
+HouseHunter does not impute, re-percentile, winsorize, or renormalize around
+missing rows. Unrankable rows remain visible as `missing_fema`.
 
 Read [DATA_SOURCES.md](DATA_SOURCES.md) for source provenance, release maintenance, and
 limitations.
@@ -98,9 +103,10 @@ Git.
 
 ## Scope
 
-V1 intentionally contains no mountain classifier, trails, maps, insurance data, additional
-hazards, composite weights, hosted service, or native installer. Those ideas remain deferred
-until the sole-metric workflow is demonstrably correct and useful.
+V1 lists stay ranked by composite `ALR_NPCTL` only. The 18 published FEMA hazard
+percentiles appear on inspect/detail and ride along in exports; there is still no
+sort or filter by hazard, no HouseHunter-invented composite weights, mountain
+classifier, trails, maps, insurance data, hosted service, or native installer.
 
 ## License
 

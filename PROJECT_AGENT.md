@@ -6,8 +6,10 @@ counties by the published county-level `ALR_NPCTL`. Lower is better.
 
 A HouseHunter tract score is FEMA's published tract percentile. A county score is
 FEMA's published county percentile, ranked among counties — not the mean of tract
-scores. Neither is a property-level assessment, a loss probability, an insurance
-quote, or a prediction.
+scores. Detail and export surfaces also pass through FEMA's 18 published
+`{CODE}_ALR_NPCTL` values at that grain; they are not a HouseHunter blend and do
+not change list ranking. Neither score is a property-level assessment, a loss
+probability, an insurance quote, or a prediction.
 
 Use the `househunter-engineering` workspace from `.pad.toml`. Follow `AGENTS.md`
 and the local `pad-engineering` skill. Keep ticket bodies, exports, credentials,

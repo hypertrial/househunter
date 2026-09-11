@@ -21,11 +21,12 @@ from .geography import (
     UNKNOWN_COUNTY_NAME,
     UNKNOWN_STATE,
 )
+from .hazards import HAZARD_COLUMNS, with_hazard_columns
 
 Progress = Callable[[int, str], None]
 Cancelled = Callable[[], bool]
 
-BUILD_SCHEMA_VERSION = 4
+BUILD_SCHEMA_VERSION = 5
 
 
 def logical_checksum(frame: pl.DataFrame, columns: list[str], sort_by: list[str]) -> str:
@@ -76,6 +77,9 @@ def compute_scores(
                 "nri_version": pl.String,
             },
         )
+    fema = with_hazard_columns(fema)
+    counties = with_hazard_columns(counties)
+    hazard_cols = [pl.col(column) for column in HAZARD_COLUMNS]
     county_complete = pl.col("alr_npctl").is_not_null()
     stripped_state = pl.col("state").str.strip_chars()
     county_state = (
@@ -107,6 +111,7 @@ def compute_scores(
         pl.lit("n/a").alias("census_vintage"),
         pl.col("county_fips"),
         _county_display_expr().alias("county_name"),
+        *hazard_cols,
     ).sort("place_id")
     lookup = county_scored.select(
         pl.col("place_id").alias("matched_county_fips"),
@@ -145,6 +150,7 @@ def compute_scores(
             .then(pl.lit(UNKNOWN_COUNTY_NAME))
             .otherwise(pl.col("matched_county_name"))
             .alias("county_name"),
+            *hazard_cols,
         )
         .sort("place_id")
     )

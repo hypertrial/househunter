@@ -46,6 +46,16 @@ def test_api_filters_details_exports_and_token(
             "county_fips",
             "county_name",
         }
+        assert "alr_npctl_wfir" not in client.get("/api/v1/places", params={"state": "AL"}).json()[
+            "items"
+        ][0]
+        tract_detail = client.get("/api/v1/places/01001000100").json()
+        hazards = {item["code"]: item for item in tract_detail["hazard_percentiles"]}
+        assert len(tract_detail["hazard_percentiles"]) == 18
+        assert hazards["WFIR"]["label"] == "Wildfire"
+        assert hazards["WFIR"]["percentile"] == 8.0
+        assert hazards["TSUN"]["percentile"] is None
+        assert tract_detail["member_tract_count"] is None
         assert summary["county_fips"] == "01001"
         assert summary["county_name"] == "Autauga"
         sources = client.get("/api/v1/sources").json()
@@ -60,6 +70,10 @@ def test_api_filters_details_exports_and_token(
         county_detail = client.get("/api/v1/counties/01001").json()
         assert "ranked among counties" in county_detail["methodology_notice"]
         assert county_detail["summary"]["risk_score"] == 40.0
+        assert county_detail["member_tract_count"] == 3
+        county_hazards = {item["code"]: item for item in county_detail["hazard_percentiles"]}
+        assert county_hazards["WFIR"]["percentile"] == 9.0
+        assert county_hazards["TSUN"]["percentile"] is None
         filtered = client.get("/api/v1/places", params={"county": "01001"}).json()
         assert [row["place_id"] for row in filtered["items"]] == [
             "01001000100",
@@ -70,6 +84,11 @@ def test_api_filters_details_exports_and_token(
         assert client.get("/api/v1/places", params={"county": ""}).status_code == 200
         assert client.get("/api/v1/exports/places.parquet").status_code == 200
         assert client.get("/api/v1/exports/counties.parquet").status_code == 200
+        place_header = client.get("/api/v1/exports/places.csv").text.splitlines()[0]
+        county_header = client.get("/api/v1/exports/counties.csv").text.splitlines()[0]
+        assert "alr_npctl_wfir" in place_header
+        assert "alr_npctl_tsun" in place_header
+        assert "alr_npctl_wfir" in county_header
         assert client.post("/api/v1/jobs", json={"kind": "build"}).status_code == 403
         accepted = client.post(
             "/api/v1/jobs",

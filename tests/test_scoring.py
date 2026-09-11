@@ -10,14 +10,18 @@ from househunter.geography import (
     county_display_name,
     state_for_tract,
 )
+from househunter.hazards import with_hazard_columns
 
 
 def _fema() -> pl.DataFrame:
-    return pl.DataFrame(
-        {
-            "tract_id": ["01001000100", "01001000200", "99999999999"],
-            "alr_npctl": [20.0, 60.0, None],
-        }
+    return with_hazard_columns(
+        pl.DataFrame(
+            {
+                "tract_id": ["01001000100", "01001000200", "99999999999"],
+                "alr_npctl": [20.0, 60.0, None],
+                "alr_npctl_wfir": [5.0, 80.0, None],
+            }
+        )
     )
 
 
@@ -64,15 +68,18 @@ def test_county_display_name_omits_generic_type() -> None:
 
 
 def test_county_score_is_fema_county_percentile_not_tract_mean() -> None:
-    counties = pl.DataFrame(
-        {
-            "county_fips": ["01001"],
-            "county": ["Autauga"],
-            "county_type": ["County"],
-            "state": ["AL"],
-            "alr_npctl": [41.0],
-            "nri_version": ["December 2025"],
-        }
+    counties = with_hazard_columns(
+        pl.DataFrame(
+            {
+                "county_fips": ["01001"],
+                "county": ["Autauga"],
+                "county_type": ["County"],
+                "state": ["AL"],
+                "alr_npctl": [41.0],
+                "nri_version": ["December 2025"],
+                "alr_npctl_wfir": [11.0],
+            }
+        )
     )
     scored, _, county_scored = compute_scores(_fema(), counties)
     tract_mean = (
@@ -81,22 +88,30 @@ def test_county_score_is_fema_county_percentile_not_tract_mean() -> None:
     county_row = county_scored.filter(pl.col("place_id") == "01001").row(0, named=True)
     assert county_row["risk_score"] == 41.0
     assert county_row["risk_score"] != tract_mean
+    tract_wildfire_mean = (
+        scored.filter(pl.col("county_fips") == "01001")["alr_npctl_wfir"].drop_nulls().mean()
+    )
+    assert county_row["alr_npctl_wfir"] == 11.0
+    assert county_row["alr_npctl_wfir"] != tract_wildfire_mean
     assert scored.filter(pl.col("place_id") == "01001000100")["county_name"].item() == "Autauga"
+    assert scored.filter(pl.col("place_id") == "01001000100")["alr_npctl_wfir"].item() == 5.0
     unknown = scored.filter(pl.col("place_id") == "99999999999").row(0, named=True)
     assert unknown["county_fips"] == UNKNOWN_COUNTY_FIPS
     assert unknown["county_name"] == UNKNOWN_COUNTY_NAME
 
 
 def test_county_state_is_normalized_to_uppercase() -> None:
-    counties = pl.DataFrame(
-        {
-            "county_fips": ["01001"],
-            "county": ["Autauga"],
-            "county_type": ["County"],
-            "state": ["al"],
-            "alr_npctl": [41.0],
-            "nri_version": ["December 2025"],
-        }
+    counties = with_hazard_columns(
+        pl.DataFrame(
+            {
+                "county_fips": ["01001"],
+                "county": ["Autauga"],
+                "county_type": ["County"],
+                "state": ["al"],
+                "alr_npctl": [41.0],
+                "nri_version": ["December 2025"],
+            }
+        )
     )
     _scored, _, county_scored = compute_scores(_fema(), counties)
     assert county_scored.filter(pl.col("place_id") == "01001")["state"].item() == "AL"

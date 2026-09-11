@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import App, { scoreLabel, STATE_ABBREVIATIONS } from "./App";
-import type { PlaceSummary } from "./types";
+import App, { scoreLabel, sortedHazardPercentiles, STATE_ABBREVIATIONS } from "./App";
+import type { HazardPercentile, PlaceSummary } from "./types";
 
 const place = {
   risk_score: 42.04,
@@ -38,6 +38,23 @@ describe("scoreLabel", () => {
     expect(scoreLabel({ ...place, risk_score: null, coverage_status: "missing_fema" })).toBe(
       "Not ranked",
     );
+  });
+});
+
+describe("sortedHazardPercentiles", () => {
+  it("orders rated hazards high to low and keeps no rating last", () => {
+    const hazards: HazardPercentile[] = [
+      { code: "TSUN", label: "Tsunami", percentile: null },
+      { code: "AVLN", label: "Avalanche", percentile: 10 },
+      { code: "WFIR", label: "Wildfire", percentile: 80 },
+      { code: "VLCN", label: "Volcanic Activity", percentile: null },
+    ];
+    expect(sortedHazardPercentiles(hazards).map((item) => item.code)).toEqual([
+      "WFIR",
+      "AVLN",
+      "TSUN",
+      "VLCN",
+    ]);
   });
 });
 
@@ -137,6 +154,106 @@ describe("ranking workflow", () => {
     await waitFor(() => expect(countiesParams(request.mock.calls).some((params) => !params.has("sort") || params.get("sort") === "risk_score" || params.get("limit") === "50")).toBe(true));
     expect(screen.getByText(/ranked among counties/i)).toBeVisible();
     expect(screen.getByRole("button", { name: "Counties" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("link", { name: "Tracts CSV" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "Counties CSV" })).toBeVisible();
+  });
+
+  it("shows published hazard percentiles and opens member tracts from a county", async () => {
+    const request = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const tractSummary = {
+        ...place,
+        place_id: "01001000100",
+        name: "01001000100",
+        state: "AL",
+        place_type: "tract",
+        population_2020: 0,
+        housing_units_2020: 0,
+      };
+      const countySummary = {
+        ...place,
+        place_id: "01001",
+        name: "Autauga",
+        state: "AL",
+        place_type: "county",
+        population_2020: 0,
+        housing_units_2020: 0,
+        county_fips: "01001",
+        county_name: "Autauga",
+      };
+      const hazards = [
+        { code: "WFIR", label: "Wildfire", percentile: 80 },
+        { code: "AVLN", label: "Avalanche", percentile: 10 },
+        { code: "TSUN", label: "Tsunami", percentile: null },
+      ];
+      let body: unknown = { items: [tractSummary], total: 1 };
+      if (url.includes("/meta")) {
+        body = {
+          app_version: "1.0.0",
+          mutation_token: "token",
+          reference_assets_ready: true,
+          reference_assets_error: null,
+          build: {
+            build_id: "fixture",
+            place_count: 1,
+            ranked_place_count: 1,
+            source_vintages: { fema: "December 2025" },
+            scope: { kind: "national", state: null },
+          },
+        };
+      } else if (url.includes("/api/v1/counties/01001")) {
+        body = {
+          summary: countySummary,
+          total_weighted_housing: 0,
+          coverage_ratio: 1,
+          methodology_notice: "HouseHunter ranks FEMA counties by published county ALR_NPCTL.",
+          tract_contributions: [],
+          hazard_percentiles: hazards,
+          member_tract_count: 3,
+        };
+      } else if (url.includes("/api/v1/counties?")) {
+        body = { items: [countySummary], total: 1 };
+      } else if (url.includes("/api/v1/places/01001000100")) {
+        body = {
+          summary: tractSummary,
+          total_weighted_housing: 0,
+          coverage_ratio: 1,
+          methodology_notice: "HouseHunter ranks FEMA tracts by published ALR_NPCTL.",
+          tract_contributions: [],
+          hazard_percentiles: hazards,
+          member_tract_count: null,
+        };
+      }
+      return new Response(JSON.stringify(body), { status: 200 });
+    });
+    vi.stubGlobal("fetch", request);
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: /lower risk/i })).toBeVisible();
+    fireEvent.click(await screen.findByRole("row", { name: /01001000100/ }));
+    expect(await screen.findByRole("heading", { name: "Published hazard percentiles" })).toBeVisible();
+    expect(screen.getByText("Wildfire")).toBeVisible();
+    expect(screen.getByText("80.0")).toBeVisible();
+    expect(screen.getByText("No rating")).toBeVisible();
+    const bars = screen.getAllByText(/Wildfire|Avalanche|Tsunami/).map((node) => node.textContent);
+    expect(bars.indexOf("Wildfire")).toBeLessThan(bars.indexOf("Tsunami"));
+    fireEvent.click(screen.getByRole("button", { name: "Close tract detail" }));
+    fireEvent.click(screen.getByRole("button", { name: "Counties" }));
+    fireEvent.click(await screen.findByRole("row", { name: /Autauga/ }));
+    expect(await screen.findByRole("button", { name: "View 3 tracts" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Close county detail" }));
+    fireEvent.click(screen.getByRole("button", { name: "Tracts" }));
+    fireEvent.click(await screen.findByRole("row", { name: /01001000100/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "View Autauga county" }));
+    expect(await screen.findByRole("heading", { name: "Autauga, AL" })).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "01001000100, AL" })).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "View 3 tracts" }));
+    await waitFor(() => {
+      const latest = placesParams(request.mock.calls).at(-1);
+      expect(latest?.get("county")).toBe("01001");
+      expect(latest?.get("state")).toBe("AL");
+    });
+    expect(screen.getByRole("button", { name: "Tracts" })).toHaveAttribute("aria-pressed", "true");
+    await waitFor(() => expect(screen.getByLabelText("County")).toHaveDisplayValue("Autauga"));
   });
 
   it("starts preparation with the per-launch token", async () => {

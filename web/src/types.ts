@@ -23,12 +23,20 @@ export interface TractContribution {
   weighted_contribution: number | null;
 }
 
+export interface HazardPercentile {
+  code: string;
+  label: string;
+  percentile: number | null;
+}
+
 export interface PlaceDetail {
   summary: PlaceSummary;
   total_weighted_housing: number;
   coverage_ratio: number;
   methodology_notice: string;
   tract_contributions: TractContribution[];
+  hazard_percentiles: HazardPercentile[];
+  member_tract_count: number | null;
 }
 
 export interface JobStatus {
