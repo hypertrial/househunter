@@ -205,9 +205,17 @@ test("is keyboard operable and never overflows the viewport", async ({ page }, t
   await page.goto("/#level=tract&cx=0.5&cy=0.5&z=5");
   const canvas = page.locator("canvas");
   await expect(page.getByRole("alert")).toContainText("Detailed tract request failed");
+  await expect.poll(() => regionalRequests.length).toBe(1);
+  await canvas.focus();
+  await page.keyboard.press("+");
+  await page.keyboard.press("-");
+  await page.keyboard.press("+");
+  await expect(page.getByRole("alert")).toContainText("Detailed tract request failed");
+  await page.waitForTimeout(250);
+  expect(regionalRequests).toHaveLength(1);
   await page.getByRole("button", { name: "Retry map" }).click();
   await expect(page.locator(".build-pill")).toContainText("interactive");
-  await expect.poll(() => regionalRequests.length).toBeGreaterThan(1);
+  await expect.poll(() => regionalRequests.length).toBe(2);
   await page.getByRole("button", { name: "Reset map" }).click();
   await expect(page).toHaveURL(/z=1\.000/);
   await expect(page.locator(".build-pill")).toContainText("interactive");

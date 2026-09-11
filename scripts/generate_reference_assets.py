@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import io
 import json
 import os
@@ -25,6 +24,7 @@ from typing import Any, BinaryIO
 
 import polars as pl
 
+from househunter.config import canonical_json, sha256_bytes, sha256_file
 from househunter.reference_generation import reconcile_connecticut, remove_obsolete_assets
 
 STATES = {
@@ -174,20 +174,7 @@ def census_urls(state_fips: str) -> dict[str, str]:
 
 
 def frame_checksum(frame: pl.DataFrame, sort_by: list[str]) -> str:
-    payload = json.dumps(
-        [list(row) for row in frame.sort(sort_by).iter_rows()],
-        separators=(",", ":"),
-        ensure_ascii=True,
-    ).encode()
-    return hashlib.sha256(payload).hexdigest()
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while chunk := handle.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return sha256_bytes(canonical_json([list(row) for row in frame.sort(sort_by).iter_rows()]))
 
 
 def generate(cache: Path, output: Path, fema_path: Path) -> None:

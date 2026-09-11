@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import runpy
 from pathlib import Path
 
 import polars as pl
@@ -13,6 +14,11 @@ from househunter.reference import (
     reference_asset_status,
     validate_reference_assets,
 )
+
+generator = runpy.run_path(
+    str(Path(__file__).resolve().parents[1] / "scripts" / "generate_reference_assets.py")
+)
+frame_checksum = generator["frame_checksum"]
 
 
 def _logical_checksum(frame: pl.DataFrame, sort_by: list[str]) -> str:
@@ -63,6 +69,21 @@ def _assets(tmp_path: Path) -> Path:
     }
     (assets / "reference_metadata.json").write_text(json.dumps(metadata) + "\n")
     return assets
+
+
+def test_generator_frame_checksum_matches_logical_checksum_for_any_row_order() -> None:
+    frame = pl.DataFrame(
+        {
+            "place_id": ["0100002", "0100001"],
+            "name": ["Pe\u00f1a", "Alpha"],
+            "population_2020": [200, 1000],
+        }
+    )
+
+    expected = _logical_checksum(frame, ["place_id"])
+
+    assert frame_checksum(frame, ["place_id"]) == expected
+    assert frame_checksum(frame.reverse(), ["place_id"]) == expected
 
 
 def test_reference_validation_rejects_nonfinite_weights(

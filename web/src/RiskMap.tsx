@@ -174,6 +174,7 @@ export default function RiskMap({
   const detailByIdRef = useRef(new Map<string, MapFeature>());
   const detailRef = useRef(new Map<string, MapFeature[]>());
   const detailPendingRef = useRef(new Map<string, Promise<void>>());
+  const detailFailuresRef = useRef(new Map<string, Error>());
   const manifestRef = useRef<MapManifest | null>(null);
   const loadedLevelRef = useRef<"tract" | "county" | "">("");
   const hitBuildRef = useRef(0);
@@ -499,6 +500,7 @@ export default function RiskMap({
       ++settleGenerationRef.current;
       featuresRef.current = [];
       detailRef.current.clear();
+      detailFailuresRef.current.clear();
       geometryByIdRef.current.clear();
       detailByIdRef.current.clear();
       loadedLevelRef.current = "";
@@ -612,6 +614,8 @@ export default function RiskMap({
     if (level !== "tract" || transformRef.current.k < DETAIL_ZOOM || !manifestRef.current) return;
     await Promise.all([...visibleStates()].map((code) => {
       if (detailRef.current.has(code)) return Promise.resolve();
+      const failure = detailFailuresRef.current.get(code);
+      if (failure) return Promise.reject(failure);
       const existing = detailPendingRef.current.get(code);
       if (existing) return existing;
       const request = (async () => {
@@ -624,7 +628,11 @@ export default function RiskMap({
         for (const item of detailed) {
           detailByIdRef.current.set(String(item.id || item.properties?.place_id || ""), item);
         }
-      })().finally(() => detailPendingRef.current.delete(code));
+      })().catch((caught: unknown) => {
+        const failure = caught instanceof Error ? caught : new Error("Detailed tract request failed");
+        detailFailuresRef.current.set(code, failure);
+        throw failure;
+      }).finally(() => detailPendingRef.current.delete(code));
       detailPendingRef.current.set(code, request);
       return request;
     }));
