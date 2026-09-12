@@ -11,7 +11,80 @@ import yaml
 from househunter.build import BUILD_SCHEMA_VERSION, build_snapshot
 from househunter.config import RuntimePaths
 from househunter.errors import HouseHunterError
+from househunter.geography import STATE_BY_FIPS
+from househunter.mountain import IN_SCOPE_STATES, promote_release, write_release
 from househunter.store import Store
+
+
+def _promote_mountain_fixture(paths: RuntimePaths, root: Path) -> None:
+    raw = pl.DataFrame(
+        {
+            "block_geoid": ["010010001001001", "020010001001001"],
+            "tract_geoid": ["01001000100", "02001000100"],
+            "county_fips": ["01001", "02001"],
+            "state": ["AL", "AK"],
+            "pop20": [10, 20],
+            "relief_5km_m": [100.0, 500.0],
+            "relief_10km_m": [150.0, 600.0],
+            "relief_20km_m": [200.0, 700.0],
+            "relief_40km_m": [250.0, 800.0],
+            "rugged_fraction_20km": [0.1, 0.8],
+            "public_mountain_access_raw": [1.0, 8.0],
+            "trail_access_raw": [0.5, 5.0],
+            "open_mountain_km2_5": [1.0, 5.0],
+            "open_mountain_km2_15": [2.0, 8.0],
+            "open_mountain_km2_30": [3.0, 12.0],
+            "restricted_mountain_km2_30": [0.0, 1.0],
+            "closed_mountain_km2_30": [0.0, 1.0],
+            "unknown_mountain_km2_30": [0.0, 1.0],
+            "nearest_mountain_trail_km": [8.0, 1.0],
+            "mountain_trail_km_10": [0.5, 4.0],
+            "mountain_trail_km_25": [1.0, 6.0],
+        }
+    )
+    additions = []
+    for fips, state in STATE_BY_FIPS.items():
+        if state not in IN_SCOPE_STATES or state in {"AL", "AK"}:
+            continue
+        block_geoid = f"{fips}0010001001001"
+        additions.append(
+            raw.head(1).with_columns(
+                pl.lit(block_geoid).alias("block_geoid"),
+                pl.lit(block_geoid[:11]).alias("tract_geoid"),
+                pl.lit(block_geoid[:5]).alias("county_fips"),
+                pl.lit(state).alias("state"),
+                pl.lit(1, dtype=pl.Int64).alias("pop20"),
+            )
+        )
+    raw = pl.concat([raw, *additions])
+    expectations = {
+        row["state"]: {"blocks": row["blocks"], "population": row["population"]}
+        for row in raw.group_by("state")
+        .agg(pl.len().alias("blocks"), pl.col("pop20").sum().alias("population"))
+        .iter_rows(named=True)
+    }
+    candidate = write_release(
+        raw,
+        root / "mountain-candidate",
+        data_release="fixture-2020",
+        sources={
+            "items": [
+                {
+                    "name": "fixture",
+                    "url": "https://example.invalid/fixture",
+                    "acquired_at": "2026-01-01T00:00:00Z",
+                    "crs": "EPSG:5070",
+                    "schema": ["fixture"],
+                    "count": 1,
+                    "filename": "fixture.parquet",
+                    "size": 1,
+                    "sha256": "0" * 64,
+                }
+            ]
+        },
+        national_expectations=expectations,
+    )
+    promote_release(paths, candidate)
 
 
 def test_build_is_content_addressed_and_queryable(
@@ -76,6 +149,28 @@ def test_build_identity_includes_source_vintages(
     assert second != first
     metadata = json.loads((second / "build.json").read_text())
     assert metadata["source_vintages"]["chrr"] == config["chrr"]["version"]
+
+
+def test_build_joins_promoted_mountain_release_and_changes_identity(
+    fixture_environment: tuple[RuntimePaths, Path],
+) -> None:
+    paths, root = fixture_environment
+    without_mountain = build_snapshot(paths)
+    _promote_mountain_fixture(paths, root)
+
+    with_mountain = build_snapshot(paths)
+
+    assert with_mountain != without_mountain
+    metadata = json.loads((with_mountain / "build.json").read_text())
+    assert metadata["source_vintages"]["mountain"] == "fixture-2020"
+    with Store(paths) as store:
+        alabama = store.place_detail("01001000100")["summary"]
+        alaska = store.place_detail("02001000100")["summary"]
+        assert alabama["mountain_score"] == 0.0
+        assert alaska["mountain_score"] > alabama["mountain_score"]
+        assert [row["place_id"] for row in store.list_places(mountain_min=1)["items"]] == [
+            "02001000100"
+        ]
 
 
 def test_state_build_records_scope(fixture_environment: tuple[RuntimePaths, object]) -> None:

@@ -246,6 +246,27 @@ def test_chrr_contract_rejects_invalid_rows(
         validate_rows(rows, source)
 
 
+@pytest.mark.parametrize("value", [5.5, True, "5"])
+def test_chrr_contract_rejects_non_integer_groups(value: object) -> None:
+    rows = [{**_rows()[0], "CommunityConditions_Group": value}]
+
+    with pytest.raises(SourceContractError, match="must be integers or null"):
+        validate_rows(rows, _source(1))
+
+
+def test_cached_chrr_rejects_coercible_group_before_checksum(tmp_path: Path) -> None:
+    valid = [{**_rows()[0], "CommunityConditions_Group": 5}]
+    source = _source(1)
+    source["canonical_sha256"] = logical_checksum(validate_rows(valid, source))
+    cache = tmp_path / "chrr.json"
+    cache.write_text(
+        json.dumps({"rows": [{**valid[0], "CommunityConditions_Group": 5.5}]})
+    )
+
+    with pytest.raises(SourceContractError, match="must be integers or null"):
+        validate_cached_chrr(cache, source)
+
+
 def test_processed_chrr_has_stable_six_column_contract(
     fixture_environment: tuple[RuntimePaths, Path],
 ) -> None:

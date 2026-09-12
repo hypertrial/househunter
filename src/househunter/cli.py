@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 import webbrowser
 from pathlib import Path
@@ -16,10 +17,13 @@ from .config import RuntimePaths, load_config
 from .download import download_fema, download_fema_counties, source_statuses
 from .errors import AmbiguousPlaceError, HouseHunterError
 from .geocode import lookup_address
+from .geography import STATE_BY_FIPS
 from .locking import exclusive_lock
 from .store import Store
 
 app = typer.Typer(no_args_is_help=True, pretty_exceptions_show_locals=False)
+mountain_app = typer.Typer(no_args_is_help=True, pretty_exceptions_show_locals=False)
+app.add_typer(mountain_app, name="mountain", help="Build and inspect Mountain Score releases.")
 
 
 def _paths() -> RuntimePaths:
@@ -33,6 +37,182 @@ def _progress(value: int, message: str) -> None:
 def _abort(exc: HouseHunterError) -> None:
     typer.echo(f"Error: {exc}", err=True)
     raise typer.Exit(1) from exc
+
+
+def _release_slug(value: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", value):
+        raise HouseHunterError(
+            "--data-release must contain only letters, numbers, dots, underscores, or hyphens"
+        )
+    return value.lower()
+
+
+@mountain_app.command("download")
+def mountain_download(
+    source_lock: Annotated[Path, typer.Option("--source-lock", exists=True, dir_okay=False)],
+    destination: Annotated[Path | None, typer.Option("--destination")] = None,
+) -> None:
+    """Download the exact files named by a maintainer source lock."""
+    from .mountain_gis import download_sources as download_mountain_sources
+
+    paths = _paths()
+    target = (destination or paths.data / "mountain" / "sources").expanduser().resolve()
+    try:
+        with exclusive_lock(paths.job_lock):
+            output = download_mountain_sources(source_lock.expanduser().resolve(), target)
+        typer.echo(str(output))
+    except (HouseHunterError, OSError) as exc:
+        _abort(HouseHunterError(str(exc)))
+
+
+@mountain_app.command("build")
+def mountain_build(
+    data_release: Annotated[str, typer.Option("--data-release")],
+    source_lock: Annotated[Path | None, typer.Option("--source-lock", dir_okay=False)] = None,
+    regions: Annotated[Path | None, typer.Option("--regions", dir_okay=False)] = None,
+    source_root: Annotated[Path | None, typer.Option("--source-root", file_okay=False)] = None,
+    raw_blocks: Annotated[Path | None, typer.Option("--raw-blocks", dir_okay=False)] = None,
+    output: Annotated[Path | None, typer.Option("--output")] = None,
+    promote: Annotated[bool, typer.Option("--promote/--no-promote")] = True,
+    allow_partial: Annotated[bool, typer.Option("--allow-partial")] = False,
+) -> None:
+    """Build, validate, and optionally promote a Mountain Score release."""
+    import polars as pl
+
+    from .mountain import (
+        promote_release,
+        validate_national_expectations,
+        write_release,
+    )
+    from .mountain_gis import (
+        build_region_raw_metrics,
+        load_regions,
+        locked_source_paths,
+        verify_region_sources_locked,
+        verify_source_lock,
+    )
+
+    if bool(raw_blocks) == bool(regions):
+        _abort(HouseHunterError("Provide exactly one of --raw-blocks or --regions"))
+    if allow_partial and promote:
+        _abort(HouseHunterError("Partial Mountain builds cannot be promoted"))
+    paths = _paths()
+    try:
+        release_slug = _release_slug(data_release)
+        candidate = (
+            (output or paths.data / "mountain" / "candidates" / release_slug).expanduser().resolve()
+        )
+        with exclusive_lock(paths.job_lock):
+            source_metadata: dict[str, object] = {}
+            lock: dict[str, object] | None = None
+            if source_lock:
+                lock = verify_source_lock(
+                    source_lock.expanduser().resolve(),
+                    root=source_root.expanduser().resolve() if source_root else None,
+                )
+                source_metadata = {
+                    "items": [
+                        {key: value for key, value in item.items() if key != "path"}
+                        for item in lock["sources"]
+                    ]
+                }
+            if raw_blocks:
+                raw_path = raw_blocks.expanduser().resolve()
+                if not allow_partial and lock is None:
+                    raise HouseHunterError("National raw-block builds require --source-lock")
+                if lock is not None and raw_path not in locked_source_paths(
+                    lock, root=source_root.expanduser().resolve() if source_root else None
+                ):
+                    raise HouseHunterError("--raw-blocks is absent from the source lock")
+                blocks = pl.read_parquet(raw_path)
+            else:
+                if not source_lock or not source_root or not regions:
+                    raise HouseHunterError(
+                        "GIS builds require --source-lock, --source-root, and --regions"
+                    )
+                assert lock is not None
+                configured_regions = load_regions(
+                    regions.expanduser().resolve(), source_root.expanduser().resolve()
+                )
+                verify_region_sources_locked(
+                    configured_regions, lock, root=source_root.expanduser().resolve()
+                )
+                regional = [
+                    build_region_raw_metrics(region, state_by_fips=STATE_BY_FIPS)
+                    for region in configured_regions
+                ]
+                blocks = pl.concat(regional)
+            expectations: dict[str, object] | None = None
+            if not allow_partial:
+                expectations = lock.get("expected_states") if lock else None
+                if not isinstance(expectations, dict):
+                    raise HouseHunterError(
+                        "National Mountain builds require expected_states in the source lock"
+                    )
+                validate_national_expectations(blocks, expectations)
+            release = write_release(
+                blocks,
+                candidate,
+                data_release=data_release,
+                sources=source_metadata,
+                national_expectations=expectations,
+            )
+            final = promote_release(paths, release) if promote else release
+        typer.echo(str(final))
+    except (HouseHunterError, OSError, pl.exceptions.PolarsError) as exc:
+        _abort(HouseHunterError(str(exc)))
+
+
+@mountain_app.command("validate")
+def mountain_validate(
+    release: Annotated[Path, typer.Argument(exists=True, file_okay=False)],
+    promote: Annotated[bool, typer.Option("--promote/--no-promote")] = False,
+) -> None:
+    """Validate a candidate release and optionally promote it."""
+    from .mountain import promote_release
+    from .mountain import validate_release as validate_mountain_release
+
+    paths = _paths()
+    try:
+        with exclusive_lock(paths.job_lock):
+            report = validate_mountain_release(release.expanduser().resolve())
+            if promote:
+                report["promoted_path"] = str(
+                    promote_release(paths, release.expanduser().resolve())
+                )
+        typer.echo(json.dumps(report, indent=2, sort_keys=True))
+    except (HouseHunterError, OSError) as exc:
+        _abort(HouseHunterError(str(exc)))
+
+
+@mountain_app.command("inspect")
+def mountain_inspect(
+    geoid: str,
+    release: Annotated[Path | None, typer.Option("--release", file_okay=False)] = None,
+) -> None:
+    """Inspect a 15-digit block, 11-digit tract, or 5-digit county release row."""
+    import polars as pl
+
+    if not geoid.isdigit() or len(geoid) not in {5, 11, 15}:
+        _abort(HouseHunterError("Mountain GEOID must contain 5, 11, or 15 digits"))
+    paths = _paths()
+    try:
+        root = release.expanduser().resolve() if release else None
+        if root is None:
+            pointer = json.loads((paths.data / "mountain" / "current.json").read_text())
+            root = paths.data / "mountain" / "releases" / pointer["release_id"]
+        filename = {5: "counties.parquet", 11: "tracts.parquet", 15: "blocks.parquet"}[len(geoid)]
+        artifact = root / filename
+        if not artifact.is_file():
+            raise HouseHunterError(f"Mountain {len(geoid)}-digit detail is unavailable")
+        row = pl.read_parquet(artifact).filter(
+            pl.col("block_geoid" if len(geoid) == 15 else "place_id") == geoid
+        )
+        if row.height != 1:
+            raise HouseHunterError(f"Mountain GEOID not found: {geoid}")
+        typer.echo(json.dumps(row.row(0, named=True), indent=2, sort_keys=True))
+    except (HouseHunterError, OSError, KeyError, json.JSONDecodeError) as exc:
+        _abort(HouseHunterError(str(exc)))
 
 
 @app.command()
@@ -89,11 +269,7 @@ def download(
                 download_fema_counties(paths, progress=_progress)
                 output = download_chrr(paths, progress=_progress)
             else:
-                _abort(
-                    HouseHunterError(
-                        "Supported sources are fema, fema_counties, chrr, and all"
-                    )
-                )
+                _abort(HouseHunterError("Supported sources are fema, fema_counties, chrr, and all"))
         typer.echo(str(output))
     except HouseHunterError as exc:
         _abort(exc)
@@ -120,9 +296,8 @@ def rank(
     level: Annotated[str, typer.Option("--level", help="tract or county")] = "tract",
     limit: Annotated[int, typer.Option("--limit", min=1, max=500)] = 25,
     include_unranked: Annotated[bool, typer.Option("--include-unranked")] = False,
-    metric: Annotated[
-        str, typer.Option("--metric", help="risk or community-conditions")
-    ] = "risk",
+    mountain_min: Annotated[float | None, typer.Option("--mountain-min", min=0, max=100)] = None,
+    metric: Annotated[str, typer.Option("--metric", help="risk or community-conditions")] = "risk",
     order: Annotated[str, typer.Option("--order", help="best or worst")] = "best",
 ) -> None:
     """Rank geographies by FEMA risk or CHR&R Community Conditions."""
@@ -137,9 +312,7 @@ def rank(
     selected_order = order.lower()
     if selected_order not in {"best", "worst"}:
         _abort(HouseHunterError("Rank order must be best or worst"))
-    sort = (
-        "risk_score" if selected_metric == "risk" else "community_conditions_group"
-    )
+    sort = "risk_score" if selected_metric == "risk" else "community_conditions_group"
     direction = "asc" if selected_order == "best" else "desc"
     try:
         with Store(_paths()) as store:
@@ -148,6 +321,7 @@ def rank(
                     state=state,
                     limit=limit,
                     include_unranked=include_unranked,
+                    mountain_min=mountain_min,
                     sort=sort,
                     direction=direction,
                 )
@@ -159,6 +333,7 @@ def rank(
                     county=county,
                     limit=limit,
                     include_unranked=include_unranked,
+                    mountain_min=mountain_min,
                     sort=sort,
                     direction=direction,
                 )
@@ -173,12 +348,12 @@ def rank(
             score = (
                 f"{value:.1f}"
                 if selected_metric == "risk" and value is not None
-                else str(value) if value is not None else "—"
+                else str(value)
+                if value is not None
+                else "—"
             )
             if selected == "county":
-                typer.echo(
-                    f"{row['place_id']:<12} {score:>5}  {row['state']:<5}  {row['name']}"
-                )
+                typer.echo(f"{row['place_id']:<12} {score:>5}  {row['state']:<5}  {row['name']}")
             else:
                 typer.echo(f"{row['place_id']:<12} {score:>5}  {row['state']}")
     except HouseHunterError as exc:

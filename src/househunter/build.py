@@ -11,7 +11,7 @@ import duckdb
 import polars as pl
 
 from .chrr import build_processed
-from .config import RuntimePaths, canonical_json, load_config, sha256_bytes
+from .config import RuntimePaths, canonical_json, load_config, sha256_bytes, sha256_file
 from .contracts import COUNTY_METHODOLOGY_NOTICE, METHODOLOGY_NOTICE
 from .download import validate_cached_fema, validate_cached_fema_counties
 from .errors import HouseHunterError
@@ -27,7 +27,7 @@ from .hazards import HAZARD_COLUMNS, with_hazard_columns
 Progress = Callable[[int, str], None]
 Cancelled = Callable[[], bool]
 
-BUILD_SCHEMA_VERSION = 6
+BUILD_SCHEMA_VERSION = 7
 
 
 def logical_checksum(frame: pl.DataFrame, columns: list[str], sort_by: list[str]) -> str:
@@ -50,6 +50,62 @@ def _county_display_expr() -> pl.Expr:
         .when(generic)
         .then(name)
         .otherwise(pl.concat_str([name, pl.lit(" "), kind]))
+    )
+
+
+def _attach_mountain_scores(
+    places: pl.DataFrame,
+    counties: pl.DataFrame,
+    paths: RuntimePaths,
+) -> tuple[pl.DataFrame, pl.DataFrame, dict[str, str]]:
+    from .mountain import AGGREGATE_MEANS, current_compact_release
+
+    current = current_compact_release(paths)
+    if current is None:
+        numeric = [pl.lit(None, dtype=pl.Float64).alias(column) for column in AGGREGATE_MEANS]
+        missing = [
+            *numeric,
+            pl.lit(None, dtype=pl.String).alias("mountain_score_version"),
+            pl.lit(None, dtype=pl.String).alias("mountain_pipeline_version"),
+            pl.lit(0.0).alias("mountain_population_coverage"),
+            pl.lit("unavailable").alias("mountain_coverage_status"),
+        ]
+        return (
+            places.with_columns(*missing),
+            counties.with_columns(*missing),
+            {
+                "checksum": sha256_bytes(b"unavailable"),
+                "data_release": "unavailable",
+                "score_version": "unavailable",
+            },
+        )
+    release, manifest, mountain_tracts, mountain_counties = current
+
+    def attach(frame: pl.DataFrame, mountain: pl.DataFrame) -> pl.DataFrame:
+        return (
+            frame.join(
+                mountain.with_columns(pl.lit(True).alias("_mountain_present")),
+                on="place_id",
+                how="left",
+            )
+            .with_columns(
+                pl.when(pl.col("_mountain_present").is_null())
+                .then(pl.lit("unavailable"))
+                .otherwise(pl.col("mountain_coverage_status"))
+                .alias("mountain_coverage_status"),
+                pl.col("mountain_population_coverage").fill_null(0.0),
+            )
+            .drop("_mountain_present")
+        )
+
+    return (
+        attach(places, mountain_tracts),
+        attach(counties, mountain_counties),
+        {
+            "checksum": sha256_file(release / "manifest.json"),
+            "data_release": str(manifest["data_release"]),
+            "score_version": str(manifest["score_version"]),
+        },
     )
 
 
@@ -160,9 +216,10 @@ def compute_scores(
             .then(pl.col("alr_npctl"))
             .otherwise(pl.lit(None, dtype=pl.Float64))
             .alias("risk_score"),
-            pl.when(complete).then(pl.lit("complete")).otherwise(pl.lit("missing_fema")).alias(
-                "coverage_status"
-            ),
+            pl.when(complete)
+            .then(pl.lit("complete"))
+            .otherwise(pl.lit("missing_fema"))
+            .alias("coverage_status"),
             pl.when(complete).then(pl.lit(1.0)).otherwise(pl.lit(0.0)).alias("coverage_ratio"),
             pl.lit(0, dtype=pl.Int64).alias("total_weighted_housing"),
             pl.lit(fema_vintage).alias("fema_vintage"),
@@ -188,9 +245,10 @@ def compute_scores(
         pl.lit(0, dtype=pl.Int64).alias("housing_units"),
         pl.lit(1.0).alias("housing_weight"),
         pl.col("alr_npctl"),
-        pl.when(complete).then(pl.col("alr_npctl")).otherwise(pl.lit(None, dtype=pl.Float64)).alias(
-            "weighted_contribution"
-        ),
+        pl.when(complete)
+        .then(pl.col("alr_npctl"))
+        .otherwise(pl.lit(None, dtype=pl.Float64))
+        .alias("weighted_contribution"),
     ).sort(["place_id", "tract_id"])
     return scored, contributions, county_scored
 
@@ -278,9 +336,7 @@ def _existing_build_is_valid(
             contributions, contributions.columns, ["place_id", "tract_id"]
         ),
         "counties": logical_checksum(counties, counties.columns, ["place_id"]),
-        "chrr_county": logical_checksum(
-            chrr_counties, chrr_counties.columns, ["county_fips"]
-        ),
+        "chrr_county": logical_checksum(chrr_counties, chrr_counties.columns, ["county_fips"]),
     }:
         return False
     try:
@@ -291,9 +347,7 @@ def _existing_build_is_valid(
                 "SELECT count(*) FROM tract_contributions"
             ).fetchone()[0]
             county_count = connection.execute("SELECT count(*) FROM counties").fetchone()[0]
-            chrr_county_count = connection.execute(
-                "SELECT count(*) FROM chrr_county"
-            ).fetchone()[0]
+            chrr_county_count = connection.execute("SELECT count(*) FROM chrr_county").fetchone()[0]
             stored_metadata = json.loads(
                 connection.execute("SELECT metadata_json FROM build_metadata").fetchone()[0]
             )
@@ -317,6 +371,8 @@ def build_snapshot(
     progress: Progress | None = None,
     cancelled: Cancelled | None = None,
 ) -> Path:
+    from .mountain import current_compact_release
+
     paths.ensure()
     state = state.upper() if state else None
     if state and state not in KNOWN_STATES:
@@ -346,11 +402,26 @@ def build_snapshot(
         "chrr": chrr_source["version"],
         "chrr_release_year": chrr_source["release_year"],
     }
+    mountain_release = current_compact_release(paths)
+    if mountain_release is None:
+        mountain_identity = {
+            "checksum": sha256_bytes(b"unavailable"),
+            "data_release": "unavailable",
+            "score_version": "unavailable",
+        }
+    else:
+        mountain_path, mountain_manifest, _, _ = mountain_release
+        mountain_identity = {
+            "checksum": sha256_file(mountain_path / "manifest.json"),
+            "data_release": str(mountain_manifest["data_release"]),
+            "score_version": str(mountain_manifest["score_version"]),
+        }
+    input_hashes["mountain"] = mountain_identity["checksum"]
+    source_vintages["mountain"] = mountain_identity["data_release"]
+    source_vintages["mountain_score"] = mountain_identity["score_version"]
     scope = state or "national"
     build_key = sha256_bytes(
-        canonical_json(
-            {"scope": scope, "inputs": input_hashes, "source_vintages": source_vintages}
-        )
+        canonical_json({"scope": scope, "inputs": input_hashes, "source_vintages": source_vintages})
     )[:16]
     build_id = f"{scope.lower()}-{build_key}"
     target = paths.builds / build_id
@@ -372,6 +443,9 @@ def build_snapshot(
         fema_vintage=source["version"],
         chrr_release_year=chrr_source["release_year"],
     )
+    scored, county_scored, attached_mountain = _attach_mountain_scores(scored, county_scored, paths)
+    if attached_mountain != mountain_identity:
+        raise HouseHunterError("Mountain release changed during snapshot build")
     if state:
         scored = scored.filter(pl.col("state") == state)
         contributions = contributions.join(scored.select("place_id"), on="place_id", how="semi")
@@ -399,9 +473,7 @@ def build_snapshot(
             contributions, contribution_columns, ["place_id", "tract_id"]
         ),
         "counties": logical_checksum(county_scored, county_columns, ["place_id"]),
-        "chrr_county": logical_checksum(
-            chrr_counties, chrr_counties.columns, ["county_fips"]
-        ),
+        "chrr_county": logical_checksum(chrr_counties, chrr_counties.columns, ["county_fips"]),
     }
     metadata: dict[str, object] = {
         "schema_version": BUILD_SCHEMA_VERSION,

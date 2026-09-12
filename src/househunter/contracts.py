@@ -6,6 +6,14 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 CoverageStatus = Literal["complete", "zero_housing", "missing_fema", "unmatched_geography"]
+MountainCoverageStatus = Literal[
+    "complete",
+    "partial",
+    "insufficient_coverage",
+    "zero_population",
+    "outside_scope",
+    "unavailable",
+]
 
 
 class PlaceSummary(BaseModel):
@@ -24,6 +32,31 @@ class PlaceSummary(BaseModel):
     community_conditions_group: int | None
     community_conditions_geography: Literal["county"] = "county"
     chrr_release_year: int
+    mountain_score: float | None
+    mountain_score_version: str | None
+    mountain_pipeline_version: str | None
+    relief_5km_m: float | None
+    relief_10km_m: float | None
+    relief_20km_m: float | None
+    relief_40km_m: float | None
+    relief_20km_pct: float | None
+    rugged_fraction_20km: float | None
+    rugged_pct: float | None
+    public_mountain_access_raw: float | None
+    public_mountain_access_pct: float | None
+    open_mountain_km2_5: float | None
+    open_mountain_km2_15: float | None
+    open_mountain_km2_30: float | None
+    restricted_mountain_km2_30: float | None
+    closed_mountain_km2_30: float | None
+    unknown_mountain_km2_30: float | None
+    nearest_mountain_trail_km: float | None
+    mountain_trail_km_10: float | None
+    mountain_trail_km_25: float | None
+    trail_access_raw: float | None
+    trail_access_pct: float | None
+    mountain_population_coverage: float
+    mountain_coverage_status: MountainCoverageStatus
 
 
 class TractContribution(BaseModel):
@@ -93,6 +126,8 @@ class MapScore(BaseModel):
     risk_score: float | None
     coverage_status: CoverageStatus
     community_conditions_group: int | None
+    mountain_score: float | None
+    mountain_coverage_status: MountainCoverageStatus
 
 
 class MapScores(BaseModel):

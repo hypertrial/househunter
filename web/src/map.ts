@@ -16,6 +16,14 @@ export const COMMUNITY_GROUP_COLORS = [
   "#cf992d", "#c97e39", "#c36641", "#ba583f", "#b14a3c",
 ] as const;
 
+export const MOUNTAIN_COLORS = {
+  low: "#59676c",
+  below: "#73806d",
+  typical: "#929271",
+  high: "#b49b69",
+  highest: "#d9bd76",
+} as const;
+
 export const STATE_FIPS = {
   AK: "02", AL: "01", AR: "05", AS: "60", AZ: "04", CA: "06", CO: "08", CT: "09",
   DC: "11", DE: "10", FL: "12", GA: "13", GU: "66", HI: "15", IA: "19", ID: "16",
@@ -50,9 +58,11 @@ export function communityGroupColor(value: number | null): string | null {
 }
 
 export function metricColor(score: MapScore | null | undefined, metric: Metric): string | null {
-  return metric === "fema"
-    ? scoreColor(score?.risk_score ?? null)
-    : communityGroupColor(score?.community_conditions_group ?? null);
+  if (metric === "community-conditions") {
+    return communityGroupColor(score?.community_conditions_group ?? null);
+  }
+  const band = scoreBand(metric === "mountain" ? score?.mountain_score ?? null : score?.risk_score ?? null);
+  return band ? (metric === "mountain" ? MOUNTAIN_COLORS : MAP_COLORS)[band] : null;
 }
 
 export function scoreMap(rows: MapScore[]): Map<string, MapScore> {
@@ -107,8 +117,9 @@ export function transformFromCamera(camera: CameraState, width: number, height: 
 export function readHash(hash: string) {
   const params = new URLSearchParams(hash.replace(/^#/, ""));
   const level: Geography = params.get("level") === "county" ? "county" : "tract";
-  const metric: Metric = params.get("metric") === "community-conditions"
-    ? "community-conditions"
+  const metricValue = params.get("metric");
+  const metric: Metric = metricValue === "community-conditions" || metricValue === "mountain"
+    ? metricValue
     : "fema";
   const requestedState = params.get("state") || "";
   const state = requestedState in STATE_FIPS
@@ -135,6 +146,9 @@ export function readHash(hash: string) {
     county: level === "tract" ? county : "",
     place,
     unranked: params.get("unranked") === "1",
+    mountainMin: params.has("mountain_min")
+      ? number("mountain_min", 0, 0, 100)
+      : null,
     camera: {
       cx: number("cx", 0.5, 0, 1),
       cy: number("cy", 0.5, 0, 1),

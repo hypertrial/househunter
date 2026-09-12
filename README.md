@@ -11,6 +11,13 @@ Group 1 is healthiest and Group 10 least healthy. The groups are data-driven
 clusters, not percentiles. Tracts inherit their county's group and are labeled
 county-level; HouseHunter never blends this value with FEMA risk.
 
+An optional **Mountain Score** layer summarizes nearby terrain, public mountain
+land, and mapped trail access on a 0–100 national scale. It is built offline from
+pinned GIS inputs and joined to the normal snapshot as a small tract/county
+Parquet artifact. Normal app installation does not install GIS libraries or
+download elevation rasters. If no validated national Mountain release has been
+promoted, its fields remain explicitly unavailable.
+
 `ALR_NPCTL` is FEMA's national percentile for composite Expected Annual Loss Rate,
 distinct from FEMA's broader Risk Index. Tract and county percentiles are not
 comparable. Detail views and exports also show FEMA's 18 published
@@ -33,8 +40,8 @@ interface is committed, so Node is not required to use the app. No API keys are 
 ./scripts/run-app
 ```
 
-That installs Python dependencies, downloads the pinned FEMA tract/county and
-CHR&R Community Conditions county layers if needed, publishes a snapshot, and
+That installs the small runtime dependency set, downloads the pinned FEMA
+tract/county and CHR&R Community Conditions county layers if needed, publishes a snapshot, and
 starts the loopback app. Flags:
 `--port`, `--no-open`, `--state`, `--skip-prepare`. `--state` only scopes the
 snapshot. The first run downloads each source once and reuses verified local caches afterward.
@@ -46,7 +53,7 @@ uv sync
 uv run househunter sources
 uv run househunter download --source all
 uv run househunter build
-uv run househunter rank --state CO --limit 20
+uv run househunter rank --state CO --mountain-min 60 --limit 20
 uv run househunter rank --level county --state CO
 uv run househunter rank --level county --metric community-conditions --order best
 uv run househunter inspect 08013012101
@@ -77,7 +84,7 @@ addresses.
 househunter sources [--json]
 househunter download [--source fema|fema_counties|chrr|all]
 househunter build [--state CO]
-househunter rank [--state CO] [--county STCOFIPS] [--level tract|county] [--metric risk|community-conditions] [--order best|worst] [--limit N] [--include-unranked]
+househunter rank [--state CO] [--county STCOFIPS] [--level tract|county] [--metric risk|community-conditions] [--mountain-min 0..100] [--order best|worst] [--limit N] [--include-unranked]
 househunter inspect TRACT_FIPS|COUNTY_FIPS
 househunter lookup "1670 Broadway, Denver, CO" [--allow-approximate]
 househunter export --format parquet|csv [--level tract|county] [--output PATH]
@@ -113,6 +120,17 @@ as `Not grouped` and sorts last in both directions. The processed national artif
 is `data/processed/chrr_county.parquet`, and every immutable snapshot carries its
 state-scoped copy and DuckDB table.
 
+Mountain Score is first calculated for 2020 Census blocks, then population-weighted
+to tracts and counties. The deliberately approximate terrain builder uses 250 m
+equal-area cells. Its components are national population-weighted lower-rank
+percentiles for 20 km relief, rugged terrain, ring-weighted open public mountain
+land, and mapped trail access, combined at 45%, 20%, 20%, and 15%. Population-zero
+blocks receive raw measurements but do not affect percentile calibration. Promotable
+releases cover exactly the 50 states plus DC; Puerto Rico and the other territories
+remain outside the scoring scope and are `unavailable` at runtime.
+The score does not claim property views, trail quality, drive time, or guaranteed
+public access.
+
 Read [DATA_SOURCES.md](DATA_SOURCES.md) for source provenance, release maintenance, and
 limitations.
 
@@ -128,6 +146,21 @@ npm ci
 npm test
 npm run build
 ```
+
+The native GIS stack is maintainer-only and optional:
+
+```console
+uv sync --extra mountain
+uv run househunter mountain download --source-lock /path/to/source-lock.json --destination /path/to/sources
+uv run househunter mountain build --data-release 2026q3 --source-lock /path/to/source-lock.json --regions /path/to/regions.json --source-root /path/to/sources
+uv run househunter mountain validate data/mountain/releases/RELEASE_ID
+uv run househunter mountain inspect 08013012101
+```
+
+Production promotion requires a checksum lock for every consumed input and exact
+expected block and population totals for all 50 states plus DC. Using
+`--allow-partial --no-promote` is available for small development fixtures; partial releases can
+never become the active runtime release.
 
 The committed `web/dist/` must match `npm run build`. The Python wheel packages the
 compiled UI and the derived map assets exactly once. Raw third-party files and generated
@@ -154,10 +187,10 @@ with an explicit repair message.
 ## Scope
 
 The FEMA layer uses composite `ALR_NPCTL`; the independent Community Conditions layer
-uses only CHR&R's published group. The 18 published FEMA hazard percentiles
-appear on inspect/detail and ride along in exports; there is no hazard map layer,
-sort or filter by hazard, HouseHunter-invented composite, mountain classifier,
-trails, insurance data, external basemap, hosted service, or native installer.
+uses only CHR&R's published group; Mountain Score remains a separate approximate
+context layer. The 18 published FEMA hazard percentiles appear on inspect/detail
+and ride along in exports; there is no hazard map layer, sort or filter by hazard,
+insurance data, external basemap, hosted service, or native installer.
 
 ## License
 

@@ -13,6 +13,14 @@ const summary = {
   population_2020: 0, housing_units_2020: 0, risk_score: 21.25, coverage_status: "complete",
   fema_vintage: "December 2025", census_vintage: "n/a", county_fips: "08013", county_name: "Boulder",
   community_conditions_group: 2, community_conditions_geography: "county", chrr_release_year: 2025,
+  mountain_score: 82.5, mountain_score_version: "mountain_score_v1", mountain_pipeline_version: "mountain_pipeline_v1",
+  relief_5km_m: 450, relief_10km_m: 700, relief_20km_m: 1200, relief_40km_m: 1800, relief_20km_pct: 88,
+  rugged_fraction_20km: 0.65, rugged_pct: 85, public_mountain_access_raw: 25, public_mountain_access_pct: 75,
+  open_mountain_km2_5: 2, open_mountain_km2_15: 7, open_mountain_km2_30: 16,
+  restricted_mountain_km2_30: 1, closed_mountain_km2_30: 2, unknown_mountain_km2_30: 1,
+  nearest_mountain_trail_km: 3.5, mountain_trail_km_10: 4, mountain_trail_km_25: 9,
+  trail_access_raw: 6, trail_access_pct: 70, mountain_population_coverage: 1,
+  mountain_coverage_status: "complete",
 };
 
 const countySummary = {
@@ -111,7 +119,7 @@ async function installRoutes(page: Page, initiallyPrepared = true, failDetailOnc
       await route.fulfill({ json: { job_id: "one", state: "succeeded", progress: 100, message: "Complete", error: null } });
     } else if (url.pathname === "/api/v1/map/scores") {
       const county = url.searchParams.get("level") === "county";
-      await route.fulfill({ json: { schema_version: 1, build_id: build.build_id, level: county ? "county" : "tract", scope: build.scope, rows: [{ place_id: county ? "08013" : "08013012101", risk_score: county ? 18.5 : 21.25, coverage_status: "complete", community_conditions_group: 2 }] } });
+      await route.fulfill({ json: { schema_version: 1, build_id: build.build_id, level: county ? "county" : "tract", scope: build.scope, rows: [{ place_id: county ? "08013" : "08013012101", risk_score: county ? 18.5 : 21.25, coverage_status: "complete", community_conditions_group: 2, mountain_score: 82.5, mountain_coverage_status: "complete" }] } });
     } else if (url.pathname === "/api/v1/places") {
       await route.fulfill({ json: { total: 1, items: [summary] } });
     } else if (url.pathname === "/api/v1/counties") {
@@ -197,6 +205,25 @@ test("renders Community Conditions as an independent county-level layer", async 
     drawer.getByRole("region", { name: "Community Conditions", exact: true }),
   ).toHaveClass(/active/);
   await expect(drawer).toContainText("County-level");
+});
+
+test("renders and filters the independent Mountain Score layer", async ({ page }) => {
+  await installRoutes(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Mountain Score" }).click();
+  await expect(page).toHaveURL(/metric=mountain/);
+  await expect(page.getByLabel(/Mountain Score color scale/)).toContainText("not property-specific");
+  await page.getByRole("button", { name: /Filters/ }).click();
+  await page.getByLabel("Minimum Mountain Score").fill("80");
+  await page.getByRole("button", { name: "Apply" }).click();
+  await expect(page).toHaveURL(/mountain_min=80/);
+  await page.getByRole("button", { name: "Lowest / Highest" }).click();
+  await page.getByRole("button", { name: /Census tract 121.01.*82.5 \/100/ }).first().click();
+  const drawer = page.getByRole("dialog", { name: "Tract detail" });
+  await expect(drawer.getByRole("region", { name: "Mountain Score", exact: true })).toHaveClass(/active/);
+  await drawer.getByText("Mountain Score breakdown").click();
+  await expect(drawer).toContainText("1,200 m");
+  await expect(drawer).toContainText("does not measure property-specific views");
 });
 
 test("uses explicit address confirmation and never calls a geocoder from the browser", async ({ page }) => {

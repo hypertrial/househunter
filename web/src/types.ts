@@ -16,6 +16,31 @@ export interface PlaceSummary {
   community_conditions_group: number | null;
   community_conditions_geography: "county";
   chrr_release_year: number;
+  mountain_score: number | null;
+  mountain_score_version: string | null;
+  mountain_pipeline_version: string | null;
+  relief_5km_m: number | null;
+  relief_10km_m: number | null;
+  relief_20km_m: number | null;
+  relief_40km_m: number | null;
+  relief_20km_pct: number | null;
+  rugged_fraction_20km: number | null;
+  rugged_pct: number | null;
+  public_mountain_access_raw: number | null;
+  public_mountain_access_pct: number | null;
+  open_mountain_km2_5: number | null;
+  open_mountain_km2_15: number | null;
+  open_mountain_km2_30: number | null;
+  restricted_mountain_km2_30: number | null;
+  closed_mountain_km2_30: number | null;
+  unknown_mountain_km2_30: number | null;
+  nearest_mountain_trail_km: number | null;
+  mountain_trail_km_10: number | null;
+  mountain_trail_km_25: number | null;
+  trail_access_raw: number | null;
+  trail_access_pct: number | null;
+  mountain_population_coverage: number;
+  mountain_coverage_status: "complete" | "partial" | "insufficient_coverage" | "zero_population" | "outside_scope" | "unavailable";
 }
 
 export interface TractContribution {
@@ -79,7 +104,7 @@ export interface JobStatus {
 }
 
 export type Geography = "tract" | "county";
-export type Metric = "fema" | "community-conditions";
+export type Metric = "fema" | "community-conditions" | "mountain";
 
 export interface BuildMeta {
   build_id: string;
@@ -113,6 +138,8 @@ export interface MapScore {
   risk_score: number | null;
   coverage_status: CoverageStatus;
   community_conditions_group: number | null;
+  mountain_score: number | null;
+  mountain_coverage_status: PlaceSummary["mountain_coverage_status"];
 }
 
 export interface MapScores {

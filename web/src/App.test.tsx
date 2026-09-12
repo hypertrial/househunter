@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import App, { communityLabel, mapFocusTarget, mapTooltipClass, SCORE_BANDS, scoreBand, scoreLabel, scoreToneClass, sortedHazardPercentiles, STATE_ABBREVIATIONS } from "./App";
+import App, { communityLabel, mapFocusTarget, mapTooltipClass, mountainLabel, SCORE_BANDS, scoreBand, scoreLabel, scoreToneClass, sortedHazardPercentiles, STATE_ABBREVIATIONS } from "./App";
 import RiskMap from "./RiskMap";
 import { cameraFromTransform, COMMUNITY_GROUP_COLORS, communityGroupColor, readHash, relativeTransform, transformFromCamera } from "./map";
 import type { HazardPercentile, PlaceSummary } from "./types";
@@ -10,6 +10,13 @@ const tract: PlaceSummary = {
   population_2020: 0, housing_units_2020: 0, risk_score: 21.25, coverage_status: "complete",
   fema_vintage: "December 2025", census_vintage: "n/a", county_fips: "08013", county_name: "Boulder",
   community_conditions_group: 2, community_conditions_geography: "county", chrr_release_year: 2025,
+  mountain_score: 82.5, mountain_score_version: "mountain_score_v1", mountain_pipeline_version: "mountain_pipeline_v1",
+  relief_5km_m: 450, relief_10km_m: 700, relief_20km_m: 1200, relief_40km_m: 1800, relief_20km_pct: 88,
+  rugged_fraction_20km: 0.65, rugged_pct: 85, public_mountain_access_raw: 25, public_mountain_access_pct: 75,
+  open_mountain_km2_5: 2, open_mountain_km2_15: 7, open_mountain_km2_30: 16,
+  restricted_mountain_km2_30: 1, closed_mountain_km2_30: 2, unknown_mountain_km2_30: 1,
+  nearest_mountain_trail_km: 3.5, mountain_trail_km_10: 4, mountain_trail_km_25: 9,
+  trail_access_raw: 6, trail_access_pct: 70, mountain_population_coverage: 1, mountain_coverage_status: "complete",
 };
 const county: PlaceSummary = { ...tract, place_id: "08013", name: "Boulder", place_type: "county", risk_score: 18.5 };
 const hazards = [{ code: "WFIR", label: "Wildfire", percentile: 80.5 }, { code: "TSUN", label: "Tsunami", percentile: null }];
@@ -44,7 +51,7 @@ function mockFetch(
     }
     if (url.pathname.includes("tracts.hash") || url.pathname.includes("tracts-co.hash")) return response(topology(tract.place_id));
     if (url.pathname.includes("counties.hash")) return response(topology(county.place_id));
-    if (url.pathname === "/api/v1/map/scores") return response({ schema_version: 1, build_id: "fixture", level: url.searchParams.get("level"), scope: buildScope, rows: [{ place_id: url.searchParams.get("level") === "county" ? county.place_id : tract.place_id, risk_score: url.searchParams.get("level") === "county" ? county.risk_score : tract.risk_score, coverage_status: "complete", community_conditions_group: 2 }] });
+    if (url.pathname === "/api/v1/map/scores") return response({ schema_version: 1, build_id: "fixture", level: url.searchParams.get("level"), scope: buildScope, rows: [{ place_id: url.searchParams.get("level") === "county" ? county.place_id : tract.place_id, risk_score: url.searchParams.get("level") === "county" ? county.risk_score : tract.risk_score, coverage_status: "complete", community_conditions_group: 2, mountain_score: 82.5, mountain_coverage_status: "complete" }] });
     if (url.pathname === "/api/v1/places" || url.pathname === "/api/v1/counties") return response({ total: 1, items: [url.pathname.includes("counties") ? county : tract] });
     if (url.pathname === `/api/v1/places/${tract.place_id}` || url.pathname === `/api/v1/counties/${county.place_id}`) return response({ summary: url.pathname.includes("counties") ? county : tract, total_weighted_housing: 0, coverage_ratio: 1, methodology_notice: "Published FEMA percentile; not property-level risk.", tract_contributions: [], hazard_percentiles: hazards, member_tract_count: url.pathname.includes("counties") ? 12 : null });
     if (url.pathname === "/api/v1/lookup") return response({ status: "resolved", query: "1 Main", matched_address: "1 MAIN", tract_id: tract.place_id, detail: { summary: tract, total_weighted_housing: 0, coverage_ratio: 1, methodology_notice: "Published FEMA percentile.", tract_contributions: [], hazard_percentiles: hazards, member_tract_count: null }, provider: "census", precision: "house", approximate: false, attribution: null });
@@ -91,10 +98,11 @@ describe("score semantics", () => {
     expect(sortedHazardPercentiles(values).map((item) => item.code)).toEqual(["WFIR", "AVLN", "TSUN"]);
   });
   it("validates and clamps URL map state", () => {
-    expect(readHash("#level=county&state=co&county=123&place=08013&cx=4&cy=-2&z=99")).toEqual({ level: "county", metric: "fema", state: "", county: "", place: "08013", unranked: false, camera: { cx: 1, cy: 0, z: 12 } });
+    expect(readHash("#level=county&state=co&county=123&place=08013&cx=4&cy=-2&z=99")).toEqual({ level: "county", metric: "fema", state: "", county: "", place: "08013", unranked: false, mountainMin: null, camera: { cx: 1, cy: 0, z: 12 } });
     expect(readHash("#level=tract&state=ZZ&county=08013&place=08013012101")).toMatchObject({ state: "", county: "", place: "08013012101" });
     expect(readHash("#level=tract&state=CO&county=01001&place=01001000100")).toMatchObject({ state: "CO", county: "", place: "" });
     expect(readHash("#metric=community-conditions").metric).toBe("community-conditions");
+    expect(readHash("#metric=mountain&mountain_min=80")).toMatchObject({ metric: "mountain", mountainMin: 80 });
     expect(readHash("#metric=quality").metric).toBe("fema");
   });
   it("uses ten fixed Community Conditions colors and honest null labels", () => {
@@ -103,6 +111,7 @@ describe("score semantics", () => {
     expect(communityGroupColor(10)).toBe("#b14a3c");
     expect(communityGroupColor(null)).toBeNull();
     expect(communityLabel({ ...county, community_conditions_group: null })).toBe("Not grouped");
+    expect(mountainLabel(tract)).toBe("82.5 /100");
   });
   it("computes the gesture delta from the last committed camera", () => {
     expect(relativeTransform(
@@ -350,7 +359,7 @@ it("rasterizes settled vectors before atomically committing the active zoom fram
   vi.stubGlobal("fetch", mockFetch());
   render(<App />);
   await screen.findByText("HouseHunter");
-  await screen.findAllByText("1 tracts interactive");
+  await screen.findAllByText("1 tracts interactive", {}, { timeout: 3000 });
   const zoomIn = screen.getByRole("button", { name: "Zoom in" });
   for (let index = 0; index < 4; index += 1) fireEvent.click(zoomIn);
   await waitFor(() => {
@@ -450,6 +459,28 @@ it("switches to Community Conditions and browses county groups without changing 
   expect(within(drawer).getByText(/Better conditions/)).toBeVisible();
 });
 
+it("maps and filters Mountain Score with an honest expandable breakdown", async () => {
+  vi.stubGlobal("fetch", mockFetch());
+  render(<App />);
+  await screen.findByText("HouseHunter");
+
+  fireEvent.click(screen.getByRole("button", { name: "Mountain Score" }));
+  expect(screen.getByLabelText("Mountain Score color scale, higher means more mountain characteristics")).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: /^Filters/ }));
+  fireEvent.change(screen.getByLabelText("Minimum Mountain Score"), { target: { value: "80" } });
+  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+  await waitFor(() => expect(window.location.hash).toContain("mountain_min=80"));
+
+  fireEvent.click(screen.getByRole("button", { name: "Search" }));
+  fireEvent.change(screen.getByLabelText("Street address"), { target: { value: "1 Main St, Boulder, CO" } });
+  fireEvent.click(screen.getByRole("button", { name: "Find tract" }));
+  const drawer = await screen.findByRole("dialog", { name: "Tract detail" });
+  expect(await within(drawer).findByLabelText("Mountain Score")).toHaveClass("active");
+  fireEvent.click(within(drawer).getByText("Mountain Score breakdown"));
+  expect(within(drawer).getByText(/property-specific views/)).toBeVisible();
+  expect(within(drawer).getByText(/1,200 m/)).toBeVisible();
+});
+
 it("discards a stale Community Conditions page after returning to group summaries", async () => {
   const baseFetch = mockFetch();
   let resolveNext: ((response: Response) => void) | undefined;
@@ -504,7 +535,7 @@ it("locks a state-scoped build to its built state and discards incompatible deep
   await screen.findByText("HouseHunter");
   expect(screen.queryByRole("dialog", { name: "Tract detail" })).not.toBeInTheDocument();
   await waitFor(() => expect(window.location.hash).toContain("state=AL"));
-  await screen.findAllByText("1 tracts interactive");
+  await screen.findAllByText("1 tracts interactive", {}, { timeout: 3000 });
   expect(mapFocusTarget("", "AL")).toEqual({ kind: "state", id: "AL" });
   fireEvent.click(screen.getByRole("button", { name: /^Filters/ }));
   const panel = screen.getByRole("region", { name: "Map filters" });

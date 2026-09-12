@@ -16,7 +16,14 @@ from .hazards import hazard_percentiles_from_record, hazard_select_sql
 SUMMARY_COLUMNS = """
 place_id, name, state, place_type, population_2020, housing_units_2020,
 risk_score, coverage_status, fema_vintage, census_vintage, county_fips, county_name,
-community_conditions_group, community_conditions_geography, chrr_release_year
+community_conditions_group, community_conditions_geography, chrr_release_year,
+mountain_score, mountain_score_version, mountain_pipeline_version,
+relief_5km_m, relief_10km_m, relief_20km_m, relief_40km_m, relief_20km_pct,
+rugged_fraction_20km, rugged_pct, public_mountain_access_raw, public_mountain_access_pct,
+open_mountain_km2_5, open_mountain_km2_15, open_mountain_km2_30,
+restricted_mountain_km2_30, closed_mountain_km2_30, unknown_mountain_km2_30,
+nearest_mountain_trail_km, mountain_trail_km_10, mountain_trail_km_25,
+trail_access_raw, trail_access_pct, mountain_population_coverage, mountain_coverage_status
 """
 SUMMARY_KEYS = [
     "place_id",
@@ -34,6 +41,31 @@ SUMMARY_KEYS = [
     "community_conditions_group",
     "community_conditions_geography",
     "chrr_release_year",
+    "mountain_score",
+    "mountain_score_version",
+    "mountain_pipeline_version",
+    "relief_5km_m",
+    "relief_10km_m",
+    "relief_20km_m",
+    "relief_40km_m",
+    "relief_20km_pct",
+    "rugged_fraction_20km",
+    "rugged_pct",
+    "public_mountain_access_raw",
+    "public_mountain_access_pct",
+    "open_mountain_km2_5",
+    "open_mountain_km2_15",
+    "open_mountain_km2_30",
+    "restricted_mountain_km2_30",
+    "closed_mountain_km2_30",
+    "unknown_mountain_km2_30",
+    "nearest_mountain_trail_km",
+    "mountain_trail_km_10",
+    "mountain_trail_km_25",
+    "trail_access_raw",
+    "trail_access_pct",
+    "mountain_population_coverage",
+    "mountain_coverage_status",
 ]
 
 
@@ -97,6 +129,8 @@ class Store:
         min_score: float | None = None,
         max_score: float | None = None,
         community_conditions_group: int | None = None,
+        mountain_min: float | None = None,
+        mountain_max: float | None = None,
         include_unranked: bool = False,
         sort: str = "risk_score",
         direction: str = "asc",
@@ -110,6 +144,7 @@ class Store:
             "state": "state",
             "population": "population_2020",
             "community_conditions_group": "community_conditions_group",
+            "mountain_score": "mountain_score",
         }
         if sort not in sort_columns:
             raise HouseHunterError(f"Unsupported sort column: {sort}")
@@ -128,7 +163,11 @@ class Store:
         clauses: list[str] = []
         parameters: list[Any] = []
         if not include_unranked:
-            clauses.append("coverage_status = 'complete'")
+            clauses.append(
+                "mountain_score IS NOT NULL"
+                if sort == "mountain_score"
+                else "coverage_status = 'complete'"
+            )
         if search:
             if search_county_name:
                 clauses.append("(name ILIKE ? OR place_id = ? OR county_name ILIKE ?)")
@@ -150,6 +189,8 @@ class Store:
             ("population_2020", "<=", max_population),
             ("risk_score", ">=", min_score),
             ("risk_score", "<=", max_score),
+            ("mountain_score", ">=", mountain_min),
+            ("mountain_score", "<=", mountain_max),
         ):
             if value is not None:
                 clauses.append(f"{column} {operator} ?")
@@ -160,9 +201,7 @@ class Store:
         ).fetchone()[0]
         null_order = "NULLS LAST"
         tie_breaker = (
-            "name ASC, place_id ASC"
-            if sort == "community_conditions_group"
-            else "place_id ASC"
+            "name ASC, place_id ASC" if sort == "community_conditions_group" else "place_id ASC"
         )
         query = (
             f"SELECT {SUMMARY_COLUMNS} FROM {table}{where} "
@@ -185,6 +224,8 @@ class Store:
         min_score: float | None = None,
         max_score: float | None = None,
         community_conditions_group: int | None = None,
+        mountain_min: float | None = None,
+        mountain_max: float | None = None,
         include_unranked: bool = False,
         sort: str = "risk_score",
         direction: str = "asc",
@@ -201,6 +242,8 @@ class Store:
             min_score=min_score,
             max_score=max_score,
             community_conditions_group=community_conditions_group,
+            mountain_min=mountain_min,
+            mountain_max=mountain_max,
             include_unranked=include_unranked,
             sort=sort,
             direction=direction,
@@ -217,6 +260,8 @@ class Store:
         min_score: float | None = None,
         max_score: float | None = None,
         community_conditions_group: int | None = None,
+        mountain_min: float | None = None,
+        mountain_max: float | None = None,
         include_unranked: bool = False,
         sort: str = "risk_score",
         direction: str = "asc",
@@ -230,6 +275,8 @@ class Store:
             min_score=min_score,
             max_score=max_score,
             community_conditions_group=community_conditions_group,
+            mountain_min=mountain_min,
+            mountain_max=mountain_max,
             include_unranked=include_unranked,
             sort=sort,
             direction=direction,
@@ -242,7 +289,8 @@ class Store:
         if table is None:
             raise HouseHunterError("Map level must be tract or county")
         rows = self.connection.execute(
-            f"SELECT place_id, risk_score, coverage_status, community_conditions_group "
+            f"SELECT place_id, risk_score, coverage_status, community_conditions_group, "
+            f"mountain_score, mountain_coverage_status "
             f"FROM {table} ORDER BY place_id"
         ).fetchall()
         return {
@@ -256,8 +304,10 @@ class Store:
                     "risk_score": risk_score,
                     "coverage_status": status,
                     "community_conditions_group": group,
+                    "mountain_score": mountain_score,
+                    "mountain_coverage_status": mountain_status,
                 }
-                for place_id, risk_score, status, group in rows
+                for place_id, risk_score, status, group, mountain_score, mountain_status in rows
             ],
         }
 
@@ -305,9 +355,7 @@ class Store:
         return self._geography_detail("places", place_id, METHODOLOGY_NOTICE, "Tract")
 
     def county_detail(self, county_id: str) -> dict[str, Any]:
-        return self._geography_detail(
-            "counties", county_id, COUNTY_METHODOLOGY_NOTICE, "County"
-        )
+        return self._geography_detail("counties", county_id, COUNTY_METHODOLOGY_NOTICE, "County")
 
     def _geography_detail(
         self, table: str, place_id: str, notice: str, label: str

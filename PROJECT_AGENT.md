@@ -16,6 +16,14 @@ official 2025 integer group (1 healthiest, 10 least healthy, or null), join only
 five-digit county FIPS, label tract inheritance as county-level, and never convert it
 to a percentile or blend it with FEMA.
 
+Mountain Score is a third, independent contextual layer. Runtime snapshots may join
+only a validated, promoted national tract/county artifact. Keep its native GIS stack
+optional and maintainer-only; ordinary setup must remain lightweight. Missing Mountain
+data is null with explicit `unavailable` status, never zero. Preserve the pinned source
+lock, content-addressed release identity, national population-weighted percentile
+semantics, and 45/20/20/15 component weights. Do not describe it as property-specific
+views, trail quality, drive time, or guaranteed access.
+
 Use the `househunter-engineering` workspace from `.pad.toml`. Follow `AGENTS.md`
 and the local `pad-engineering` skill. Keep ticket bodies, exports, credentials,
 and local Pad state out of this public repository.
@@ -30,7 +38,8 @@ and local Pad state out of this public repository.
   change the UI.
 - Never commit credentials or fetched FEMA payloads.
 - FEMA ranking semantics use FEMA only; Community Conditions sorting uses only the
-  official CHR&R group. Do not contact census.gov from prepare, download, or build.
+  official CHR&R group. Mountain Score filtering does not alter either metric. Do not
+  contact census.gov from the normal prepare, download, or build flow.
   FEMA tract/county and CHR&R county layers are all required.
 - Address lookup may contact `geocoding.geo.census.gov` on explicit user action,
   and may contact Nominatim (`HOUSEHUNTER_NOMINATIM_URL`, default

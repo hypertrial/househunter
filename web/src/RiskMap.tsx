@@ -373,7 +373,9 @@ export default function RiskMap({
       group.items.push(item);
       const hasValue = metric === "fema"
         ? score?.risk_score !== null
-        : score?.community_conditions_group !== null;
+        : metric === "mountain"
+          ? score?.mountain_score !== null
+          : score?.community_conditions_group !== null;
       if (!filtered && score && (hasValue || showMissing)) {
         hittable.push({ item, index, projection });
       }
@@ -838,7 +840,7 @@ export default function RiskMap({
       className="risk-canvas"
       role="img"
       tabIndex={0}
-      aria-label={`Focusable USA ${level} ${metric === "fema" ? "risk" : "Community Conditions"} map. ${metric === "fema" ? "Lower FEMA ALR_NPCTL is better." : "Group 1 is healthiest and Group 10 least healthy; tract values are county-level."} Use arrow keys to move the focus cursor, plus and minus to zoom, and Enter to select.`}
+      aria-label={`Focusable USA ${level} ${metric === "fema" ? "risk" : metric === "mountain" ? "Mountain Score" : "Community Conditions"} map. ${metric === "fema" ? "Lower FEMA ALR_NPCTL is better." : metric === "mountain" ? "Higher Mountain Score means greater nearby mountain and access characteristics." : "Group 1 is healthiest and Group 10 least healthy; tract values are county-level."} Use arrow keys to move the focus cursor, plus and minus to zoom, and Enter to select.`}
       onKeyDown={keyboard}
     />
     <div className="map-zoom" aria-label="Map controls">

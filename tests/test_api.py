@@ -13,6 +13,7 @@ from househunter.build import build_snapshot
 from househunter.config import RuntimePaths
 from househunter.errors import AmbiguousPlaceError, HouseHunterError
 from househunter.geocode import OSM_ATTRIBUTION, AddressMatch, reset_geocode_runtime
+from househunter.mountain import MOUNTAIN_RUNTIME_COLUMNS
 
 
 def test_api_filters_details_exports_and_token(
@@ -56,6 +57,7 @@ def test_api_filters_details_exports_and_token(
             "community_conditions_group",
             "community_conditions_geography",
             "chrr_release_year",
+            *MOUNTAIN_RUNTIME_COLUMNS,
         }
         assert summary["community_conditions_group"] == 5
         assert summary["community_conditions_geography"] == "county"
@@ -84,11 +86,15 @@ def test_api_filters_details_exports_and_token(
         )
         assert grouped.status_code == 200
         assert [row["place_id"] for row in grouped.json()["items"]] == ["01001"]
-        assert client.get(
-            "/api/v1/counties", params={"community_conditions_group": 11}
-        ).status_code == 422
+        assert (
+            client.get("/api/v1/counties", params={"community_conditions_group": 11}).status_code
+            == 422
+        )
         map_rows = client.get("/api/v1/map/scores", params={"level": "tract"}).json()["rows"]
         assert map_rows[0]["community_conditions_group"] == 5
+        assert map_rows[0]["mountain_coverage_status"] == "unavailable"
+        assert map_rows[0]["mountain_score"] is None
+        assert client.get("/api/v1/places", params={"mountain_min": 80}).json()["total"] == 0
         unknown = client.get("/api/v1/places/99999999999")
         assert unknown.status_code == 200
         assert unknown.json()["summary"]["state"] == "??"

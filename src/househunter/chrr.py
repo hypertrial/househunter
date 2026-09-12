@@ -43,6 +43,12 @@ def _logical_rows(frame: pl.DataFrame) -> list[list[Any]]:
 def validate_rows(rows: list[dict[str, Any]], source: dict[str, Any]) -> pl.DataFrame:
     if any(not isinstance(row, dict) for row in rows):
         raise SourceContractError("CHR&R returned a malformed data row")
+    for row in rows:
+        group = row.get("CommunityConditions_Group")
+        if group is not None and (not isinstance(group, int) or isinstance(group, bool)):
+            raise SourceContractError(
+                "CHR&R Community Conditions groups must be integers or null"
+            )
     normalized = [
         {
             "county_fips": "" if row.get("fipscode") is None else str(row["fipscode"]),

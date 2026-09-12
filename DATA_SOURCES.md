@@ -66,6 +66,52 @@ If CHR&R publication moves after funding ends, update the `chrr` block in
 identical. Recompute and review the schema fingerprint, revision pins, row count,
 spot checks, and canonical logical checksum; never repoint automatically to “latest.”
 
+## Mountain Score sources and release contract
+
+Mountain Score is a separate, derived contextual layer. Its maintainer build accepts:
+
+- USGS 3DEP elevation rasters;
+- PAD-US 4.1 polygons with an access classification field;
+- a national hiking-trail line layer;
+- 2020 Census blocks with 15-digit GEOID, `POP20`, geometry, and one internal point.
+
+These large inputs are neither bundled nor fetched by `./scripts/run-app`. A reviewed
+JSON source lock supplies the exact HTTPS URL or local path, byte size, SHA-256,
+acquisition date, declared CRS/schema/count, and filename for every file. Production
+builds reject unlocked files. The lock also contains `expected_states` with exact
+block and population totals for the 50 states and DC; any missing state, extra state,
+or total mismatch prevents promotion. Region configuration names only locked files
+and supplies the equal-area target CRS and source field mappings.
+
+`househunter mountain download` verifies bytes before atomically publishing them to
+the selected source root. `househunter mountain build` uses 100 km processing cores
+with a 100 km halo and a coarse 250 m grid. It validates the candidate, writes
+content-addressed block/tract/county Parquet files plus a manifest, and atomically
+updates `data/mountain/current.json` only for a complete national release. The normal
+snapshot reads only tract/county Parquet and the manifest, so Rasterio, Shapely,
+PyProj, SciPy, Pyogrio, and NumPy are optional maintainer dependencies.
+
+The approximation is explicit:
+
+- terrain relief uses focal maxima minus minima at 5, 10, 20, and 40 km;
+- a mountain cell has slope at least 15 degrees or 5 km relief at least 300 m;
+- ruggedness is the mountain-cell fraction within 20 km;
+- open public mountain area uses 0–5, 5–15, and 15–30 km ring weights of 1, 0.75,
+  and 0.4; restricted, closed, and unknown land are reported separately;
+- trail access records nearest mapped mountain trail and cumulative mapped length
+  within 10 and 25 km, with raw access `km_10 + 0.4 * km_10_to_25`;
+- component percentiles use a national, population-weighted lower-rank ECDF over
+  in-scope blocks with valid DEM cells; population-zero blocks are not calibrators;
+- the final block score is `0.45 relief + 0.20 rugged + 0.20 public access + 0.15 trail`;
+  tract and county outputs are population-weighted block aggregates.
+
+The manifest records the source lock, pipeline and score versions, release identity,
+coverage, row counts, checksums, and whether national completeness was proven. The
+validator recomputes release identity, hashes, block domains, tract/county aggregates,
+and coverage semantics before a release can be promoted. A promoted release changes
+the main HouseHunter build identity; an absent release produces null Mountain fields
+with `unavailable` status rather than silently substituting zero.
+
 ## Download contract
 
 The downloader validates each source's edit timestamp, field names and ArcGIS types,
@@ -151,6 +197,13 @@ read as one particular hazard. The 18 `{CODE}_ALR_NPCTL` values are FEMA's publi
 percentiles at the same grain; HouseHunter does not blend them. Null means FEMA
 published no rating, never zero. County scores and county hazard percentiles are not
 a summary of the tracts inside the county.
+Mountain Score is an approximate regional context metric, not a parcel or address
+assessment. Coarse cells and source completeness can miss narrow ridges, informal or
+unmapped trails, seasonal closures, entrances, legal access details, travel time, and
+views. The land rings measure classified mountain area around a block point, not a
+guaranteed route from that point. Release-to-release comparisons require review of
+source and score versions; raw values and percentiles may move when source coverage or
+the national reference population changes.
 National tract boundaries are simplified for overview rendering, so fine boundary detail
 appears only after zoom loads the jurisdiction asset. Small urban tracts can be subpixel at
 the national extent; they are not aggregated or enlarged.
