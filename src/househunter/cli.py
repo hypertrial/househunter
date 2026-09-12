@@ -11,6 +11,7 @@ import uvicorn
 
 from .api import create_app
 from .build import build_snapshot
+from .chrr import download_chrr
 from .config import RuntimePaths, load_config
 from .download import download_fema, download_fema_counties, source_statuses
 from .errors import AmbiguousPlaceError, HouseHunterError
@@ -48,7 +49,7 @@ def sources(
                 "release": config[key]["release"],
                 "url": config[key]["item_url"],
             }
-            for key in ("fema", "fema_counties")
+            for key in ("fema", "fema_counties", "chrr")
         }
         if json_output:
             typer.echo(json.dumps(result, indent=2, sort_keys=True))
@@ -56,6 +57,7 @@ def sources(
             for key, label in (
                 ("fema", "FEMA NRI tracts"),
                 ("fema_counties", "FEMA NRI counties"),
+                ("chrr", "CHR&R Community Conditions counties"),
             ):
                 typer.echo(
                     f"{label} {result[key]['release']} ({result[key]['version']}): "
@@ -80,11 +82,18 @@ def download(
                 output = download_fema(paths, progress=_progress)
             elif selected == "fema_counties":
                 output = download_fema_counties(paths, progress=_progress)
+            elif selected == "chrr":
+                output = download_chrr(paths, progress=_progress)
             elif selected == "all":
                 download_fema(paths, progress=_progress)
-                output = download_fema_counties(paths, progress=_progress)
+                download_fema_counties(paths, progress=_progress)
+                output = download_chrr(paths, progress=_progress)
             else:
-                _abort(HouseHunterError("Supported sources are fema, fema_counties, and all"))
+                _abort(
+                    HouseHunterError(
+                        "Supported sources are fema, fema_counties, chrr, and all"
+                    )
+                )
         typer.echo(str(output))
     except HouseHunterError as exc:
         _abort(exc)
@@ -111,13 +120,27 @@ def rank(
     level: Annotated[str, typer.Option("--level", help="tract or county")] = "tract",
     limit: Annotated[int, typer.Option("--limit", min=1, max=500)] = 25,
     include_unranked: Annotated[bool, typer.Option("--include-unranked")] = False,
+    metric: Annotated[
+        str, typer.Option("--metric", help="risk or community-conditions")
+    ] = "risk",
+    order: Annotated[str, typer.Option("--order", help="best or worst")] = "best",
 ) -> None:
-    """List geographies from lowest to highest FEMA ALR_NPCTL."""
+    """Rank geographies by FEMA risk or CHR&R Community Conditions."""
     selected = level.lower()
     if selected not in {"tract", "county"}:
         _abort(HouseHunterError("Rank level must be tract or county"))
     if selected == "county" and county:
         _abort(HouseHunterError("--county filters tracts; omit it when ranking counties"))
+    selected_metric = metric.lower()
+    if selected_metric not in {"risk", "community-conditions"}:
+        _abort(HouseHunterError("Rank metric must be risk or community-conditions"))
+    selected_order = order.lower()
+    if selected_order not in {"best", "worst"}:
+        _abort(HouseHunterError("Rank order must be best or worst"))
+    sort = (
+        "risk_score" if selected_metric == "risk" else "community_conditions_group"
+    )
+    direction = "asc" if selected_order == "best" else "desc"
     try:
         with Store(_paths()) as store:
             if selected == "county":
@@ -125,18 +148,33 @@ def rank(
                     state=state,
                     limit=limit,
                     include_unranked=include_unranked,
+                    sort=sort,
+                    direction=direction,
                 )
-                typer.echo("COUNTY_FIPS  SCORE  STATE  NAME")
+                label = "SCORE" if selected_metric == "risk" else "GROUP"
+                typer.echo(f"COUNTY_FIPS  {label:<5}  STATE  NAME")
             else:
                 result = store.list_places(
                     state=state,
                     county=county,
                     limit=limit,
                     include_unranked=include_unranked,
+                    sort=sort,
+                    direction=direction,
                 )
-                typer.echo("TRACT_ID     SCORE  STATE")
+                label = "SCORE" if selected_metric == "risk" else "GROUP"
+                typer.echo(f"TRACT_ID     {label:<5}  STATE")
         for row in result["items"]:
-            score = f"{row['risk_score']:.1f}" if row["risk_score"] is not None else "—"
+            value = (
+                row["risk_score"]
+                if selected_metric == "risk"
+                else row["community_conditions_group"]
+            )
+            score = (
+                f"{value:.1f}"
+                if selected_metric == "risk" and value is not None
+                else str(value) if value is not None else "—"
+            )
             if selected == "county":
                 typer.echo(
                     f"{row['place_id']:<12} {score:>5}  {row['state']:<5}  {row['name']}"

@@ -1,14 +1,15 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import App, { mapFocusTarget, mapTooltipClass, SCORE_BANDS, scoreBand, scoreLabel, scoreToneClass, sortedHazardPercentiles, STATE_ABBREVIATIONS } from "./App";
+import App, { communityLabel, mapFocusTarget, mapTooltipClass, SCORE_BANDS, scoreBand, scoreLabel, scoreToneClass, sortedHazardPercentiles, STATE_ABBREVIATIONS } from "./App";
 import RiskMap from "./RiskMap";
-import { cameraFromTransform, readHash, relativeTransform, transformFromCamera } from "./map";
+import { cameraFromTransform, COMMUNITY_GROUP_COLORS, communityGroupColor, readHash, relativeTransform, transformFromCamera } from "./map";
 import type { HazardPercentile, PlaceSummary } from "./types";
 
 const tract: PlaceSummary = {
   place_id: "08013012101", name: "08013012101", state: "CO", place_type: "tract",
   population_2020: 0, housing_units_2020: 0, risk_score: 21.25, coverage_status: "complete",
   fema_vintage: "December 2025", census_vintage: "n/a", county_fips: "08013", county_name: "Boulder",
+  community_conditions_group: 2, community_conditions_geography: "county", chrr_release_year: 2025,
 };
 const county: PlaceSummary = { ...tract, place_id: "08013", name: "Boulder", place_type: "county", risk_score: 18.5 };
 const hazards = [{ code: "WFIR", label: "Wildfire", percentile: 80.5 }, { code: "TSUN", label: "Tsunami", percentile: null }];
@@ -43,7 +44,7 @@ function mockFetch(
     }
     if (url.pathname.includes("tracts.hash") || url.pathname.includes("tracts-co.hash")) return response(topology(tract.place_id));
     if (url.pathname.includes("counties.hash")) return response(topology(county.place_id));
-    if (url.pathname === "/api/v1/map/scores") return response({ schema_version: 1, build_id: "fixture", level: url.searchParams.get("level"), scope: buildScope, rows: [{ place_id: url.searchParams.get("level") === "county" ? county.place_id : tract.place_id, risk_score: url.searchParams.get("level") === "county" ? county.risk_score : tract.risk_score, coverage_status: "complete" }] });
+    if (url.pathname === "/api/v1/map/scores") return response({ schema_version: 1, build_id: "fixture", level: url.searchParams.get("level"), scope: buildScope, rows: [{ place_id: url.searchParams.get("level") === "county" ? county.place_id : tract.place_id, risk_score: url.searchParams.get("level") === "county" ? county.risk_score : tract.risk_score, coverage_status: "complete", community_conditions_group: 2 }] });
     if (url.pathname === "/api/v1/places" || url.pathname === "/api/v1/counties") return response({ total: 1, items: [url.pathname.includes("counties") ? county : tract] });
     if (url.pathname === `/api/v1/places/${tract.place_id}` || url.pathname === `/api/v1/counties/${county.place_id}`) return response({ summary: url.pathname.includes("counties") ? county : tract, total_weighted_housing: 0, coverage_ratio: 1, methodology_notice: "Published FEMA percentile; not property-level risk.", tract_contributions: [], hazard_percentiles: hazards, member_tract_count: url.pathname.includes("counties") ? 12 : null });
     if (url.pathname === "/api/v1/lookup") return response({ status: "resolved", query: "1 Main", matched_address: "1 MAIN", tract_id: tract.place_id, detail: { summary: tract, total_weighted_housing: 0, coverage_ratio: 1, methodology_notice: "Published FEMA percentile.", tract_contributions: [], hazard_percentiles: hazards, member_tract_count: null }, provider: "census", precision: "house", approximate: false, attribution: null });
@@ -90,9 +91,18 @@ describe("score semantics", () => {
     expect(sortedHazardPercentiles(values).map((item) => item.code)).toEqual(["WFIR", "AVLN", "TSUN"]);
   });
   it("validates and clamps URL map state", () => {
-    expect(readHash("#level=county&state=co&county=123&place=08013&cx=4&cy=-2&z=99")).toEqual({ level: "county", state: "", county: "", place: "08013", unranked: false, camera: { cx: 1, cy: 0, z: 12 } });
+    expect(readHash("#level=county&state=co&county=123&place=08013&cx=4&cy=-2&z=99")).toEqual({ level: "county", metric: "fema", state: "", county: "", place: "08013", unranked: false, camera: { cx: 1, cy: 0, z: 12 } });
     expect(readHash("#level=tract&state=ZZ&county=08013&place=08013012101")).toMatchObject({ state: "", county: "", place: "08013012101" });
     expect(readHash("#level=tract&state=CO&county=01001&place=01001000100")).toMatchObject({ state: "CO", county: "", place: "" });
+    expect(readHash("#metric=community-conditions").metric).toBe("community-conditions");
+    expect(readHash("#metric=quality").metric).toBe("fema");
+  });
+  it("uses ten fixed Community Conditions colors and honest null labels", () => {
+    expect(COMMUNITY_GROUP_COLORS).toHaveLength(10);
+    expect(communityGroupColor(1)).toBe("#7fa87e");
+    expect(communityGroupColor(10)).toBe("#b14a3c");
+    expect(communityGroupColor(null)).toBeNull();
+    expect(communityLabel({ ...county, community_conditions_group: null })).toBe("Not grouped");
   });
   it("computes the gesture delta from the last committed camera", () => {
     expect(relativeTransform(
@@ -414,6 +424,58 @@ it("shows fresh loading feedback and does not refetch when closing extremes", as
   expect(screen.queryByRole("status")).not.toBeInTheDocument();
   expect(extremeRequests).toBe(2);
   expect(extremeStates).toEqual([null, null]);
+});
+
+it("switches to Community Conditions and browses county groups without changing map grain", async () => {
+  vi.stubGlobal("fetch", mockFetch());
+  render(<App />);
+  await screen.findByText("HouseHunter");
+  expect(screen.getByRole("button", { name: "FEMA Risk" })).toHaveAttribute("aria-pressed", "true");
+  fireEvent.click(screen.getByRole("button", { name: "Community Conditions" }));
+  await waitFor(() => expect(window.location.hash).toContain("metric=community-conditions"));
+  expect(screen.getByLabelText("Community Conditions groups, Group 1 is healthiest")).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "Best / Worst" }));
+  const panel = await screen.findByRole("region", { name: "Best and worst Community Conditions" });
+  expect(await within(panel).findByRole("heading", { name: "Best present · Group 2 · 1 counties" })).toBeVisible();
+  expect(within(panel).getByRole("heading", { name: "Worst present · Group 2 · 1 counties" })).toBeVisible();
+  fireEvent.click(within(panel).getAllByRole("button", { name: "Browse all" })[0]);
+  expect(await within(panel).findByRole("heading", { name: "Group 2 · 1 counties" })).toBeVisible();
+  expect(within(panel).getByText("1–1 of 1")).toBeVisible();
+  fireEvent.click(within(panel).getByRole("button", { name: /Boulder.*Group 2 of 10/ }));
+  const drawer = await screen.findByRole("dialog", { name: "County detail" });
+  expect(screen.getByRole("button", { name: "Tracts" })).toHaveAttribute("aria-pressed", "true");
+  expect(within(drawer).getByLabelText("FEMA risk")).toBeVisible();
+  expect(within(drawer).getByLabelText("Community Conditions")).toHaveClass("active");
+  expect(within(drawer).getByText("Group 2 of 10")).toBeVisible();
+  expect(within(drawer).getByText(/Better conditions/)).toBeVisible();
+});
+
+it("discards a stale Community Conditions page after returning to group summaries", async () => {
+  const baseFetch = mockFetch();
+  let resolveNext: ((response: Response) => void) | undefined;
+  vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+    const url = new URL(String(input), "http://127.0.0.1");
+    if (url.pathname === "/api/v1/counties" && url.searchParams.get("limit") === "50") {
+      if (url.searchParams.get("offset") === "50") {
+        return new Promise<Response>((resolve) => { resolveNext = resolve; });
+      }
+      return Promise.resolve(response({ total: 51, items: [county] }));
+    }
+    return baseFetch(input);
+  }));
+  render(<App />);
+  await screen.findByText("HouseHunter");
+  fireEvent.click(screen.getByRole("button", { name: "Community Conditions" }));
+  fireEvent.click(screen.getByRole("button", { name: "Best / Worst" }));
+  const panel = await screen.findByRole("region", { name: "Best and worst Community Conditions" });
+  fireEvent.click((await within(panel).findAllByRole("button", { name: "Browse all" }))[0]);
+  expect(await within(panel).findByRole("heading", { name: "Group 2 · 51 counties" })).toBeVisible();
+  fireEvent.click(within(panel).getByRole("button", { name: "Next" }));
+  await waitFor(() => expect(resolveNext).toBeDefined());
+  fireEvent.click(within(panel).getByRole("button", { name: "← Back to groups" }));
+  await act(async () => resolveNext?.(response({ total: 51, items: [county] })));
+  expect(await within(panel).findByRole("heading", { name: "Best present · Group 2 · 1 counties" })).toBeVisible();
+  expect(within(panel).queryByRole("heading", { name: "Group 2 · 51 counties" })).not.toBeInTheDocument();
 });
 
 it("applies state and county filters and changes geography levels", async () => {

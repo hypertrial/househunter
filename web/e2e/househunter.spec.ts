@@ -12,6 +12,7 @@ const summary = {
   place_id: "08013012101", name: "Census tract 121.01", state: "CO", place_type: "tract",
   population_2020: 0, housing_units_2020: 0, risk_score: 21.25, coverage_status: "complete",
   fema_vintage: "December 2025", census_vintage: "n/a", county_fips: "08013", county_name: "Boulder",
+  community_conditions_group: 2, community_conditions_geography: "county", chrr_release_year: 2025,
 };
 
 const countySummary = {
@@ -110,7 +111,7 @@ async function installRoutes(page: Page, initiallyPrepared = true, failDetailOnc
       await route.fulfill({ json: { job_id: "one", state: "succeeded", progress: 100, message: "Complete", error: null } });
     } else if (url.pathname === "/api/v1/map/scores") {
       const county = url.searchParams.get("level") === "county";
-      await route.fulfill({ json: { schema_version: 1, build_id: build.build_id, level: county ? "county" : "tract", scope: build.scope, rows: [{ place_id: county ? "08013" : "08013012101", risk_score: county ? 18.5 : 21.25, coverage_status: "complete" }] } });
+      await route.fulfill({ json: { schema_version: 1, build_id: build.build_id, level: county ? "county" : "tract", scope: build.scope, rows: [{ place_id: county ? "08013" : "08013012101", risk_score: county ? 18.5 : 21.25, coverage_status: "complete", community_conditions_group: 2 }] } });
     } else if (url.pathname === "/api/v1/places") {
       await route.fulfill({ json: { total: 1, items: [summary] } });
     } else if (url.pathname === "/api/v1/counties") {
@@ -160,8 +161,7 @@ test("keeps preparation and retained workflows inside the map shell", async ({ p
   const detailDrawer = page.getByRole("dialog", { name: "Tract detail" });
   await expect(detailDrawer).toContainText("Wildfire");
   await expect(detailDrawer).toContainText("No rating");
-  const score = detailDrawer.locator(".score");
-  const scoreValue = score.locator("> span");
+  const scoreValue = detailDrawer.locator('.metric-card[aria-label="FEMA risk"] > span');
   for (const [tone, color] of [
     ["score-low", "rgb(127, 168, 126)"],
     ["score-below", "rgb(196, 176, 74)"],
@@ -169,11 +169,34 @@ test("keeps preparation and retained workflows inside the map shell", async ({ p
     ["score-high", "rgb(197, 106, 66)"],
     ["score-highest", "rgb(177, 74, 60)"],
   ]) {
-    await score.evaluate((element, className) => {
-      element.className = `score ${className}`;
+    await scoreValue.evaluate((element, className) => {
+      element.className = className;
     }, tone);
     await expect(scoreValue).toHaveCSS("color", color);
   }
+});
+
+test("renders Community Conditions as an independent county-level layer", async ({ page }) => {
+  await installRoutes(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Community Conditions" }).click();
+  await expect(page).toHaveURL(/metric=community-conditions/);
+  await expect(page.getByLabel("Community Conditions groups, Group 1 is healthiest"))
+    .toContainText("county-level clusters, not percentiles");
+  await page.getByRole("button", { name: "Best / Worst" }).click();
+  const panel = page.getByRole("region", { name: "Best and worst Community Conditions" });
+  await expect(panel.getByRole("heading", { name: "Best present · Group 2 · 1 counties" }))
+    .toBeVisible();
+  await panel.getByRole("button", { name: /Boulder.*Group 2 of 10/ }).first().click();
+  const drawer = page.getByRole("dialog", { name: "County detail" });
+  await expect(page.getByRole("button", { name: "Tracts", exact: true })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect(
+    drawer.getByRole("region", { name: "Community Conditions", exact: true }),
+  ).toHaveClass(/active/);
+  await expect(drawer).toContainText("County-level");
 });
 
 test("uses explicit address confirmation and never calls a geocoder from the browser", async ({ page }) => {

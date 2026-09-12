@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from typing import Literal
 
 from .build import build_snapshot
+from .chrr import download_chrr
 from .config import RuntimePaths
 from .contracts import JobStatus
 from .download import download_fema, download_fema_counties
@@ -89,12 +90,17 @@ class JobManager:
                 if job.status.kind == "download":
                     download_fema(
                         self.paths,
-                        progress=lambda value, message: progress(value * 50 // 100, message),
+                        progress=lambda value, message: progress(value * 40 // 100, message),
                         cancelled=job.cancel.is_set,
                     )
                     download_fema_counties(
                         self.paths,
-                        progress=lambda value, message: progress(50 + value * 50 // 100, message),
+                        progress=lambda value, message: progress(40 + value * 30 // 100, message),
+                        cancelled=job.cancel.is_set,
+                    )
+                    download_chrr(
+                        self.paths,
+                        progress=lambda value, message: progress(70 + value * 30 // 100, message),
                         cancelled=job.cancel.is_set,
                     )
                 elif job.status.kind == "build":

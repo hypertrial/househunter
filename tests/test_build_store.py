@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
+import duckdb
+import polars as pl
 import pytest
+import yaml
 
 from househunter.build import BUILD_SCHEMA_VERSION, build_snapshot
 from househunter.config import RuntimePaths
@@ -57,6 +61,23 @@ def test_build_is_content_addressed_and_queryable(
         }
 
 
+def test_build_identity_includes_source_vintages(
+    fixture_environment: tuple[RuntimePaths, Path],
+) -> None:
+    paths, fixture_root = fixture_environment
+    first = build_snapshot(paths)
+    config_path = fixture_root / "sources.yml"
+    config = yaml.safe_load(config_path.read_text())
+    config["chrr"]["version"] = "2025 Annual Data Release, corrected label"
+    config_path.write_text(yaml.safe_dump(config))
+
+    second = build_snapshot(paths)
+
+    assert second != first
+    metadata = json.loads((second / "build.json").read_text())
+    assert metadata["source_vintages"]["chrr"] == config["chrr"]["version"]
+
+
 def test_state_build_records_scope(fixture_environment: tuple[RuntimePaths, object]) -> None:
     paths, _ = fixture_environment
     output = build_snapshot(paths, state="AL")
@@ -64,6 +85,15 @@ def test_state_build_records_scope(fixture_environment: tuple[RuntimePaths, obje
     assert metadata["scope"] == {"kind": "state", "state": "AL"}
     assert metadata["place_count"] == 3
     assert metadata["county_count"] == 1
+    assert metadata["chrr_county_count"] == 1
+    assert metadata["chrr_grouped_count"] == 1
+    assert (output / "chrr_county.parquet").is_file()
+    places = pl.read_parquet(output / "places.parquet")
+    counties = pl.read_parquet(output / "counties.parquet")
+    assert places["community_conditions_group"].to_list() == [5, 5, 5]
+    assert counties["community_conditions_group"].to_list() == [5]
+    assert places["community_conditions_geography"].unique().to_list() == ["county"]
+    assert places["chrr_release_year"].unique().to_list() == [2025]
     with Store(paths) as store:
         assert all(item["state"] == "AL" for item in store.list_places(limit=10)["items"])
         assert [item["place_id"] for item in store.list_counties()["items"]] == ["01001"]
@@ -101,6 +131,15 @@ def test_missing_county_cache_fails_build(
     paths, _ = fixture_environment
     (paths.cache / "fema_nri_counties.parquet").unlink()
     with pytest.raises(HouseHunterError, match="FEMA county data is not cached"):
+        build_snapshot(paths)
+
+
+def test_missing_chrr_cache_fails_build(
+    fixture_environment: tuple[RuntimePaths, object],
+) -> None:
+    paths, _ = fixture_environment
+    (paths.raw / "chrr" / "community_conditions_2025.json").unlink()
+    with pytest.raises(HouseHunterError, match="CHR&R data is not cached"):
         build_snapshot(paths)
 
 
@@ -145,3 +184,27 @@ def test_unknown_state_is_rejected(fixture_environment: tuple[RuntimePaths, obje
     paths, _ = fixture_environment
     with pytest.raises(HouseHunterError, match="Unknown state abbreviation"):
         build_snapshot(paths, state="ZZ")
+
+
+def test_community_conditions_sort_is_deterministic_and_nulls_last(
+    fixture_environment: tuple[RuntimePaths, object],
+) -> None:
+    paths, _ = fixture_environment
+    output = build_snapshot(paths)
+    connection = duckdb.connect(str(output / "househunter.duckdb"))
+    try:
+        connection.execute(
+            "UPDATE counties SET community_conditions_group = NULL WHERE place_id = '02001'"
+        )
+    finally:
+        connection.close()
+    with Store(paths) as store:
+        ascending = store.list_counties(
+            sort="community_conditions_group", direction="asc", include_unranked=True
+        )["items"]
+        descending = store.list_counties(
+            sort="community_conditions_group", direction="desc", include_unranked=True
+        )["items"]
+        assert [row["place_id"] for row in ascending] == ["01001", "02001"]
+        assert [row["place_id"] for row in descending] == ["01001", "02001"]
+        assert store.list_places(community_conditions_group=5)["total"] == 3

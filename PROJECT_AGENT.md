@@ -11,6 +11,11 @@ scores. Detail and export surfaces also pass through FEMA's 18 published
 not change list ranking. Neither score is a property-level assessment, a loss
 probability, an insurance quote, or a prediction.
 
+CHR&R Community Conditions is a separate county-level thematic metric. Preserve the
+official 2025 integer group (1 healthiest, 10 least healthy, or null), join only on
+five-digit county FIPS, label tract inheritance as county-level, and never convert it
+to a percentile or blend it with FEMA.
+
 Use the `househunter-engineering` workspace from `.pad.toml`. Follow `AGENTS.md`
 and the local `pad-engineering` skill. Keep ticket bodies, exports, credentials,
 and local Pad state out of this public repository.
@@ -24,8 +29,9 @@ and local Pad state out of this public repository.
   `web/` source. Node is not required to *use* the app, but it is required to
   change the UI.
 - Never commit credentials or fetched FEMA payloads.
-- Runtime ranking uses FEMA only. Do not contact census.gov from prepare,
-  download, or build. Tract and county layers are both required.
+- FEMA ranking semantics use FEMA only; Community Conditions sorting uses only the
+  official CHR&R group. Do not contact census.gov from prepare, download, or build.
+  FEMA tract/county and CHR&R county layers are all required.
 - Address lookup may contact `geocoding.geo.census.gov` on explicit user action,
   and may contact Nominatim (`HOUSEHUNTER_NOMINATIM_URL`, default
   `nominatim.openstreetmap.org`) only after a valid Census empty match list.

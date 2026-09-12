@@ -1,5 +1,5 @@
 import { zoomIdentity, type ZoomTransform } from "d3-zoom";
-import type { Geography, MapManifest, MapScore } from "./types";
+import type { Geography, MapManifest, MapScore, Metric } from "./types";
 
 export const MAP_COLORS = {
   low: "#7fa87e",
@@ -10,6 +10,11 @@ export const MAP_COLORS = {
 } as const;
 
 export type ScoreBand = keyof typeof MAP_COLORS;
+
+export const COMMUNITY_GROUP_COLORS = [
+  "#7fa87e", "#9eac67", "#bcaf50", "#c9ad3e", "#cfa92f",
+  "#cf992d", "#c97e39", "#c36641", "#ba583f", "#b14a3c",
+] as const;
 
 export const STATE_FIPS = {
   AK: "02", AL: "01", AR: "05", AS: "60", AZ: "04", CA: "06", CO: "08", CT: "09",
@@ -36,6 +41,18 @@ export function scoreBand(value: number | null): ScoreBand | null {
 export function scoreColor(value: number | null): string | null {
   const band = scoreBand(value);
   return band ? MAP_COLORS[band] : null;
+}
+
+export function communityGroupColor(value: number | null): string | null {
+  return value !== null && Number.isInteger(value) && value >= 1 && value <= 10
+    ? COMMUNITY_GROUP_COLORS[value - 1]
+    : null;
+}
+
+export function metricColor(score: MapScore | null | undefined, metric: Metric): string | null {
+  return metric === "fema"
+    ? scoreColor(score?.risk_score ?? null)
+    : communityGroupColor(score?.community_conditions_group ?? null);
 }
 
 export function scoreMap(rows: MapScore[]): Map<string, MapScore> {
@@ -90,6 +107,9 @@ export function transformFromCamera(camera: CameraState, width: number, height: 
 export function readHash(hash: string) {
   const params = new URLSearchParams(hash.replace(/^#/, ""));
   const level: Geography = params.get("level") === "county" ? "county" : "tract";
+  const metric: Metric = params.get("metric") === "community-conditions"
+    ? "community-conditions"
+    : "fema";
   const requestedState = params.get("state") || "";
   const state = requestedState in STATE_FIPS
     ? requestedState as keyof typeof STATE_FIPS
@@ -110,6 +130,7 @@ export function readHash(hash: string) {
   };
   return {
     level,
+    metric,
     state,
     county: level === "tract" ? county : "",
     place,

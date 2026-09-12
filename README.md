@@ -5,6 +5,12 @@ geographies by published `ALR_NPCTL`. Lower is better. The full-viewport map sta
 with all 85,154 tracts; a county mode maps all 3,232 counties using FEMA's official
 county table, not an average of tract scores.
 
+The map can also switch to the official 2025 County Health Rankings & Roadmaps
+**Community Conditions** Health Group. This is an independent county-level layer:
+Group 1 is healthiest and Group 10 least healthy. The groups are data-driven
+clusters, not percentiles. Tracts inherit their county's group and are labeled
+county-level; HouseHunter never blends this value with FEMA risk.
+
 `ALR_NPCTL` is FEMA's national percentile for composite Expected Annual Loss Rate,
 distinct from FEMA's broader Risk Index. Tract and county percentiles are not
 comparable. Detail views and exports also show FEMA's 18 published
@@ -27,10 +33,11 @@ interface is committed, so Node is not required to use the app. No API keys are 
 ./scripts/run-app
 ```
 
-That installs Python dependencies, downloads the pinned FEMA tract and county
-layers if needed, publishes a snapshot, and starts the loopback app. Flags:
+That installs Python dependencies, downloads the pinned FEMA tract/county and
+CHR&R Community Conditions county layers if needed, publishes a snapshot, and
+starts the loopback app. Flags:
 `--port`, `--no-open`, `--state`, `--skip-prepare`. `--state` only scopes the
-snapshot. The first run downloads FEMA once and reuses the local cache afterward.
+snapshot. The first run downloads each source once and reuses verified local caches afterward.
 
 The same steps can be run individually:
 
@@ -41,6 +48,7 @@ uv run househunter download --source all
 uv run househunter build
 uv run househunter rank --state CO --limit 20
 uv run househunter rank --level county --state CO
+uv run househunter rank --level county --metric community-conditions --order best
 uv run househunter inspect 08013012101
 uv run househunter inspect 08013
 uv run househunter lookup "1670 Broadway, Denver, CO"
@@ -67,9 +75,9 @@ addresses.
 ```text
 ./scripts/run-app [--port PORT] [--no-open] [--state CO] [--skip-prepare]
 househunter sources [--json]
-househunter download [--source fema|fema_counties|all]
+househunter download [--source fema|fema_counties|chrr|all]
 househunter build [--state CO]
-househunter rank [--state CO] [--county STCOFIPS] [--level tract|county] [--limit N] [--include-unranked]
+househunter rank [--state CO] [--county STCOFIPS] [--level tract|county] [--metric risk|community-conditions] [--order best|worst] [--limit N] [--include-unranked]
 househunter inspect TRACT_FIPS|COUNTY_FIPS
 househunter lookup "1670 Broadway, Denver, CO" [--allow-approximate]
 househunter export --format parquet|csv [--level tract|county] [--output PATH]
@@ -98,6 +106,12 @@ hazard percentiles mean FEMA published no rating; they are not zero. State is
 derived from the first two digits of `TRACTFIPS` using a bundled FIPS map.
 HouseHunter does not impute, re-percentile, winsorize, or renormalize around
 missing rows. Unrankable rows remain visible as `missing_fema`.
+
+Community Conditions is joined on the same five-digit county FIPS. Its official
+`CommunityConditions_Group` is retained as an integer 1–10 or null; null is shown
+as `Not grouped` and sorts last in both directions. The processed national artifact
+is `data/processed/chrr_county.parquet`, and every immutable snapshot carries its
+state-scoped copy and DuckDB table.
 
 Read [DATA_SOURCES.md](DATA_SOURCES.md) for source provenance, release maintenance, and
 limitations.
@@ -139,7 +153,8 @@ with an explicit repair message.
 
 ## Scope
 
-The map uses composite `ALR_NPCTL` only. The 18 published FEMA hazard percentiles
+The FEMA layer uses composite `ALR_NPCTL`; the independent Community Conditions layer
+uses only CHR&R's published group. The 18 published FEMA hazard percentiles
 appear on inspect/detail and ride along in exports; there is no hazard map layer,
 sort or filter by hazard, HouseHunter-invented composite, mountain classifier,
 trails, insurance data, external basemap, hosted service, or native installer.

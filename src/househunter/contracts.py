@@ -21,6 +21,9 @@ class PlaceSummary(BaseModel):
     census_vintage: str
     county_fips: str
     county_name: str
+    community_conditions_group: int | None
+    community_conditions_geography: Literal["county"] = "county"
+    chrr_release_year: int
 
 
 class TractContribution(BaseModel):
@@ -89,6 +92,7 @@ class MapScore(BaseModel):
     place_id: str
     risk_score: float | None
     coverage_status: CoverageStatus
+    community_conditions_group: int | None
 
 
 class MapScores(BaseModel):

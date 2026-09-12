@@ -33,9 +33,42 @@ County names and the county ranking come from this layer. Tract rows join
 `TRACTFIPS[:5]` to `STCOFIPS`. HouseHunter does **not** average tract percentiles to
 produce a county score. Tract and county percentiles are not comparable.
 
+## CHR&R Community Conditions
+
+- Dataset: County Health Rankings & Roadmaps 2025 county layer
+- Release: 2025 Annual Data Release
+- ArcGIS layer: `County Health Rankings 2025/FeatureServer/2`
+- Requested fields: `fipscode`, `county`, `state`, `CommunityConditions_Group`
+- Pinned rows: 3,144 county/county-equivalent records
+- Metric: official Community Conditions Health Group, integer 1–10 or null
+- Canonical logical SHA-256: `516e1e1408fe3dbb65273c9de75c67cfd6d5eed15f1ad18a8e91e6c6d54ca3fb`
+- Raw cache: `data/raw/chrr/community_conditions_2025.json` with `metadata.json`
+- Processed artifact: `data/processed/chrr_county.parquet`
+
+Group 1 represents the healthiest community conditions and Group 10 the least
+healthy. These are unequal, data-driven clusters—not percentiles. HouseHunter does
+not calculate `qol_sort_score`, rebuild the group from the 24 measures, or blend it
+with FEMA. Tracts inherit the county value through their first five FIPS digits and
+all user-facing surfaces label it county-level.
+
+The runtime uses the public ArcGIS county representation because the 2025 analytic
+CSV does not publish `CommunityConditions_Group`. Download validates the pinned
+layer, schema, data edit timestamps, exact row count, unique zero-padded FIPS,
+1–10/null domain, and canonical checksum before atomically publishing canonical JSON.
+The browser never contacts CHR&R.
+
+Official references: [CHR&R Data & Documentation](https://www.countyhealthrankings.org/health-data/methodology-and-sources/data-documentation),
+[CHR&R methods](https://www.countyhealthrankings.org/health-data/methodology-and-sources/methods),
+and the [official ArcGIS county layer](https://p3eplmys2rvchkjx.svcs.arcgis.com/P3ePLMYs2RVChkJx/arcgis/rest/services/County%20Health%20Rankings%202025/FeatureServer/2).
+
+If CHR&R publication moves after funding ends, update the `chrr` block in
+`config/sources.yml` only after verifying the replacement is official and semantically
+identical. Recompute and review the schema fingerprint, revision pins, row count,
+spot checks, and canonical logical checksum; never repoint automatically to “latest.”
+
 ## Download contract
 
-The downloader validates each layer's edit timestamp, field names and ArcGIS types,
+The downloader validates each source's edit timestamp, field names and ArcGIS types,
 release label, unique identifiers, row count, composite range `[0, 100]`, optional
 hazard percentiles that are **null or** finite `[0, 100]`, and the canonical
 logical checksum in `config/sources.yml` when one is pinned. Pages are cached
@@ -104,7 +137,7 @@ subdivisions often need the Nominatim street confirmation.
 ## Census reference assets
 
 Runtime ranking does **not** download or require Census Place/housing assets.
-`./scripts/run-app` uses only the pinned FEMA caches.
+`./scripts/run-app` uses only the pinned FEMA and CHR&R caches.
 
 Maintainer-only Place-generation scripts remain in the tree for historical release assets
 and are unused by the local app. Prepare, download, and build never contact census.gov.

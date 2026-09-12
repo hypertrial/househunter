@@ -5,8 +5,8 @@ import { zoom, zoomIdentity, type ZoomBehavior, type ZoomTransform } from "d3-zo
 import { feature as topoFeature } from "topojson-client";
 import type { Feature, FeatureCollection, Geometry, GeoJsonProperties } from "geojson";
 import type { GeometryCollection, Topology } from "topojson-specification";
-import { cameraFromTransform, detailAsset, nationalAsset, relativeTransform, scoreColor, transformFromCamera, type CameraState } from "./map";
-import type { MapManifest, MapScore } from "./types";
+import { cameraFromTransform, detailAsset, metricColor, nationalAsset, relativeTransform, transformFromCamera, type CameraState } from "./map";
+import type { MapManifest, MapScore, Metric } from "./types";
 
 type MapFeature = Feature<Geometry, GeoJsonProperties & {
   place_id?: string;
@@ -34,6 +34,7 @@ export interface FocusTarget {
 interface Props {
   manifestUrl: string;
   level: "tract" | "county";
+  metric?: Metric;
   rows: MapScore[];
   selected: string;
   state: string;
@@ -145,6 +146,7 @@ function hatch(context: CanvasRenderingContext2D, scale: number): CanvasPattern 
 export default function RiskMap({
   manifestUrl,
   level,
+  metric = "fema",
   rows,
   selected,
   state,
@@ -286,7 +288,8 @@ export default function RiskMap({
     const { width, height, ratio } = dimensionsRef.current;
     const renderTransform = transformRef.current;
     const hitSemanticKey = [
-      geometryVersion, rowsVersionRef.current, level, state, county, showUnranked, neutralOnly,
+      geometryVersion, rowsVersionRef.current, level, metric, state, county, showUnranked,
+      neutralOnly,
     ].join("|");
     const renderKey = [
       width, height, ratio, hitSemanticKey, renderTransform.k, renderTransform.x, renderTransform.y,
@@ -351,10 +354,11 @@ export default function RiskMap({
       const countyFips = String(item.properties?.county_fips || (level === "county" ? placeId : ""));
       const filtered = (state && featureState !== state) || (county && countyFips !== county);
       const score = scoresRef.current.get(placeId);
-      const color = scoreColor(score?.risk_score ?? null);
+      const color = metricColor(score, metric);
       const projection = projectionFor(item);
       if (!projection) return;
-      const fill = color || (score && showUnranked ? missingPattern : "#344149");
+      const showMissing = metric === "community-conditions" || showUnranked;
+      const fill = color || (score && showMissing ? missingPattern : "#344149");
       const alpha = filtered ? 0.12 : score ? 1 : 0.34;
       const stroke = filtered ? "#233038" : "rgba(9,15,18,.54)";
       const projectionKey = projectorsRef.current?.byState.get(featureState) ? featureState : "main";
@@ -367,7 +371,10 @@ export default function RiskMap({
         visibleGroups.push(group);
       }
       group.items.push(item);
-      if (!filtered && score && (score.risk_score !== null || showUnranked)) {
+      const hasValue = metric === "fema"
+        ? score?.risk_score !== null
+        : score?.community_conditions_group !== null;
+      if (!filtered && score && (hasValue || showMissing)) {
         hittable.push({ item, index, projection });
       }
     });
@@ -485,7 +492,7 @@ export default function RiskMap({
     };
     if (geographies.length) onStatus(`Rendering ${geographies.length.toLocaleString()} ${level}s`);
     window.requestAnimationFrame(paintVisibleLayer);
-  }, [county, drawTransformed, effectiveFeatures, geometryVersion, level, neutralOnly, onStatus, projectionFor, showUnranked, state]);
+  }, [county, drawTransformed, effectiveFeatures, geometryVersion, level, metric, neutralOnly, onStatus, projectionFor, showUnranked, state]);
 
   const scheduleDraw = useCallback(() => {
     window.cancelAnimationFrame(drawFrameRef.current);
@@ -831,7 +838,7 @@ export default function RiskMap({
       className="risk-canvas"
       role="img"
       tabIndex={0}
-      aria-label={`Focusable USA ${level} risk map. Lower FEMA ALR_NPCTL is better. Use arrow keys to move the focus cursor, plus and minus to zoom, and Enter to select.`}
+      aria-label={`Focusable USA ${level} ${metric === "fema" ? "risk" : "Community Conditions"} map. ${metric === "fema" ? "Lower FEMA ALR_NPCTL is better." : "Group 1 is healthiest and Group 10 least healthy; tract values are county-level."} Use arrow keys to move the focus cursor, plus and minus to zoom, and Enter to select.`}
       onKeyDown={keyboard}
     />
     <div className="map-zoom" aria-label="Map controls">

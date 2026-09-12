@@ -13,6 +13,9 @@ export interface PlaceSummary {
   census_vintage: string;
   county_fips: string;
   county_name: string;
+  community_conditions_group: number | null;
+  community_conditions_geography: "county";
+  chrr_release_year: number;
 }
 
 export interface TractContribution {
@@ -76,6 +79,7 @@ export interface JobStatus {
 }
 
 export type Geography = "tract" | "county";
+export type Metric = "fema" | "community-conditions";
 
 export interface BuildMeta {
   build_id: string;
@@ -83,7 +87,7 @@ export interface BuildMeta {
   ranked_place_count: number;
   county_count?: number;
   ranked_county_count?: number;
-  source_vintages: Record<string, string>;
+  source_vintages: Record<string, string | number>;
   scope: { kind: string; state: string | null };
 }
 
@@ -108,6 +112,7 @@ export interface MapScore {
   place_id: string;
   risk_score: number | null;
   coverage_status: CoverageStatus;
+  community_conditions_group: number | null;
 }
 
 export interface MapScores {

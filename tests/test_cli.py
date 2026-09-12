@@ -27,6 +27,23 @@ def test_cli_build_rank_inspect_export_and_sources(
     assert "01001" in counties.output
     assert "40.0" in counties.output
 
+    community = runner.invoke(
+        app,
+        [
+            "rank",
+            "--level",
+            "county",
+            "--metric",
+            "community-conditions",
+            "--order",
+            "worst",
+        ],
+    )
+    assert community.exit_code == 0, community.output
+    assert "GROUP" in community.output
+    assert "01001" in community.output
+    assert "    5" in community.output
+
     county_filter = runner.invoke(app, ["rank", "--county", "01001"])
     assert county_filter.exit_code == 0
     assert "02001000100" not in county_filter.output
@@ -59,12 +76,16 @@ def test_cli_build_rank_inspect_export_and_sources(
     assert header.startswith("place_id,")
     assert "alr_npctl_wfir" in header
     assert "alr_npctl_tsun" in header
+    assert "community_conditions_group" in header
+    assert "community_conditions_geography" in header
+    assert "chrr_release_year" in header
 
     sources = runner.invoke(app, ["sources", "--json"])
     assert sources.exit_code == 0
     source_status = json.loads(sources.output)
     assert source_status["fema"]["version"] == "December 2025"
     assert source_status["fema_counties"]["version"] == "December 2025"
+    assert source_status["chrr"]["version"] == "2025 Annual Data Release"
     assert "census" not in source_status
 
 

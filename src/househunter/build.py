@@ -10,6 +10,7 @@ from pathlib import Path
 import duckdb
 import polars as pl
 
+from .chrr import build_processed
 from .config import RuntimePaths, canonical_json, load_config, sha256_bytes
 from .contracts import COUNTY_METHODOLOGY_NOTICE, METHODOLOGY_NOTICE
 from .download import validate_cached_fema, validate_cached_fema_counties
@@ -26,7 +27,7 @@ from .hazards import HAZARD_COLUMNS, with_hazard_columns
 Progress = Callable[[int, str], None]
 Cancelled = Callable[[], bool]
 
-BUILD_SCHEMA_VERSION = 5
+BUILD_SCHEMA_VERSION = 6
 
 
 def logical_checksum(frame: pl.DataFrame, columns: list[str], sort_by: list[str]) -> str:
@@ -55,8 +56,10 @@ def _county_display_expr() -> pl.Expr:
 def compute_scores(
     fema: pl.DataFrame,
     counties: pl.DataFrame | None = None,
+    chrr: pl.DataFrame | None = None,
     *,
     fema_vintage: str = "December 2025",
+    chrr_release_year: int = 2025,
 ) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
     if counties is None:
         counties = pl.DataFrame(
@@ -77,6 +80,11 @@ def compute_scores(
                 "nri_version": pl.String,
             },
         )
+    if chrr is None:
+        chrr = pl.DataFrame(
+            {"county_fips": [], "community_conditions_group": []},
+            schema={"county_fips": pl.String, "community_conditions_group": pl.Int8},
+        )
     fema = with_hazard_columns(fema)
     counties = with_hazard_columns(counties)
     hazard_cols = [pl.col(column) for column in HAZARD_COLUMNS]
@@ -91,31 +99,48 @@ def compute_scores(
             .replace_strict(STATE_BY_FIPS, default=UNKNOWN_STATE)
         )
     )
-    county_scored = counties.select(
-        pl.col("county_fips").alias("place_id"),
-        _county_display_expr().alias("name"),
-        county_state.alias("state"),
-        pl.lit("county").alias("place_type"),
-        pl.lit(0, dtype=pl.Int64).alias("population_2020"),
-        pl.lit(0, dtype=pl.Int64).alias("housing_units_2020"),
-        pl.when(county_complete)
-        .then(pl.col("alr_npctl"))
-        .otherwise(pl.lit(None, dtype=pl.Float64))
-        .alias("risk_score"),
-        pl.when(county_complete).then(pl.lit("complete")).otherwise(pl.lit("missing_fema")).alias(
-            "coverage_status"
-        ),
-        pl.when(county_complete).then(pl.lit(1.0)).otherwise(pl.lit(0.0)).alias("coverage_ratio"),
-        pl.lit(0, dtype=pl.Int64).alias("total_weighted_housing"),
-        pl.lit(fema_vintage).alias("fema_vintage"),
-        pl.lit("n/a").alias("census_vintage"),
-        pl.col("county_fips"),
-        _county_display_expr().alias("county_name"),
-        *hazard_cols,
-    ).sort("place_id")
+    county_scored = (
+        counties.select(
+            pl.col("county_fips").alias("place_id"),
+            _county_display_expr().alias("name"),
+            county_state.alias("state"),
+            pl.lit("county").alias("place_type"),
+            pl.lit(0, dtype=pl.Int64).alias("population_2020"),
+            pl.lit(0, dtype=pl.Int64).alias("housing_units_2020"),
+            pl.when(county_complete)
+            .then(pl.col("alr_npctl"))
+            .otherwise(pl.lit(None, dtype=pl.Float64))
+            .alias("risk_score"),
+            pl.when(county_complete)
+            .then(pl.lit("complete"))
+            .otherwise(pl.lit("missing_fema"))
+            .alias("coverage_status"),
+            pl.when(county_complete)
+            .then(pl.lit(1.0))
+            .otherwise(pl.lit(0.0))
+            .alias("coverage_ratio"),
+            pl.lit(0, dtype=pl.Int64).alias("total_weighted_housing"),
+            pl.lit(fema_vintage).alias("fema_vintage"),
+            pl.lit("n/a").alias("census_vintage"),
+            pl.col("county_fips"),
+            _county_display_expr().alias("county_name"),
+            *hazard_cols,
+        )
+        .join(
+            chrr.select("county_fips", "community_conditions_group"),
+            on="county_fips",
+            how="left",
+        )
+        .with_columns(
+            pl.lit("county").alias("community_conditions_geography"),
+            pl.lit(chrr_release_year, dtype=pl.Int16).alias("chrr_release_year"),
+        )
+        .sort("place_id")
+    )
     lookup = county_scored.select(
         pl.col("place_id").alias("matched_county_fips"),
         pl.col("name").alias("matched_county_name"),
+        "community_conditions_group",
     )
     complete = pl.col("alr_npctl").is_not_null()
     tract_state = (
@@ -150,6 +175,9 @@ def compute_scores(
             .then(pl.lit(UNKNOWN_COUNTY_NAME))
             .otherwise(pl.col("matched_county_name"))
             .alias("county_name"),
+            pl.col("community_conditions_group"),
+            pl.lit("county").alias("community_conditions_geography"),
+            pl.lit(chrr_release_year, dtype=pl.Int16).alias("chrr_release_year"),
             *hazard_cols,
         )
         .sort("place_id")
@@ -172,6 +200,7 @@ def _write_duckdb(
     places: Path,
     contributions: Path,
     counties: Path,
+    chrr_counties: Path,
     metadata: dict[str, object],
 ) -> None:
     connection = duckdb.connect(str(path))
@@ -184,12 +213,16 @@ def _write_duckdb(
         connection.execute(
             "CREATE TABLE counties AS SELECT * FROM read_parquet(?)", [str(counties)]
         )
+        connection.execute(
+            "CREATE TABLE chrr_county AS SELECT * FROM read_parquet(?)", [str(chrr_counties)]
+        )
         connection.execute("CREATE INDEX places_id_idx ON places(place_id)")
         connection.execute("CREATE INDEX places_state_idx ON places(state)")
         connection.execute("CREATE INDEX places_county_idx ON places(county_fips)")
         connection.execute("CREATE INDEX contribution_place_idx ON tract_contributions(place_id)")
         connection.execute("CREATE INDEX counties_id_idx ON counties(place_id)")
         connection.execute("CREATE INDEX counties_state_idx ON counties(state)")
+        connection.execute("CREATE INDEX chrr_county_id_idx ON chrr_county(county_fips)")
         connection.execute(
             "CREATE TABLE build_metadata AS SELECT ? AS metadata_json",
             [json.dumps(metadata, sort_keys=True)],
@@ -199,12 +232,18 @@ def _write_duckdb(
         connection.close()
 
 
-def _existing_build_is_valid(target: Path, build_id: str, input_hashes: dict[str, str]) -> bool:
+def _existing_build_is_valid(
+    target: Path,
+    build_id: str,
+    input_hashes: dict[str, str],
+    source_vintages: dict[str, str | int],
+) -> bool:
     try:
         metadata = json.loads((target / "build.json").read_text())
         places = pl.read_parquet(target / "places.parquet")
         contributions = pl.read_parquet(target / "tract_contributions.parquet")
         counties = pl.read_parquet(target / "counties.parquet")
+        chrr_counties = pl.read_parquet(target / "chrr_county.parquet")
     except (OSError, json.JSONDecodeError, pl.exceptions.PolarsError):
         return False
     if not (target / "househunter.duckdb").is_file():
@@ -213,11 +252,14 @@ def _existing_build_is_valid(target: Path, build_id: str, input_hashes: dict[str
         metadata.get("schema_version") != BUILD_SCHEMA_VERSION
         or metadata.get("build_id") != build_id
         or metadata.get("input_checksums") != input_hashes
+        or metadata.get("source_vintages") != source_vintages
     ):
         return False
     if metadata.get("place_count") != places.height:
         return False
     if metadata.get("county_count") != counties.height:
+        return False
+    if metadata.get("chrr_county_count") != chrr_counties.height:
         return False
     if (
         metadata.get("ranked_place_count")
@@ -236,6 +278,9 @@ def _existing_build_is_valid(target: Path, build_id: str, input_hashes: dict[str
             contributions, contributions.columns, ["place_id", "tract_id"]
         ),
         "counties": logical_checksum(counties, counties.columns, ["place_id"]),
+        "chrr_county": logical_checksum(
+            chrr_counties, chrr_counties.columns, ["county_fips"]
+        ),
     }:
         return False
     try:
@@ -246,6 +291,9 @@ def _existing_build_is_valid(target: Path, build_id: str, input_hashes: dict[str
                 "SELECT count(*) FROM tract_contributions"
             ).fetchone()[0]
             county_count = connection.execute("SELECT count(*) FROM counties").fetchone()[0]
+            chrr_county_count = connection.execute(
+                "SELECT count(*) FROM chrr_county"
+            ).fetchone()[0]
             stored_metadata = json.loads(
                 connection.execute("SELECT metadata_json FROM build_metadata").fetchone()[0]
             )
@@ -257,6 +305,7 @@ def _existing_build_is_valid(target: Path, build_id: str, input_hashes: dict[str
         place_count == places.height
         and contribution_count == contributions.height
         and county_count == counties.height
+        and chrr_county_count == chrr_counties.height
         and stored_metadata == metadata
     )
 
@@ -281,17 +330,32 @@ def build_snapshot(
         raise HouseHunterError(
             "FEMA county data is not cached; run `househunter download --source fema_counties`"
         )
-    source = load_config()["fema"]
-    county_source = load_config()["fema_counties"]
+    config = load_config()
+    source = config["fema"]
+    county_source = config["fema_counties"]
+    chrr_source = config["chrr"]
     fema, fema_sha = validate_cached_fema(fema_path, source)
     counties, county_sha = validate_cached_fema_counties(county_path, county_source)
-    input_hashes = {"fema": fema_sha, "fema_counties": county_sha}
+    chrr_counties, chrr_sha = build_processed(paths)
+    input_hashes = {"fema": fema_sha, "fema_counties": county_sha, "chrr": chrr_sha}
+    source_vintages = {
+        "fema": source["version"],
+        "fema_release": source["release"],
+        "fema_counties": county_source["version"],
+        "fema_counties_release": county_source["release"],
+        "chrr": chrr_source["version"],
+        "chrr_release_year": chrr_source["release_year"],
+    }
     scope = state or "national"
-    build_key = sha256_bytes(canonical_json({"scope": scope, "inputs": input_hashes}))[:16]
+    build_key = sha256_bytes(
+        canonical_json(
+            {"scope": scope, "inputs": input_hashes, "source_vintages": source_vintages}
+        )
+    )[:16]
     build_id = f"{scope.lower()}-{build_key}"
     target = paths.builds / build_id
     if target.is_dir():
-        if not _existing_build_is_valid(target, build_id, input_hashes):
+        if not _existing_build_is_valid(target, build_id, input_hashes, source_vintages):
             raise HouseHunterError(
                 f"Existing immutable build failed validation: {target}; move it aside and rebuild"
             )
@@ -302,12 +366,17 @@ def build_snapshot(
     if progress:
         progress(25, "Ranking FEMA geographies")
     scored, contributions, county_scored = compute_scores(
-        fema, counties, fema_vintage=source["version"]
+        fema,
+        counties,
+        chrr_counties,
+        fema_vintage=source["version"],
+        chrr_release_year=chrr_source["release_year"],
     )
     if state:
         scored = scored.filter(pl.col("state") == state)
         contributions = contributions.join(scored.select("place_id"), on="place_id", how="semi")
         county_scored = county_scored.filter(pl.col("state") == state)
+        chrr_counties = chrr_counties.filter(pl.col("state") == state)
         if scored.height == 0:
             raise HouseHunterError(f"Unknown state abbreviation: {state}")
     _cancelled(cancelled)
@@ -330,6 +399,9 @@ def build_snapshot(
             contributions, contribution_columns, ["place_id", "tract_id"]
         ),
         "counties": logical_checksum(county_scored, county_columns, ["place_id"]),
+        "chrr_county": logical_checksum(
+            chrr_counties, chrr_counties.columns, ["county_fips"]
+        ),
     }
     metadata: dict[str, object] = {
         "schema_version": BUILD_SCHEMA_VERSION,
@@ -340,12 +412,11 @@ def build_snapshot(
         "ranked_place_count": complete.height,
         "county_count": county_scored.height,
         "ranked_county_count": county_complete.height,
-        "source_vintages": {
-            "fema": source["version"],
-            "fema_release": source["release"],
-            "fema_counties": county_source["version"],
-            "fema_counties_release": county_source["release"],
-        },
+        "chrr_county_count": chrr_counties.height,
+        "chrr_grouped_count": chrr_counties.filter(
+            pl.col("community_conditions_group").is_not_null()
+        ).height,
+        "source_vintages": source_vintages,
         "input_checksums": input_hashes,
         "logical_checksums": checksums,
         "methodology_notice": METHODOLOGY_NOTICE,
@@ -359,9 +430,11 @@ def build_snapshot(
         places_output = temporary / "places.parquet"
         contributions_output = temporary / "tract_contributions.parquet"
         counties_output = temporary / "counties.parquet"
+        chrr_output = temporary / "chrr_county.parquet"
         scored.write_parquet(places_output, compression="zstd", statistics=True)
         contributions.write_parquet(contributions_output, compression="zstd", statistics=True)
         county_scored.write_parquet(counties_output, compression="zstd", statistics=True)
+        chrr_counties.write_parquet(chrr_output, compression="zstd", statistics=True)
         (temporary / "build.json").write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
         if progress:
             progress(75, "Creating read-only query snapshot")
@@ -370,6 +443,7 @@ def build_snapshot(
             places_output,
             contributions_output,
             counties_output,
+            chrr_output,
             metadata,
         )
         _cancelled(cancelled)

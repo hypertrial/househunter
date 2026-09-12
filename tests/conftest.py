@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import polars as pl
@@ -16,6 +17,29 @@ def fixture_environment(
 ) -> tuple[RuntimePaths, Path]:
     config = {
         "schema_version": 1,
+        "chrr": {
+            "name": "fixture community conditions",
+            "layer_url": "https://example.test/chrr/2",
+            "item_url": "https://example.test/chrr",
+            "terms_url": "https://example.test/terms",
+            "version": "2025 Annual Data Release",
+            "release": "2025",
+            "release_year": 2025,
+            "layer_last_edit_ms": 3,
+            "schema_last_edit_ms": 2,
+            "data_last_edit_ms": 1,
+            "expected_row_count": 3,
+            "fields": {
+                "fipscode": "esriFieldTypeString",
+                "county": "esriFieldTypeString",
+                "state": "esriFieldTypeString",
+                "CommunityConditions_Group": "esriFieldTypeInteger",
+            },
+            "schema_fingerprint": (
+                "503000d3f66abcea0a8182c522e7365f7175cc4c39ad7a798c3765d885fdcdf3"
+            ),
+            "canonical_sha256": None,
+        },
         "fema": {
             "name": "fixture",
             "item_id": "fixture",
@@ -70,6 +94,36 @@ def fixture_environment(
     monkeypatch.setenv("HOUSEHUNTER_DATA_DIR", str(tmp_path / "data"))
     paths = RuntimePaths.from_root(tmp_path)
     paths.ensure()
+    chrr_raw = paths.raw / "chrr" / "community_conditions_2025.json"
+    chrr_raw.parent.mkdir(parents=True)
+    chrr_raw.write_text(
+        json.dumps(
+            {
+                "rows": [
+                    {
+                        "fipscode": "01001",
+                        "state": "AL",
+                        "county": "Autauga County",
+                        "CommunityConditions_Group": 5,
+                    },
+                    {
+                        "fipscode": "02001",
+                        "state": "AK",
+                        "county": "Aleutians East Borough",
+                        "CommunityConditions_Group": 2,
+                    },
+                    {
+                        "fipscode": "02063",
+                        "state": "AK",
+                        "county": "Chugach Census Area",
+                        "CommunityConditions_Group": None,
+                    },
+                ]
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    )
     fema = with_hazard_columns(
         pl.DataFrame(
             {

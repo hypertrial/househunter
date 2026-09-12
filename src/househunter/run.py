@@ -13,6 +13,7 @@ import uvicorn
 
 from .api import create_app
 from .build import build_snapshot
+from .chrr import download_chrr
 from .config import RuntimePaths
 from .download import download_fema, download_fema_counties
 from .errors import HouseHunterError
@@ -48,6 +49,7 @@ def prepare_runtime(
     state: str | None = None,
     download: Download = download_fema,
     download_counties: Download = download_fema_counties,
+    download_community_conditions: Download = download_chrr,
     build: Build = build_snapshot,
     progress: Progress | None = None,
     cancelled: Cancelled | None = None,
@@ -56,14 +58,17 @@ def prepare_runtime(
     paths.ensure()
 
     def _run() -> Path:
-        download(paths, progress=_scale_progress(progress, 0, 40), cancelled=cancelled)
-        download_counties(paths, progress=_scale_progress(progress, 40, 55), cancelled=cancelled)
+        download(paths, progress=_scale_progress(progress, 0, 35), cancelled=cancelled)
+        download_counties(paths, progress=_scale_progress(progress, 35, 50), cancelled=cancelled)
+        download_community_conditions(
+            paths, progress=_scale_progress(progress, 50, 60), cancelled=cancelled
+        )
         if progress:
-            progress(55, "Publishing ranking snapshot")
+            progress(60, "Publishing ranking snapshot")
         return build(
             paths,
             state=state,
-            progress=_scale_progress(progress, 55, 99),
+            progress=_scale_progress(progress, 60, 99),
             cancelled=cancelled,
         )
 
@@ -95,6 +100,7 @@ def run(
     paths: RuntimePaths | None = None,
     download: Download = download_fema,
     download_counties: Download = download_fema_counties,
+    download_community_conditions: Download = download_chrr,
     build: Build = build_snapshot,
     serve: Serve = serve_app,
     progress: Progress | None = _progress,
@@ -108,6 +114,7 @@ def run(
             state=state,
             download=download,
             download_counties=download_counties,
+            download_community_conditions=download_community_conditions,
             build=build,
             progress=progress,
         )

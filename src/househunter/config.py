@@ -16,6 +16,8 @@ from .errors import HouseHunterError
 class RuntimePaths:
     data: Path
     cache: Path
+    raw: Path
+    processed: Path
     builds: Path
     current: Path
     source_manifest: Path
@@ -29,6 +31,8 @@ class RuntimePaths:
         return cls(
             data=data,
             cache=data / "cache",
+            raw=data / "raw",
+            processed=data / "processed",
             builds=data / "builds",
             current=data / "current.json",
             source_manifest=data / "source_manifest.parquet",
@@ -37,6 +41,8 @@ class RuntimePaths:
 
     def ensure(self) -> None:
         self.cache.mkdir(parents=True, exist_ok=True)
+        self.raw.mkdir(parents=True, exist_ok=True)
+        self.processed.mkdir(parents=True, exist_ok=True)
         self.builds.mkdir(parents=True, exist_ok=True)
 
 

@@ -42,6 +42,9 @@ def test_release_validator_uses_current_fema_and_map_assets(
     )
 
     assert release_module.validate_release(paths) == {
+        "chrr_counties": 3,
+        "chrr_fema_matches": 2,
+        "chrr_grouped_counties": 2,
         "counties": 2,
         "map_assets": 2,
         "ranked_counties": 2,

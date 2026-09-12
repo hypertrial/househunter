@@ -53,7 +53,13 @@ def test_api_filters_details_exports_and_token(
             "census_vintage",
             "county_fips",
             "county_name",
+            "community_conditions_group",
+            "community_conditions_geography",
+            "chrr_release_year",
         }
+        assert summary["community_conditions_group"] == 5
+        assert summary["community_conditions_geography"] == "county"
+        assert summary["chrr_release_year"] == 2025
         assert (
             "alr_npctl_wfir"
             not in client.get("/api/v1/places", params={"state": "AL"}).json()["items"][0]
@@ -68,7 +74,21 @@ def test_api_filters_details_exports_and_token(
         assert summary["county_fips"] == "01001"
         assert summary["county_name"] == "Autauga"
         sources = client.get("/api/v1/sources").json()
-        assert [source["source"] for source in sources] == ["fema", "fema_counties"]
+        assert [source["source"] for source in sources] == ["fema", "fema_counties", "chrr"]
+        grouped = client.get(
+            "/api/v1/counties",
+            params={
+                "community_conditions_group": 5,
+                "sort": "community_conditions_group",
+            },
+        )
+        assert grouped.status_code == 200
+        assert [row["place_id"] for row in grouped.json()["items"]] == ["01001"]
+        assert client.get(
+            "/api/v1/counties", params={"community_conditions_group": 11}
+        ).status_code == 422
+        map_rows = client.get("/api/v1/map/scores", params={"level": "tract"}).json()["rows"]
+        assert map_rows[0]["community_conditions_group"] == 5
         unknown = client.get("/api/v1/places/99999999999")
         assert unknown.status_code == 200
         assert unknown.json()["summary"]["state"] == "??"

@@ -15,7 +15,8 @@ from .hazards import hazard_percentiles_from_record, hazard_select_sql
 
 SUMMARY_COLUMNS = """
 place_id, name, state, place_type, population_2020, housing_units_2020,
-risk_score, coverage_status, fema_vintage, census_vintage, county_fips, county_name
+risk_score, coverage_status, fema_vintage, census_vintage, county_fips, county_name,
+community_conditions_group, community_conditions_geography, chrr_release_year
 """
 SUMMARY_KEYS = [
     "place_id",
@@ -30,6 +31,9 @@ SUMMARY_KEYS = [
     "census_vintage",
     "county_fips",
     "county_name",
+    "community_conditions_group",
+    "community_conditions_geography",
+    "chrr_release_year",
 ]
 
 
@@ -49,6 +53,7 @@ def current_build(paths: RuntimePaths) -> tuple[Path, dict[str, Any]]:
         build / "places.parquet",
         build / "tract_contributions.parquet",
         build / "counties.parquet",
+        build / "chrr_county.parquet",
     ]
     if not build.is_dir() or any(not path.is_file() for path in required):
         raise BuildNotFoundError(f"Published build is incomplete: {build}")
@@ -91,6 +96,7 @@ class Store:
         max_population: int | None = None,
         min_score: float | None = None,
         max_score: float | None = None,
+        community_conditions_group: int | None = None,
         include_unranked: bool = False,
         sort: str = "risk_score",
         direction: str = "asc",
@@ -103,6 +109,7 @@ class Store:
             "name": "name",
             "state": "state",
             "population": "population_2020",
+            "community_conditions_group": "community_conditions_group",
         }
         if sort not in sort_columns:
             raise HouseHunterError(f"Unsupported sort column: {sort}")
@@ -114,6 +121,8 @@ class Store:
                 county = None
         if county is not None and (len(county) != 5 or not county.isdigit()):
             raise HouseHunterError("County filter must be a 5-digit FIPS code")
+        if community_conditions_group is not None and not 1 <= community_conditions_group <= 10:
+            raise HouseHunterError("Community Conditions group must be between 1 and 10")
         limit = max(1, min(limit, 500))
         offset = max(0, offset)
         clauses: list[str] = []
@@ -133,6 +142,9 @@ class Store:
         if county is not None:
             clauses.append("county_fips = ?")
             parameters.append(county)
+        if community_conditions_group is not None:
+            clauses.append("community_conditions_group = ?")
+            parameters.append(community_conditions_group)
         for column, operator, value in (
             ("population_2020", ">=", min_population),
             ("population_2020", "<=", max_population),
@@ -147,10 +159,15 @@ class Store:
             f"SELECT count(*) FROM {table}{where}", parameters
         ).fetchone()[0]
         null_order = "NULLS LAST"
+        tie_breaker = (
+            "name ASC, place_id ASC"
+            if sort == "community_conditions_group"
+            else "place_id ASC"
+        )
         query = (
             f"SELECT {SUMMARY_COLUMNS} FROM {table}{where} "
             f"ORDER BY {sort_columns[sort]} {direction.upper()} {null_order}, "
-            "place_id ASC LIMIT ? OFFSET ?"
+            f"{tie_breaker} LIMIT ? OFFSET ?"
         )
         cursor = self.connection.execute(query, [*parameters, limit, offset])
         columns = [item[0] for item in cursor.description]
@@ -167,6 +184,7 @@ class Store:
         max_population: int | None = None,
         min_score: float | None = None,
         max_score: float | None = None,
+        community_conditions_group: int | None = None,
         include_unranked: bool = False,
         sort: str = "risk_score",
         direction: str = "asc",
@@ -182,6 +200,7 @@ class Store:
             max_population=max_population,
             min_score=min_score,
             max_score=max_score,
+            community_conditions_group=community_conditions_group,
             include_unranked=include_unranked,
             sort=sort,
             direction=direction,
@@ -197,6 +216,7 @@ class Store:
         state: str | None = None,
         min_score: float | None = None,
         max_score: float | None = None,
+        community_conditions_group: int | None = None,
         include_unranked: bool = False,
         sort: str = "risk_score",
         direction: str = "asc",
@@ -209,6 +229,7 @@ class Store:
             state=state,
             min_score=min_score,
             max_score=max_score,
+            community_conditions_group=community_conditions_group,
             include_unranked=include_unranked,
             sort=sort,
             direction=direction,
@@ -221,7 +242,8 @@ class Store:
         if table is None:
             raise HouseHunterError("Map level must be tract or county")
         rows = self.connection.execute(
-            f"SELECT place_id, risk_score, coverage_status FROM {table} ORDER BY place_id"
+            f"SELECT place_id, risk_score, coverage_status, community_conditions_group "
+            f"FROM {table} ORDER BY place_id"
         ).fetchall()
         return {
             "schema_version": 1,
@@ -229,8 +251,13 @@ class Store:
             "level": level,
             "scope": self.metadata["scope"],
             "rows": [
-                {"place_id": place_id, "risk_score": risk_score, "coverage_status": status}
-                for place_id, risk_score, status in rows
+                {
+                    "place_id": place_id,
+                    "risk_score": risk_score,
+                    "coverage_status": status,
+                    "community_conditions_group": group,
+                }
+                for place_id, risk_score, status, group in rows
             ],
         }
 
@@ -333,7 +360,12 @@ class Store:
         if table not in {"places", "counties"}:
             raise HouseHunterError("Export table must be places or counties")
         destination = output.expanduser().resolve()
-        protected_directories = [self.paths.cache.resolve(), self.paths.builds.resolve()]
+        protected_directories = [
+            self.paths.cache.resolve(),
+            self.paths.raw.resolve(),
+            self.paths.processed.resolve(),
+            self.paths.builds.resolve(),
+        ]
         protected_files = {
             self.paths.current.resolve(),
             self.paths.source_manifest.resolve(),

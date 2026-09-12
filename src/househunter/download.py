@@ -50,7 +50,7 @@ def _request_json(client: httpx.Client, url: str, params: dict[str, Any]) -> dic
             last_error = exc
             if attempt < 3:
                 time.sleep(0.25 * (2**attempt))
-    raise SourceContractError(f"FEMA request failed after retries: {last_error}")
+    raise SourceContractError(f"Source request failed after retries: {last_error}")
 
 
 def _validate_layer(
@@ -648,6 +648,8 @@ def _source_status(
 
 
 def source_statuses(paths: RuntimePaths) -> list[SourceStatus]:
+    from .chrr import source_status as chrr_source_status
+
     return [
         _source_status(
             paths,
@@ -661,4 +663,5 @@ def source_statuses(paths: RuntimePaths) -> list[SourceStatus]:
             cache_name="fema_nri_counties.parquet",
             validate_cache=validate_cached_fema_counties,
         ),
+        chrr_source_status(paths),
     ]

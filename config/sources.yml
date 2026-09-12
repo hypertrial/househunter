@@ -1,4 +1,23 @@
 schema_version: 1
+chrr:
+  name: County Health Rankings & Roadmaps 2025 Community Conditions Health Group
+  layer_url: https://p3eplmys2rvchkjx.svcs.arcgis.com/P3ePLMYs2RVChkJx/arcgis/rest/services/County%20Health%20Rankings%202025/FeatureServer/2
+  item_url: https://www.arcgis.com/home/item.html?id=fed47aeb4d334339a73e20088181e544&sublayer=2
+  terms_url: https://www.countyhealthrankings.org/health-data/methodology-and-sources/data-documentation
+  version: 2025 Annual Data Release
+  release: 2025
+  release_year: 2025
+  layer_last_edit_ms: 1774296641149
+  schema_last_edit_ms: 1774296630690
+  data_last_edit_ms: 1761774323906
+  expected_row_count: 3144
+  fields:
+    fipscode: esriFieldTypeString
+    county: esriFieldTypeString
+    state: esriFieldTypeString
+    CommunityConditions_Group: esriFieldTypeInteger
+  schema_fingerprint: 503000d3f66abcea0a8182c522e7365f7175cc4c39ad7a798c3765d885fdcdf3
+  canonical_sha256: 516e1e1408fe3dbb65273c9de75c67cfd6d5eed15f1ad18a8e91e6c6d54ca3fb
 fema:
   name: FEMA National Risk Index Census Tracts
   item_id: 9da4eeb936544335a6db0cd7a8448a51
