@@ -7,7 +7,7 @@ from typing import Any
 
 import duckdb
 
-from .build import BUILD_SCHEMA_VERSION
+from .build import BUILD_SCHEMA_VERSION, snapshot_artifacts_are_valid
 from .config import RuntimePaths
 from .contracts import COUNTY_METHODOLOGY_NOTICE, METHODOLOGY_NOTICE
 from .errors import AmbiguousPlaceError, BuildNotFoundError, HouseHunterError
@@ -87,7 +87,7 @@ def current_build(paths: RuntimePaths) -> tuple[Path, dict[str, Any]]:
         build / "counties.parquet",
         build / "chrr_county.parquet",
     ]
-    if not build.is_dir() or any(not path.is_file() for path in required):
+    if not build.is_dir() or any(not path.is_file() or path.is_symlink() for path in required):
         raise BuildNotFoundError(f"Published build is incomplete: {build}")
     try:
         metadata = json.loads((build / "build.json").read_text())
@@ -99,6 +99,8 @@ def current_build(paths: RuntimePaths) -> tuple[Path, dict[str, Any]]:
         or metadata.get("build_id") != pointer.get("build_id")
     ):
         raise BuildNotFoundError("Current pointer and build metadata disagree")
+    if not snapshot_artifacts_are_valid(build):
+        raise BuildNotFoundError("Published build artifacts do not match their canonical data")
     return build, metadata
 
 
@@ -432,6 +434,11 @@ class Store:
                 f"COPY (SELECT * FROM {table} ORDER BY place_id) TO ? (HEADER, DELIMITER ',')",
                 [str(destination)],
             )
+        elif format == "json":
+            self.connection.execute(
+                f"COPY (SELECT * FROM {table} ORDER BY place_id) TO ? (FORMAT JSON, ARRAY true)",
+                [str(destination)],
+            )
         else:
-            raise HouseHunterError("Export format must be csv or parquet")
+            raise HouseHunterError("Export format must be csv, json, or parquet")
         return destination

@@ -87,7 +87,7 @@ househunter build [--state CO]
 househunter rank [--state CO] [--county STCOFIPS] [--level tract|county] [--metric risk|community-conditions|mountain] [--mountain-min 0..100] [--order best|worst] [--limit N] [--include-unranked]
 househunter inspect TRACT_FIPS|COUNTY_FIPS
 househunter lookup "1670 Broadway, Denver, CO" [--allow-approximate]
-househunter export --format parquet|csv [--level tract|county] [--output PATH]
+househunter export --format parquet|csv|json [--level tract|county] [--output PATH]
 househunter app [--port PORT] [--no-open]
 ```
 

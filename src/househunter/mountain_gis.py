@@ -40,7 +40,6 @@ TILE_SIZE_M = 100_000.0
 HALO_M = 100_000.0
 SOURCE_LOCK_SCHEMA_VERSION = 2
 SOURCE_DOWNLOAD_MAX_BYTES = 50_000_000_000
-SOURCE_DOWNLOAD_MIN_FREE_BYTES = 10_000_000_000
 
 
 @dataclass(frozen=True)
@@ -842,11 +841,36 @@ def verify_region_sources_locked(
                 )
 
 
+def _source_download_reservation(lock: dict[str, Any], destination: Path) -> int:
+    reserve_bytes = 0
+    for source in lock["sources"]:
+        target = _source_path(source, destination)
+        try:
+            valid = (
+                target.is_file()
+                and not target.is_symlink()
+                and target.stat().st_size == int(source["size"])
+                and sha256_file(target) == source["sha256"]
+            )
+        except OSError:
+            valid = False
+        archive = source.get("archive")
+        extract_bytes = (
+            int(archive.get("total_uncompressed_size", 0))
+            if isinstance(archive, dict)
+            and not (destination / str(archive.get("root", "missing"))).exists()
+            else 0
+        )
+        reserve_bytes += extract_bytes + (0 if valid else int(source["size"]))
+    return reserve_bytes
+
+
 def download_sources(
     lock_path: Path,
     destination: Path,
     *,
     client: httpx.Client | None = None,
+    managed_root: Path | None = None,
 ) -> Path:
     """Download exactly locked source files and publish each only after verification."""
     try:
@@ -866,8 +890,12 @@ def download_sources(
     if projected_bytes > SOURCE_DOWNLOAD_MAX_BYTES:
         raise HouseHunterError("Mountain locked downloads exceed the 50 GB managed-data cap")
     destination.mkdir(parents=True, exist_ok=True)
-    if shutil.disk_usage(destination).free - projected_bytes < SOURCE_DOWNLOAD_MIN_FREE_BYTES:
-        raise HouseHunterError("Mountain downloads would consume the 10 GB free-space reserve")
+    if managed_root is not None:
+        from .mountain_pack import ensure_storage_budget
+
+        ensure_storage_budget(
+            managed_root, reserve_bytes=_source_download_reservation(lock, destination)
+        )
     owns_client = client is None
     http = client or httpx.Client(
         timeout=httpx.Timeout(120, connect=30), follow_redirects=False, trust_env=False

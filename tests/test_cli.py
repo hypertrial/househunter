@@ -186,6 +186,27 @@ def test_cli_build_rank_inspect_export_and_sources(
     assert "community_conditions_geography" in header
     assert "chrr_release_year" in header
 
+    for level, expected_id in (("tract", "01001000100"), ("county", "01001")):
+        json_output = tmp_path / f"{level}.json"
+        exported = runner.invoke(
+            app,
+            [
+                "export",
+                "--format",
+                "json",
+                "--level",
+                level,
+                "--output",
+                str(json_output),
+            ],
+        )
+        assert exported.exit_code == 0, exported.output
+        rows = json.loads(json_output.read_text())
+        assert rows[0]["place_id"] == expected_id
+        assert "community_conditions_group" in rows[0]
+        assert rows[0]["community_conditions_geography"] == "county"
+        assert rows[0]["chrr_release_year"] == 2025
+
     sources = runner.invoke(app, ["sources", "--json"])
     assert sources.exit_code == 0
     source_status = json.loads(sources.output)

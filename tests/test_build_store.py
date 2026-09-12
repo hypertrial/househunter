@@ -8,9 +8,13 @@ import polars as pl
 import pytest
 import yaml
 
-from househunter.build import BUILD_SCHEMA_VERSION, build_snapshot
+from househunter.build import (
+    BUILD_SCHEMA_VERSION,
+    _cached_snapshot_artifacts_valid,
+    build_snapshot,
+)
 from househunter.config import RuntimePaths
-from househunter.errors import HouseHunterError
+from househunter.errors import BuildNotFoundError, HouseHunterError
 from househunter.geography import STATE_BY_FIPS
 from househunter.mountain import (
     IN_SCOPE_STATES,
@@ -265,6 +269,76 @@ def test_existing_build_rejects_a_corrupt_database(
         build_snapshot(paths)
 
 
+def test_build_and_store_reject_same_count_database_mutation(
+    fixture_environment: tuple[RuntimePaths, object],
+) -> None:
+    paths, _ = fixture_environment
+    output = build_snapshot(paths)
+    connection = duckdb.connect(str(output / "househunter.duckdb"))
+    try:
+        connection.execute(
+            "UPDATE places SET risk_score = 0 "
+            "WHERE place_id = (SELECT min(place_id) FROM places)"
+        )
+    finally:
+        connection.close()
+    (output / "househunter.duckdb.sha256").write_text("refreshed-but-untrusted\n")
+    with pytest.raises(HouseHunterError, match="immutable build failed validation"):
+        build_snapshot(paths)
+    with pytest.raises(BuildNotFoundError, match="canonical data"):
+        Store(paths)
+
+
+def test_store_caches_validation_until_an_artifact_changes(
+    fixture_environment: tuple[RuntimePaths, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import househunter.build as build_module
+
+    paths, _ = fixture_environment
+    output = build_snapshot(paths)
+    _cached_snapshot_artifacts_valid.cache_clear()
+    validations = 0
+    original = build_module._validate_snapshot_artifacts
+
+    def counted(target: Path) -> bool:
+        nonlocal validations
+        validations += 1
+        return original(target)
+
+    monkeypatch.setattr(build_module, "_validate_snapshot_artifacts", counted)
+    with Store(paths), Store(paths):
+        pass
+    assert validations == 1
+
+    connection = duckdb.connect(str(output / "househunter.duckdb"))
+    try:
+        connection.execute(
+            "UPDATE places SET risk_score = 0 "
+            "WHERE place_id = (SELECT min(place_id) FROM places)"
+        )
+    finally:
+        connection.close()
+    with pytest.raises(BuildNotFoundError, match="canonical data"):
+        Store(paths)
+    assert validations == 2
+
+
+def test_build_and_store_reject_symlinked_database(
+    fixture_environment: tuple[RuntimePaths, object],
+) -> None:
+    paths, _ = fixture_environment
+    output = build_snapshot(paths)
+    database = output / "househunter.duckdb"
+    outside = paths.data.parent / "outside.duckdb"
+    database.replace(outside)
+    database.symlink_to(outside)
+
+    with pytest.raises(HouseHunterError, match="immutable build failed validation"):
+        build_snapshot(paths)
+    with pytest.raises(BuildNotFoundError, match="incomplete|unsafe"):
+        Store(paths)
+
+
 def test_export_cannot_overwrite_managed_data(
     fixture_environment: tuple[RuntimePaths, object],
 ) -> None:
@@ -277,7 +351,7 @@ def test_export_cannot_overwrite_managed_data(
     assert protected.read_bytes() == before
 
 
-@pytest.mark.parametrize("schema_version", [2, 3, 4])
+@pytest.mark.parametrize("schema_version", [2, 3, 4, BUILD_SCHEMA_VERSION - 1])
 def test_legacy_build_schema_is_not_reused(
     fixture_environment: tuple[RuntimePaths, object],
     schema_version: int,
@@ -302,14 +376,13 @@ def test_community_conditions_sort_is_deterministic_and_nulls_last(
     fixture_environment: tuple[RuntimePaths, object],
 ) -> None:
     paths, _ = fixture_environment
-    output = build_snapshot(paths)
-    connection = duckdb.connect(str(output / "househunter.duckdb"))
-    try:
-        connection.execute(
-            "UPDATE counties SET community_conditions_group = NULL WHERE place_id = '02001'"
-        )
-    finally:
-        connection.close()
+    raw = paths.raw / "chrr" / "community_conditions_2025.json"
+    payload = json.loads(raw.read_text())
+    for row in payload["rows"]:
+        if row["fipscode"] == "02001":
+            row["CommunityConditions_Group"] = None
+    raw.write_text(json.dumps(payload) + "\n")
+    build_snapshot(paths)
     with Store(paths) as store:
         ascending = store.list_counties(
             sort="community_conditions_group", direction="asc", include_unranked=True

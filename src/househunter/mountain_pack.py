@@ -24,7 +24,7 @@ import shapely
 from .config import canonical_json, sha256_bytes, sha256_file
 from .errors import HouseHunterError
 from .geography import STATE_BY_FIPS
-from .mountain import PIPELINE_VERSION
+from .mountain import COMPACT_RELEASE_MAX_BYTES, FULL_RELEASE_MAX_BYTES, PIPELINE_VERSION
 from .mountain_gis import (
     CELL_SIZE_M,
     HALO_M,
@@ -91,6 +91,19 @@ def ensure_storage_budget(managed_root: Path, *, reserve_bytes: int = 0) -> None
         raise HouseHunterError(
             f"Mountain work must preserve {MIN_FREE_BYTES:,} bytes of unrelated free space"
         )
+
+
+def _remaining_preparation_reservation(projected_bytes: int, work: Path) -> int:
+    return max(0, projected_bytes - allocated_size(work))
+
+
+def prepared_build_reservation(work: Path) -> int:
+    """Return the aggregate remaining allocation for a promoted prepared build."""
+    return (
+        max(0, WORK_MAX_BYTES - allocated_size(work))
+        + FULL_RELEASE_MAX_BYTES
+        + COMPACT_RELEASE_MAX_BYTES
+    )
 
 
 def block_geoid_sha256(frame: pl.DataFrame) -> str:
@@ -230,6 +243,7 @@ def prepare_regions(
     cell_size_m: float = CELL_SIZE_M,
     tile_size_m: float = TILE_SIZE_M,
     maximum_bytes: int = PREPARED_PACK_MAX_BYTES,
+    managed_root: Path | None = None,
 ) -> tuple[Path, Path]:
     """Create one immutable, content-addressed pack from the exact serial tile inputs."""
     if cell_size_m <= 0 or tile_size_m <= 0:
@@ -297,6 +311,14 @@ def prepare_regions(
         )
         _write_json(temporary / "run.json", preparation_run)
         (temporary / "tiles").mkdir()
+    if managed_root is not None:
+        projection = source_lock.get("storage_projection")
+        if not isinstance(projection, dict):
+            raise HouseHunterError("Mountain source lock lacks a storage projection")
+        remaining = _remaining_preparation_reservation(
+            int(projection["prepared_pack_bytes"]), temporary
+        )
+        ensure_storage_budget(managed_root, reserve_bytes=remaining)
     tile_root = temporary / "tiles"
     tile_entries, block_frames = _resumable_tiles(temporary, cell_size_m=cell_size_m)
     try:

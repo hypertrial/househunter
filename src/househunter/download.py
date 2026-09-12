@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import tempfile
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -16,6 +17,7 @@ from .config import RuntimePaths, canonical_json, load_config, sha256_bytes, sha
 from .contracts import SourceStatus
 from .errors import SourceContractError
 from .hazards import (
+    FEMA_HAZARD_FIELDS,
     HAZARD_COLUMNS,
     county_out_fields,
     hazard_fields_from_cached_row,
@@ -28,6 +30,14 @@ from .hazards import (
 
 Progress = Callable[[int, str], None]
 Cancelled = Callable[[], bool]
+
+
+def _validate_raw_percentiles(rows: list[dict[str, Any]]) -> None:
+    for row in rows:
+        for field in ("ALR_NPCTL", *FEMA_HAZARD_FIELDS):
+            value = row.get(field)
+            if value is not None and type(value) not in {int, float}:
+                raise SourceContractError(f"FEMA {field} must be a JSON number or null")
 
 
 def _schema_fingerprint(fields: dict[str, str]) -> str:
@@ -117,6 +127,7 @@ def _reject_invalid_hazards(frame: pl.DataFrame) -> None:
 def _validate_rows(rows: list[dict[str, Any]], source: dict[str, Any]) -> pl.DataFrame:
     if any(not isinstance(row, dict) for row in rows):
         raise SourceContractError("FEMA returned a malformed data row")
+    _validate_raw_percentiles(rows)
     normalized = [
         {
             "tract_id": str(row.get("TRACTFIPS", "")),
@@ -160,6 +171,7 @@ def _validate_rows(rows: list[dict[str, Any]], source: dict[str, Any]) -> pl.Dat
 def _validate_county_rows(rows: list[dict[str, Any]], source: dict[str, Any]) -> pl.DataFrame:
     if any(not isinstance(row, dict) for row in rows):
         raise SourceContractError("FEMA returned a malformed data row")
+    _validate_raw_percentiles(rows)
     normalized = [
         {
             "county_fips": str(row.get("STCOFIPS", "")),
@@ -231,6 +243,16 @@ def _logical_county_rows(frame: pl.DataFrame) -> list[list[Any]]:
 def page_cache_dir(paths: RuntimePaths, pages_name: str, source: dict[str, Any]) -> Path:
     fingerprint = str(source["schema_fingerprint"])[:16]
     return paths.cache / f"{pages_name}-{source['item_modified_ms']}-{fingerprint}"
+
+
+def _ensure_page_cache_directory(path: Path) -> Path:
+    target = Path(os.path.abspath(path))
+    if any(component.is_symlink() for component in (target, *target.parents)):
+        raise SourceContractError("FEMA page cache path cannot contain a symlink")
+    target.mkdir(parents=True, exist_ok=True)
+    if target.is_symlink() or not target.is_dir():
+        raise SourceContractError("FEMA page cache path is not a safe directory")
+    return target
 
 
 def validate_cached_fema(path: Path, source: dict[str, Any]) -> tuple[pl.DataFrame, str]:
@@ -409,7 +431,10 @@ def _fetch_layer_rows(
     progress: Progress | None,
     cancelled: Cancelled | None,
     noun: str,
+    resume: bool = True,
 ) -> list[dict[str, Any]]:
+    pages = _ensure_page_cache_directory(pages)
+    required_fields = set(source["fields"])
     page_size = max(1, _validate_layer(http, source))
     rows: list[dict[str, Any]] = []
     offset = 0
@@ -418,17 +443,29 @@ def _fetch_layer_rows(
         if cancelled and cancelled():
             raise InterruptedError("FEMA download cancelled")
         page_path = pages / f"{offset:06d}.json"
-        if page_path.is_file():
+        page_rows: list[dict[str, Any]] | None = None
+        if resume and page_path.is_symlink():
+            page_path.unlink()
+        if resume and page_path.is_file():
             try:
                 payload = json.loads(page_path.read_text())
-            except (OSError, json.JSONDecodeError) as exc:
-                raise SourceContractError(f"Cached FEMA page is invalid: {page_path}") from exc
-            if not isinstance(payload, dict):
-                raise SourceContractError(f"Cached FEMA page is invalid: {page_path}")
-            page_rows = payload.get("features", [])
-            if not isinstance(page_rows, list):
-                raise SourceContractError(f"Cached FEMA page is invalid: {page_path}")
-        else:
+                cached_rows = payload.get("features") if isinstance(payload, dict) else None
+                if not isinstance(cached_rows, list) or any(
+                    not isinstance(row, dict) or not required_fields.issubset(row)
+                    for row in cached_rows
+                ):
+                    raise ValueError("malformed cached feature page")
+                page_source = {**source, "expected_row_count": len(cached_rows)}
+                if order_by == "TRACTFIPS":
+                    _validate_rows(cached_rows, page_source)
+                elif order_by == "STCOFIPS":
+                    _validate_county_rows(cached_rows, page_source)
+                else:
+                    raise ValueError(f"unsupported FEMA cache ordering: {order_by}")
+                page_rows = cached_rows
+            except (OSError, json.JSONDecodeError, SourceContractError, ValueError):
+                page_path.unlink(missing_ok=True)
+        if page_rows is None:
             payload = _request_json(
                 http,
                 f"{source['layer_url']}/query",
@@ -450,9 +487,17 @@ def _fetch_layer_rows(
                 raise SourceContractError("FEMA returned a malformed feature page")
             attributes = [feature["attributes"] for feature in features]
             canonical_page = canonical_json({"features": attributes})
-            temporary_page = page_path.with_suffix(".json.tmp")
-            temporary_page.write_bytes(canonical_page)
-            os.replace(temporary_page, page_path)
+            descriptor, temporary_name = tempfile.mkstemp(
+                dir=pages, prefix=f".{page_path.name}.", suffix=".tmp"
+            )
+            temporary_page = Path(temporary_name)
+            try:
+                with os.fdopen(descriptor, "wb") as output:
+                    output.write(canonical_page)
+                os.replace(temporary_page, page_path)
+            except BaseException:
+                temporary_page.unlink(missing_ok=True)
+                raise
             page_rows = attributes
         if not page_rows:
             break
@@ -529,6 +574,7 @@ def _download_source(
             progress=progress,
             cancelled=cancelled,
             noun=noun,
+            resume=not force,
         )
         frame = validate_rows(rows, source)
         logical_sha = logical_sha_for(frame)

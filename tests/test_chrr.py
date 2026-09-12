@@ -405,6 +405,18 @@ def test_chrr_contract_rejects_non_integer_groups(value: object) -> None:
         validate_rows(rows, _source(1))
 
 
+@pytest.mark.parametrize(
+    "field,value", [("fipscode", 10001), ("state", 1), ("county", None)]
+)
+def test_chrr_contract_rejects_coercible_required_field_types(
+    field: str, value: object
+) -> None:
+    rows = [{**_rows()[0], field: value}]
+
+    with pytest.raises(SourceContractError, match="must be strings"):
+        validate_rows(rows, _source(1))
+
+
 def test_cached_chrr_rejects_coercible_group_before_checksum(tmp_path: Path) -> None:
     valid = [{**_rows()[0], "CommunityConditions_Group": 5}]
     source = _source(1)
@@ -416,6 +428,36 @@ def test_cached_chrr_rejects_coercible_group_before_checksum(tmp_path: Path) -> 
 
     with pytest.raises(SourceContractError, match="must be integers or null"):
         validate_cached_chrr(cache, source)
+
+
+def test_managed_chrr_generation_identity_is_verified_and_refreshed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _source()
+    config_path = tmp_path / "sources.yml"
+    config_path.write_text(yaml.safe_dump({"schema_version": 1, "chrr": source}))
+    monkeypatch.setenv("HOUSEHUNTER_CONFIG", str(config_path))
+    paths = RuntimePaths.from_root(tmp_path)
+    query_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal query_calls
+        if request.url.path.endswith("query"):
+            query_calls += 1
+        return _stable_handler(source).handle_request(request)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        original = download_chrr(paths, client=client)
+        first_query_calls = query_calls
+        metadata_path = raw_paths(paths)[1]
+        metadata = json.loads(metadata_path.read_text())
+        metadata["downloaded_at"] = "2000-01-01T00:00:00+00:00"
+        metadata_path.write_text(json.dumps(metadata, sort_keys=True) + "\n")
+        refreshed = download_chrr(paths, client=client)
+
+    assert query_calls > first_query_calls
+    assert refreshed != original
+    validate_cached_chrr(refreshed, source)
 
 
 def test_processed_chrr_has_stable_six_column_contract(

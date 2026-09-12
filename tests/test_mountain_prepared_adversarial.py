@@ -26,15 +26,36 @@ from househunter.mountain_gis import (
     iter_region_tiles,
 )
 from househunter.mountain_pack import (
+    _remaining_preparation_reservation,
     allocated_size,
     build_prepared_raw_metrics,
     ensure_storage_budget,
     prepare_regions,
+    prepared_build_reservation,
     prune_owned_prepared_packs,
     remove_owned_staging_directory,
     remove_owned_work_directory,
     verify_prepared_pack,
 )
+
+
+def test_preparation_reservation_counts_only_remaining_allocation(tmp_path: Path) -> None:
+    work = tmp_path / ".resume.work"
+    work.mkdir()
+    (work / "completed.parquet").write_bytes(b"complete")
+    allocated = allocated_size(work)
+    assert _remaining_preparation_reservation(allocated + 123, work) == 123
+    assert _remaining_preparation_reservation(allocated, work) == 0
+
+
+def test_promoted_prepared_build_reserves_remaining_work_release_and_compact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "househunter.mountain_pack.allocated_size", lambda path: 3_000_000_000
+    )
+
+    assert prepared_build_reservation(tmp_path / "work") == 5_052_428_800
 
 
 def test_allocated_size_tolerates_worker_file_atomic_rename(

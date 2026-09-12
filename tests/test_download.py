@@ -10,6 +10,7 @@ import yaml
 
 from househunter.config import RuntimePaths
 from househunter.download import (
+    _fetch_layer_rows,
     _request_json,
     _schema_fingerprint,
     _validate_county_rows,
@@ -363,6 +364,272 @@ def test_fema_contract_allows_null_hazard_percentiles() -> None:
     )
     assert frame["alr_npctl_tsun"].to_list() == [None, None]
     assert frame["alr_npctl_wfir"].to_list() == [None, 12.5]
+
+
+@pytest.mark.parametrize("validator,id_field,id_value", [
+    (_validate_rows, "TRACTFIPS", "01001000100"),
+    (_validate_county_rows, "STCOFIPS", "01001"),
+])
+@pytest.mark.parametrize("field", ["ALR_NPCTL", "WFIR_ALR_NPCTL"])
+@pytest.mark.parametrize("value", ["5.0", True, False])
+def test_fema_contract_rejects_coercible_percentile_types(
+    validator, id_field: str, id_value: str, field: str, value: object
+) -> None:  # type: ignore[no-untyped-def]
+    row = {
+        id_field: id_value,
+        "COUNTY": "Autauga",
+        "COUNTYTYPE": "County",
+        "STATEABBRV": "AL",
+        "ALR_NPCTL": 5.0,
+        "NRI_VER": "December 2025",
+        field: value,
+    }
+    with pytest.raises(SourceContractError, match=f"FEMA {field} must be"):
+        validator([row], {"expected_row_count": 1, "version": "December 2025"})
+
+
+@pytest.mark.parametrize(
+    "cached_page",
+    [
+        "not-json",
+        json.dumps({"features": [{"attributes": {
+            "TRACTFIPS": "01001000100",
+            "ALR_NPCTL": 5.0,
+            "NRI_VER": "December 2025",
+        }}]}),
+        json.dumps({"features": [{
+            "TRACTFIPS": "01001000100",
+            "ALR_NPCTL": "5.0",
+            "NRI_VER": "December 2025",
+        }]}),
+    ],
+)
+def test_corrupt_page_cache_is_refetched_once(tmp_path: Path, cached_page: str) -> None:
+    fields = {
+        "TRACTFIPS": "esriFieldTypeString",
+        "ALR_NPCTL": "esriFieldTypeDouble",
+        "NRI_VER": "esriFieldTypeString",
+    }
+    source = {
+        "item_id": "fixture",
+        "layer_url": "https://example.test/layer/0",
+        "item_modified_ms": 10,
+        "data_last_edit_ms": 20,
+        "layer_last_edit_ms": 30,
+        "expected_row_count": 1,
+        "version": "December 2025",
+        "fields": fields,
+        "schema_fingerprint": _schema_fingerprint(fields),
+    }
+    (tmp_path / "000000.json").write_text(cached_page)
+    query_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal query_calls
+        if "/sharing/" in request.url.path:
+            return httpx.Response(200, json={"modified": 10})
+        if request.url.path.endswith("query"):
+            query_calls += 1
+            return httpx.Response(200, json={"features": [{"attributes": {
+                "TRACTFIPS": "01001000100",
+                "ALR_NPCTL": 5.0,
+                "NRI_VER": "December 2025",
+            }}]})
+        return httpx.Response(200, json={
+            "maxRecordCount": 1,
+            "geometryType": "esriGeometryPolygon",
+            "editingInfo": {"lastEditDate": 30, "dataLastEditDate": 20},
+            "fields": [
+                {"name": name, "type": field_type} for name, field_type in fields.items()
+            ],
+        })
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        rows = _fetch_layer_rows(
+            client, source, out_fields=",".join(fields), order_by="TRACTFIPS",
+            pages=tmp_path, progress=None, cancelled=None, noun="tracts",
+        )
+    assert rows == [{
+        "TRACTFIPS": "01001000100",
+        "ALR_NPCTL": 5.0,
+        "NRI_VER": "December 2025",
+    }]
+    assert query_calls == 1
+    assert json.loads((tmp_path / "000000.json").read_text())["features"] == rows
+
+
+def test_symlinked_page_cache_is_ignored_and_replaced(tmp_path: Path) -> None:
+    fields = {"TRACTFIPS": "esriFieldTypeString"}
+    source = {
+        "item_id": "fixture",
+        "layer_url": "https://example.test/layer/0",
+        "item_modified_ms": 10,
+        "data_last_edit_ms": 20,
+        "layer_last_edit_ms": 30,
+        "expected_row_count": 1,
+        "fields": fields,
+        "schema_fingerprint": _schema_fingerprint(fields),
+    }
+    outside = tmp_path / "outside.json"
+    outside.write_text(json.dumps({"features": [{"TRACTFIPS": "stale"}]}))
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    page = pages / "000000.json"
+    page.symlink_to(outside)
+    query_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal query_calls
+        if "/sharing/" in request.url.path:
+            return httpx.Response(200, json={"modified": 10})
+        if request.url.path.endswith("query"):
+            query_calls += 1
+            return httpx.Response(
+                200,
+                json={"features": [{"attributes": {"TRACTFIPS": "01001000100"}}]},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "maxRecordCount": 1,
+                "geometryType": "esriGeometryPolygon",
+                "editingInfo": {"lastEditDate": 30, "dataLastEditDate": 20},
+                "fields": [{"name": "TRACTFIPS", "type": "esriFieldTypeString"}],
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        rows = _fetch_layer_rows(
+            client,
+            source,
+            out_fields="TRACTFIPS",
+            order_by="TRACTFIPS",
+            pages=pages,
+            progress=None,
+            cancelled=None,
+            noun="tracts",
+        )
+
+    assert rows == [{"TRACTFIPS": "01001000100"}]
+    assert query_calls == 1
+    assert page.is_file() and not page.is_symlink()
+    assert json.loads(page.read_text())["features"] == rows
+    assert json.loads(outside.read_text())["features"] == [{"TRACTFIPS": "stale"}]
+
+
+def test_symlinked_page_cache_directory_is_rejected(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    pages = tmp_path / "pages"
+    pages.symlink_to(outside, target_is_directory=True)
+    with (
+        httpx.Client() as client,
+        pytest.raises(SourceContractError, match="cannot contain a symlink"),
+    ):
+        _fetch_layer_rows(
+            client, {}, out_fields="x", order_by="x", pages=pages,
+            progress=None, cancelled=None, noun="rows",
+        )
+    assert list(outside.iterdir()) == []
+
+
+def test_page_cache_write_does_not_follow_predictable_temporary_symlink(
+    tmp_path: Path,
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    outside = tmp_path / "outside.json"
+    outside.write_text("preserve")
+    (pages / "000000.json.tmp").symlink_to(outside)
+    fields = {"TRACTFIPS": "esriFieldTypeString"}
+    source = {
+        "item_id": "fixture",
+        "layer_url": "https://example.test/layer/0",
+        "item_modified_ms": 10,
+        "data_last_edit_ms": 20,
+        "layer_last_edit_ms": 30,
+        "expected_row_count": 1,
+        "fields": fields,
+        "schema_fingerprint": _schema_fingerprint(fields),
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/sharing/" in request.url.path:
+            return httpx.Response(200, json={"modified": 10})
+        if request.url.path.endswith("query"):
+            return httpx.Response(
+                200, json={"features": [{"attributes": {"TRACTFIPS": "01001000100"}}]}
+            )
+        return httpx.Response(
+            200,
+            json={
+                "maxRecordCount": 1,
+                "geometryType": "esriGeometryPolygon",
+                "editingInfo": {"lastEditDate": 30, "dataLastEditDate": 20},
+                "fields": [{"name": "TRACTFIPS", "type": "esriFieldTypeString"}],
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        rows = _fetch_layer_rows(
+            client,
+            source,
+            out_fields="TRACTFIPS",
+            order_by="TRACTFIPS",
+            pages=pages,
+            progress=None,
+            cancelled=None,
+            noun="tracts",
+        )
+
+    assert rows == [{"TRACTFIPS": "01001000100"}]
+    assert outside.read_text() == "preserve"
+
+
+def test_force_download_bypasses_valid_page_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fields = {
+        "TRACTFIPS": "esriFieldTypeString",
+        "ALR_NPCTL": "esriFieldTypeDouble",
+        "NRI_VER": "esriFieldTypeString",
+    }
+    source = {
+        "item_id": "fixture", "layer_url": "https://example.test/layer/0",
+        "item_url": "https://example.test/item", "terms_url": "https://example.test/terms",
+        "version": "December 2025", "release": "v1.20", "item_modified_ms": 10,
+        "data_last_edit_ms": 20, "layer_last_edit_ms": 30, "expected_row_count": 1,
+        "fields": fields, "schema_fingerprint": _schema_fingerprint(fields),
+        "canonical_sha256": None,
+    }
+    config_path = tmp_path / "sources.yml"
+    config_path.write_text(yaml.safe_dump({"schema_version": 1, "fema": source}))
+    monkeypatch.setenv("HOUSEHUNTER_CONFIG", str(config_path))
+    paths = RuntimePaths.from_root(tmp_path)
+    pages = page_cache_dir(paths, "fema-pages", source)
+    pages.mkdir(parents=True)
+    stale = {"TRACTFIPS": "01001000100", "ALR_NPCTL": 1.0, "NRI_VER": "December 2025"}
+    (pages / "000000.json").write_text(json.dumps({"features": [stale]}))
+    query_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal query_calls
+        if "/sharing/" in request.url.path:
+            return httpx.Response(200, json={"modified": 10})
+        if request.url.path.endswith("query"):
+            query_calls += 1
+            fresh = {**stale, "ALR_NPCTL": 2.0}
+            return httpx.Response(200, json={"features": [{"attributes": fresh}]})
+        return httpx.Response(200, json={
+            "maxRecordCount": 1, "geometryType": "esriGeometryPolygon",
+            "editingInfo": {"lastEditDate": 30, "dataLastEditDate": 20},
+            "fields": [{"name": name, "type": kind} for name, kind in fields.items()],
+        })
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        output = download_fema(paths, client=client, force=True)
+    assert query_calls == 1
+    assert pl.read_parquet(output)["alr_npctl"].item() == 2.0
 
 
 def test_cached_fema_rejects_missing_columns(tmp_path: Path) -> None:

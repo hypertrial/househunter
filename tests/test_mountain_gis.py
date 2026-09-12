@@ -7,6 +7,7 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
+import httpx
 import numpy as np
 import polars as pl
 import pytest
@@ -24,6 +25,7 @@ from househunter.mountain_gis import (
     RegionSources,
     _raw_metrics_from_tile,
     _read_geometries,
+    _source_download_reservation,
     _validate_source_lock_contract,
     _verify_gis_dataset,
     build_region_raw_metrics,
@@ -50,6 +52,70 @@ def _geojson(path: Path, geometry: dict, properties: dict) -> None:
             }
         )
     )
+
+
+def test_download_reservation_checks_hash_and_remaining_extraction(tmp_path: Path) -> None:
+    destination = tmp_path / "downloads"
+    destination.mkdir()
+    target = destination / "source.bin"
+    expected = b"expected"
+    source = {
+        "filename": target.name,
+        "size": len(expected),
+        "sha256": hashlib.sha256(expected).hexdigest(),
+        "archive": {"root": "expanded", "total_uncompressed_size": 20},
+    }
+    lock = {"sources": [source]}
+
+    target.write_bytes(b"corrupt!")
+    assert _source_download_reservation(lock, destination) == len(expected) + 20
+
+    target.write_bytes(expected)
+    assert _source_download_reservation(lock, destination) == 20
+
+    (destination / "expanded").mkdir()
+    assert _source_download_reservation(lock, destination) == 0
+
+
+def test_download_rejects_matching_symlink_without_reading_or_overwriting_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    content = b"pinned"
+    destination = tmp_path / "downloads"
+    destination.mkdir()
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(content)
+    target = destination / "source.bin"
+    target.symlink_to(outside)
+    source = {
+        "filename": target.name,
+        "size": len(content),
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "url": "https://example.test/source.bin",
+    }
+    lock_path = tmp_path / "lock.json"
+    lock_path.write_text(json.dumps({"schema_version": 2, "sources": [source]}))
+    requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(200, content=content)
+
+    monkeypatch.setattr(
+        "househunter.mountain_gis._validate_source_lock_contract",
+        lambda lock: {"example.test"},
+    )
+    monkeypatch.setattr("househunter.mountain_gis.verify_source_lock", lambda *args, **kwargs: {})
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(HouseHunterError, match="symlink"),
+    ):
+        download_sources(lock_path, destination, client=client)
+
+    assert requests == 0
+    assert target.is_symlink()
+    assert outside.read_bytes() == content
 
 
 def test_source_lock_rejects_changed_bytes(tmp_path: Path) -> None:

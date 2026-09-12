@@ -5,6 +5,7 @@ import json
 import numpy as np
 import polars as pl
 import pytest
+from fastapi.responses import JSONResponse
 from typer.testing import CliRunner
 
 from househunter.cli import app
@@ -243,6 +244,17 @@ def test_aggregate_scores_uses_population_and_coverage_statuses() -> None:
     assert alaska["mountain_score"] == 40.0
 
 
+@pytest.mark.parametrize("geography", ["tract_geoid", "county_fips"])
+def test_aggregate_scores_returns_null_for_field_without_population(geography: str) -> None:
+    scored = score_blocks(_raw_blocks()).with_columns(
+        pl.lit(None, dtype=pl.Float64).alias("nearest_mountain_trail_km")
+    )
+    aggregates = aggregate_scores(scored, geography)
+    assert aggregates["nearest_mountain_trail_km"].null_count() == aggregates.height
+    response = JSONResponse(aggregates.to_dicts())
+    assert json.loads(response.body)[0]["nearest_mountain_trail_km"] is None
+
+
 def test_release_is_deterministic_validated_and_compact(tmp_path) -> None:
     first = write_release(_raw_blocks(), tmp_path / "one", data_release="fixture", sources={})
     second = write_release(_raw_blocks(), tmp_path / "two", data_release="fixture", sources={})
@@ -351,7 +363,9 @@ def test_release_rejects_out_of_range_block_values(
         validate_release(release)
 
 
-def test_promotion_is_atomic_and_content_addressed(tmp_path) -> None:
+def test_promotion_is_atomic_and_content_addressed(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from househunter.config import RuntimePaths
 
     paths = RuntimePaths.from_root(tmp_path)
@@ -363,6 +377,11 @@ def test_promotion_is_atomic_and_content_addressed(tmp_path) -> None:
         sources=_source_provenance(),
         national_expectations=_national_expectations(blocks),
     )
+    reservations: list[int] = []
+    monkeypatch.setattr(
+        "househunter.mountain_pack.ensure_storage_budget",
+        lambda root, *, reserve_bytes=0: reservations.append(reserve_bytes),
+    )
     promoted = promote_release(
         paths,
         candidate,
@@ -372,6 +391,7 @@ def test_promotion_is_atomic_and_content_addressed(tmp_path) -> None:
     )
     pointer = json.loads((paths.data / "mountain" / "current.json").read_text())
 
+    assert reservations and reservations[0] > 0
     assert promoted.name == pointer["release_id"]
     assert (
         promote_release(
@@ -519,6 +539,32 @@ def test_generated_promotion_retains_current_and_one_rollback(tmp_path) -> None:
     assert releases[1].is_dir() and releases[2].is_dir()
 
 
+def test_generated_release_is_rejected_before_exceeding_storage_ceiling(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from househunter.config import RuntimePaths
+
+    paths = RuntimePaths.from_root(tmp_path)
+    monkeypatch.setattr(
+        "househunter.mountain_pack.allocated_size", lambda path: 42_000_000_000
+    )
+    monkeypatch.setattr(
+        "househunter.mountain_pack.shutil.disk_usage",
+        lambda path: type("Usage", (), {"free": 100_000_000_000})(),
+    )
+
+    with pytest.raises(HouseHunterError, match="engineering ceiling"):
+        write_and_promote_release(
+            paths,
+            _national_blocks(),
+            data_release="fixture",
+            sources=_source_provenance(),
+            national_expectations=_national_expectations(_national_blocks()),
+        )
+
+    assert not (paths.data / "mountain" / "releases").exists()
+
+
 def test_runtime_uses_validated_bundled_fallback_without_pointer(tmp_path) -> None:
     from househunter.config import RuntimePaths
 
@@ -540,7 +586,9 @@ def test_runtime_uses_validated_bundled_fallback_without_pointer(tmp_path) -> No
     assert loaded[1]["release_id"] == validate_release(release)["release_id"]
 
 
-def test_managed_compact_fallback_is_atomic_queryable_and_pruned(tmp_path) -> None:
+def test_managed_compact_fallback_is_atomic_queryable_and_pruned(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from househunter.config import RuntimePaths
 
     paths = RuntimePaths.from_root(tmp_path / "runtime")
@@ -553,12 +601,18 @@ def test_managed_compact_fallback_is_atomic_queryable_and_pruned(tmp_path) -> No
         national_expectations=_national_expectations(blocks),
     )
     first_manifest = validate_release(first_release)
+    reservations: list[int] = []
+    monkeypatch.setattr(
+        "househunter.mountain_pack.ensure_storage_budget",
+        lambda root, *, reserve_bytes=0: reservations.append(reserve_bytes),
+    )
     first = write_and_promote_compact_fallback(paths, first_release, first_manifest)
 
     loaded = current_compact_release(paths)
     assert loaded is not None
     assert loaded[0] == first
     assert loaded[1]["release_id"] == first_manifest["release_id"]
+    assert reservations and reservations[0] > 0
 
     second_release = write_release(
         blocks,

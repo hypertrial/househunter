@@ -77,12 +77,18 @@ def run_once(command: list[str], mountain_root: Path) -> dict[str, object]:
     peak_storage = allocated_bytes(mountain_root)
     peak_swap = swap_start
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    # Sample before polling so even a command that exits between Popen and the first
+    # loop condition contributes an RSS observation.
+    peak_rss = process_tree_rss(process.pid)
     while process.poll() is None:
         peak_rss = max(peak_rss, process_tree_rss(process.pid))
         peak_storage = max(peak_storage, allocated_bytes(mountain_root))
         peak_swap = max(peak_swap, swap_used_bytes())
         time.sleep(0.25)
     stdout, stderr = process.communicate()
+    peak_rss = max(peak_rss, process_tree_rss(process.pid))
+    peak_storage = max(peak_storage, allocated_bytes(mountain_root))
+    peak_swap = max(peak_swap, swap_used_bytes())
     duration = time.monotonic() - started
     if process.returncode:
         raise RuntimeError(f"Mountain build failed\n{stdout}\n{stderr}")

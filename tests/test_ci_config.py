@@ -18,3 +18,14 @@ def test_playwright_ci_uses_a_supported_macos_runner() -> None:
 
     if playwright_version >= (1, 62):
         assert macos_version >= 15
+
+
+def test_ci_actions_are_immutable_and_least_privilege() -> None:
+    root = Path(__file__).parents[1]
+    workflow = yaml.safe_load((root / ".github" / "workflows" / "ci.yml").read_text())
+    assert workflow["permissions"] == {"contents": "read"}
+    steps = workflow["jobs"]["test"]["steps"]
+    actions = [step for step in steps if "uses" in step]
+    assert all(re.fullmatch(r"[^@]+@[0-9a-f]{40}", step["uses"]) for step in actions)
+    checkout = next(step for step in actions if step["uses"].startswith("actions/checkout@"))
+    assert checkout["with"]["persist-credentials"] is False

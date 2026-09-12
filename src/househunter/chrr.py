@@ -160,6 +160,8 @@ def validate_rows(rows: list[dict[str, Any]], source: dict[str, Any]) -> pl.Data
     if any(not isinstance(row, dict) for row in rows):
         raise SourceContractError("CHR&R returned a malformed data row")
     for row in rows:
+        if any(not isinstance(row.get(field), str) for field in ("fipscode", "state", "county")):
+            raise SourceContractError("CHR&R FIPS, state, and county fields must be strings")
         group = row.get("CommunityConditions_Group")
         if group is not None and (not isinstance(group, int) or isinstance(group, bool)):
             raise SourceContractError("CHR&R Community Conditions groups must be integers or null")
@@ -299,6 +301,11 @@ def _validate_metadata(
     }
     if mismatches:
         raise SourceContractError(f"CHR&R metadata does not match the cache: {mismatches}")
+    generation = metadata_path.parent
+    if generation.parent.name == GENERATIONS_NAME and _is_hex(generation.name, 64):
+        actual_generation = sha256_bytes(raw.read_bytes() + metadata_path.read_bytes())
+        if actual_generation != generation.name:
+            raise SourceContractError("CHR&R cache generation content does not match its identity")
     return downloaded_at
 
 

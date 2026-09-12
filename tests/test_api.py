@@ -3,7 +3,6 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-import duckdb
 import httpx
 from fastapi.testclient import TestClient
 from test_map_assets import write_assets
@@ -119,6 +118,14 @@ def test_api_filters_details_exports_and_token(
         assert client.get("/api/v1/places", params={"county": ""}).status_code == 200
         assert client.get("/api/v1/exports/places.parquet").status_code == 200
         assert client.get("/api/v1/exports/counties.parquet").status_code == 200
+        place_json = client.get("/api/v1/exports/places.json").json()
+        county_json = client.get("/api/v1/exports/counties.json").json()
+        assert place_json[0]["place_id"] == "01001000100"
+        assert county_json[0]["place_id"] == "01001"
+        for row in (place_json[0], county_json[0]):
+            assert "community_conditions_group" in row
+            assert row["community_conditions_geography"] == "county"
+            assert row["chrr_release_year"] == 2025
         place_header = client.get("/api/v1/exports/places.csv").text.splitlines()[0]
         county_header = client.get("/api/v1/exports/counties.csv").text.splitlines()[0]
         assert "alr_npctl_wfir" in place_header
@@ -146,12 +153,7 @@ def test_map_scores_and_assets_are_complete_ordered_and_safe(
     tmp_path: Path,
 ) -> None:
     paths, _ = fixture_environment
-    output = build_snapshot(paths)
-    with duckdb.connect(str(output / "househunter.duckdb")) as connection:
-        connection.execute(
-            "UPDATE places SET risk_score = NULL, coverage_status = 'missing_fema' "
-            "WHERE place_id = '99999999999'"
-        )
+    build_snapshot(paths)
     asset_root = tmp_path / "assets"
     asset_root.mkdir()
     filename = write_assets(asset_root, monkeypatch)
@@ -168,7 +170,7 @@ def test_map_scores_and_assets_are_complete_ordered_and_safe(
             row["place_id"] for row in body["rows"]
         )
         assert len(body["rows"]) == 5
-        assert any(row["risk_score"] is None for row in body["rows"])
+        assert body["rows"][-1]["risk_score"] == 99.0
         county = client.get("/api/v1/map/scores", params={"level": "county"}).json()
         assert [row["place_id"] for row in county["rows"]] == ["01001", "02001"]
         assert county["rows"][0]["risk_score"] == 40.0

@@ -5,6 +5,7 @@ import os
 import shutil
 from collections.abc import Callable
 from datetime import UTC, datetime
+from functools import lru_cache
 from pathlib import Path
 
 import duckdb
@@ -27,7 +28,15 @@ from .hazards import HAZARD_COLUMNS, with_hazard_columns
 Progress = Callable[[int, str], None]
 Cancelled = Callable[[], bool]
 
-BUILD_SCHEMA_VERSION = 7
+BUILD_SCHEMA_VERSION = 8
+_SNAPSHOT_FILES = (
+    "build.json",
+    "places.parquet",
+    "tract_contributions.parquet",
+    "counties.parquet",
+    "chrr_county.parquet",
+    "househunter.duckdb",
+)
 
 
 def logical_checksum(frame: pl.DataFrame, columns: list[str], sort_by: list[str]) -> str:
@@ -290,12 +299,21 @@ def _write_duckdb(
         connection.close()
 
 
-def _existing_build_is_valid(
-    target: Path,
-    build_id: str,
-    input_hashes: dict[str, str],
-    source_vintages: dict[str, str | int],
-) -> bool:
+def _snapshot_signature(target: Path) -> tuple[tuple[int, int, int, int, int], ...]:
+    return tuple(
+        (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+        )
+        for filename in _SNAPSHOT_FILES
+        for metadata in [(target / filename).stat()]
+    )
+
+
+def _validate_snapshot_artifacts(target: Path) -> bool:
     try:
         metadata = json.loads((target / "build.json").read_text())
         places = pl.read_parquet(target / "places.parquet")
@@ -304,14 +322,7 @@ def _existing_build_is_valid(
         chrr_counties = pl.read_parquet(target / "chrr_county.parquet")
     except (OSError, json.JSONDecodeError, pl.exceptions.PolarsError):
         return False
-    if not (target / "househunter.duckdb").is_file():
-        return False
-    if (
-        metadata.get("schema_version") != BUILD_SCHEMA_VERSION
-        or metadata.get("build_id") != build_id
-        or metadata.get("input_checksums") != input_hashes
-        or metadata.get("source_vintages") != source_vintages
-    ):
+    if metadata.get("schema_version") != BUILD_SCHEMA_VERSION:
         return False
     if metadata.get("place_count") != places.height:
         return False
@@ -342,12 +353,27 @@ def _existing_build_is_valid(
     try:
         connection = duckdb.connect(str(target / "househunter.duckdb"), read_only=True)
         try:
-            place_count = connection.execute("SELECT count(*) FROM places").fetchone()[0]
-            contribution_count = connection.execute(
-                "SELECT count(*) FROM tract_contributions"
-            ).fetchone()[0]
-            county_count = connection.execute("SELECT count(*) FROM counties").fetchone()[0]
-            chrr_county_count = connection.execute("SELECT count(*) FROM chrr_county").fetchone()[0]
+            for table, filename in (
+                ("places", "places.parquet"),
+                ("tract_contributions", "tract_contributions.parquet"),
+                ("counties", "counties.parquet"),
+                ("chrr_county", "chrr_county.parquet"),
+            ):
+                parquet = str(target / filename)
+                if connection.execute(f"DESCRIBE {table}").fetchall() != connection.execute(
+                    "DESCRIBE SELECT * FROM read_parquet(?)", [parquet]
+                ).fetchall():
+                    return False
+                differs = connection.execute(
+                    f"SELECT EXISTS ("
+                    f"(SELECT * FROM {table} EXCEPT ALL SELECT * FROM read_parquet(?)) "
+                    f"UNION ALL "
+                    f"(SELECT * FROM read_parquet(?) EXCEPT ALL SELECT * FROM {table})"
+                    f")",
+                    [parquet, parquet],
+                ).fetchone()[0]
+                if differs:
+                    return False
             stored_metadata = json.loads(
                 connection.execute("SELECT metadata_json FROM build_metadata").fetchone()[0]
             )
@@ -355,12 +381,43 @@ def _existing_build_is_valid(
             connection.close()
     except (duckdb.Error, json.JSONDecodeError, IndexError, TypeError):
         return False
+    return stored_metadata == metadata
+
+
+@lru_cache(maxsize=8)
+def _cached_snapshot_artifacts_valid(
+    target: str, signature: tuple[tuple[int, int, int, int, int], ...]
+) -> bool:
+    del signature
+    return _validate_snapshot_artifacts(Path(target))
+
+
+def snapshot_artifacts_are_valid(target: Path) -> bool:
+    artifacts = [target / filename for filename in _SNAPSHOT_FILES]
+    if any(not path.is_file() or path.is_symlink() for path in artifacts):
+        return False
+    try:
+        return _cached_snapshot_artifacts_valid(str(target), _snapshot_signature(target))
+    except OSError:
+        return False
+
+
+def _existing_build_is_valid(
+    target: Path,
+    build_id: str,
+    input_hashes: dict[str, str],
+    source_vintages: dict[str, str | int],
+) -> bool:
+    if not snapshot_artifacts_are_valid(target):
+        return False
+    try:
+        metadata = json.loads((target / "build.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
     return (
-        place_count == places.height
-        and contribution_count == contributions.height
-        and county_count == counties.height
-        and chrr_county_count == chrr_counties.height
-        and stored_metadata == metadata
+        metadata.get("build_id") == build_id
+        and metadata.get("input_checksums") == input_hashes
+        and metadata.get("source_vintages") == source_vintages
     )
 
 
@@ -421,7 +478,14 @@ def build_snapshot(
     source_vintages["mountain_score"] = mountain_identity["score_version"]
     scope = state or "national"
     build_key = sha256_bytes(
-        canonical_json({"scope": scope, "inputs": input_hashes, "source_vintages": source_vintages})
+        canonical_json(
+            {
+                "schema_version": BUILD_SCHEMA_VERSION,
+                "scope": scope,
+                "inputs": input_hashes,
+                "source_vintages": source_vintages,
+            }
+        )
     )[:16]
     build_id = f"{scope.lower()}-{build_key}"
     target = paths.builds / build_id

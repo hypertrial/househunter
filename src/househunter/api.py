@@ -341,6 +341,29 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
             filename=filename,
         )
 
+    def json_export_for(table: Literal["places", "counties"], filename: str) -> StreamingResponse:
+        def rows():  # type: ignore[no-untyped-def]
+            yield "["
+            first = True
+            with Store(runtime) as store:
+                cursor = store.connection.execute(f"SELECT * FROM {table} ORDER BY place_id")
+                columns = [column[0] for column in cursor.description]
+                while batch := cursor.fetchmany(1000):
+                    for row in batch:
+                        if not first:
+                            yield ","
+                        yield json.dumps(
+                            dict(zip(columns, row, strict=True)), separators=(",", ":")
+                        )
+                        first = False
+            yield "]"
+
+        return StreamingResponse(
+            rows(),
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
     @app.get("/api/v1/exports/places.csv")
     def csv_export() -> StreamingResponse:
         return csv_export_for("places", "househunter-places.csv")
@@ -349,6 +372,10 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
     def parquet_export() -> FileResponse:
         return parquet_export_for("places", "househunter-places.parquet")
 
+    @app.get("/api/v1/exports/places.json")
+    def json_export() -> StreamingResponse:
+        return json_export_for("places", "househunter-places.json")
+
     @app.get("/api/v1/exports/counties.csv")
     def counties_csv_export() -> StreamingResponse:
         return csv_export_for("counties", "househunter-counties.csv")
@@ -356,6 +383,10 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
     @app.get("/api/v1/exports/counties.parquet")
     def counties_parquet_export() -> FileResponse:
         return parquet_export_for("counties", "househunter-counties.parquet")
+
+    @app.get("/api/v1/exports/counties.json")
+    def counties_json_export() -> StreamingResponse:
+        return json_export_for("counties", "househunter-counties.json")
 
     static = static_directory()
     if static.is_dir():

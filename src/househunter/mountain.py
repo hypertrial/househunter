@@ -444,6 +444,7 @@ def aggregate_scores(blocks: pl.DataFrame, geography: str) -> pl.DataFrame:
             pl.col("state").is_in(IN_SCOPE_STATES)
             & (pl.col("mountain_population_coverage") >= 0.9)
             & (pl.col("mountain_covered_population") > 0)
+            & (pl.col(f"_{column}_population") > 0)
         )
         .then(pl.col(f"_{column}_weighted") / pl.col(f"_{column}_population"))
         .otherwise(pl.lit(None, dtype=pl.Float64))
@@ -964,6 +965,9 @@ def _promote_validated_release(
         require_owned_child(candidate, releases, name_pattern=r"\.[0-9a-f]{32}\.tmp")
         os.replace(candidate, target)
     else:
+        from .mountain_pack import allocated_size, ensure_storage_budget
+
+        ensure_storage_budget(root, reserve_bytes=allocated_size(candidate))
         temporary = releases / f".{release_id}.{uuid.uuid4().hex}.tmp"
         try:
             shutil.copytree(candidate, temporary)
@@ -1029,6 +1033,11 @@ def write_and_promote_release(
     timings: dict[str, float] | None = None,
 ) -> tuple[Path, dict[str, object]]:
     """Write, definitively validate once, and atomically promote a generated release."""
+    from .mountain_pack import ensure_storage_budget
+
+    ensure_storage_budget(
+        paths.data / "mountain", reserve_bytes=FULL_RELEASE_MAX_BYTES
+    )
     releases = paths.data / "mountain" / "releases"
     releases = ensure_safe_directory(releases)
     candidate = releases / f".{uuid.uuid4().hex}.tmp"
@@ -1142,6 +1151,17 @@ def write_and_promote_compact_fallback(
         if existing.get("release_id") != release_id:
             raise HouseHunterError("Mountain compact fallback identity collision")
     else:
+        from .mountain_pack import ensure_storage_budget
+
+        reserve_bytes = sum(
+            (release / filename).stat().st_blocks * 512
+            for filename in (
+                "manifest.json",
+                str(files["tracts"]["filename"]),
+                str(files["counties"]["filename"]),
+            )
+        )
+        ensure_storage_budget(paths.data / "mountain", reserve_bytes=reserve_bytes)
         temporary = ensure_owned_child(
             root / f".{release_id}.{uuid.uuid4().hex}.tmp",
             root,

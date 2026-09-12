@@ -110,7 +110,6 @@ def mountain_download(
 ) -> None:
     """Download the exact files named by a maintainer source lock."""
     from .mountain_gis import download_sources as download_mountain_sources
-    from .mountain_pack import ensure_storage_budget
     from .mountain_paths import ensure_owned_child, lexical_path
 
     paths = _paths()
@@ -129,26 +128,11 @@ def mountain_download(
                     name_pattern=r"[0-9a-f]{16}",
                     marker_value="staging-v1\n",
                 )
-                lock = json.loads(source_lock.read_text())
-                expected = sum(
-                    int(item["size"])
-                    + (
-                        int(item.get("archive", {}).get("total_uncompressed_size", 0))
-                        if not (
-                            target / str(item.get("archive", {}).get("root", "missing"))
-                        ).exists()
-                        else 0
-                    )
-                    for item in lock["sources"]
-                    if not (target / str(item["filename"])).is_file()
-                    or (target / str(item["filename"])).stat().st_size != int(item["size"])
-                    or (
-                        item.get("archive") is not None
-                        and not (target / str(item["archive"].get("root", "missing"))).exists()
-                    )
-                )
-                ensure_storage_budget(paths.data / "mountain", reserve_bytes=expected)
-            output = download_mountain_sources(source_lock.expanduser().resolve(), target)
+            output = download_mountain_sources(
+                source_lock.expanduser().resolve(),
+                target,
+                managed_root=paths.data / "mountain" if destination is None else None,
+            )
         typer.echo(str(output))
     except (
         HouseHunterError,
@@ -180,6 +164,7 @@ def mountain_build(
     import polars as pl
 
     from .mountain import (
+        FULL_RELEASE_MAX_BYTES,
         promote_release,
         validate_national_expectations,
         validate_release,
@@ -197,6 +182,7 @@ def mountain_build(
     from .mountain_pack import (
         build_prepared_raw_metrics,
         ensure_storage_budget,
+        prepared_build_reservation,
         remove_owned_work_directory,
         verify_prepared_pack,
     )
@@ -227,6 +213,10 @@ def mountain_build(
         if output is None:
             ensure_safe_directory(candidate.parent)
         with exclusive_lock(paths.job_lock):
+            if output is None and not prepared_pack:
+                ensure_storage_budget(
+                    paths.data / "mountain", reserve_bytes=FULL_RELEASE_MAX_BYTES
+                )
             started = time.monotonic()
             source_metadata: dict[str, object] = {}
             lock: dict[str, object] | None = None
@@ -278,6 +268,14 @@ def mountain_build(
                 work = work_root / str(manifest["pack_id"])
                 if not resume and work.exists():
                     remove_owned_work_directory(work, work_root)
+                if promote:
+                    # The job lock makes this one aggregate reservation authoritative for
+                    # every managed write that follows: remaining shards, the candidate,
+                    # and the compact fallback. Each writer also enforces its own cap.
+                    ensure_storage_budget(
+                        paths.data / "mountain",
+                        reserve_bytes=prepared_build_reservation(work),
+                    )
                 blocks, performance = build_prepared_raw_metrics(
                     pack,
                     pack_lock,
@@ -353,7 +351,6 @@ def mountain_build(
             pointer_path = paths.data / "mountain" / "current.json"
             previous_pointer = pointer_path.read_bytes() if pointer_path.is_file() else None
             if promote and output is None and expectations is not None:
-                ensure_storage_budget(paths.data / "mountain", reserve_bytes=4_000_000_000)
                 release_timings: dict[str, float] = {}
                 final, release_manifest = write_and_promote_release(
                     paths,
@@ -426,7 +423,6 @@ def mountain_prepare(
     """Build an immutable v1 prepared source pack outside the timed build SLA."""
     from .mountain_gis import load_regions, verify_region_sources_locked, verify_source_lock
     from .mountain_pack import (
-        ensure_storage_budget,
         prepare_regions,
         prune_owned_prepared_packs,
         remove_owned_staging_directory,
@@ -450,13 +446,6 @@ def mountain_prepare(
                 raise HouseHunterError("National prepared packs require reviewed source-lock v2")
             configured = load_regions(region_path, root)
             verify_region_sources_locked(configured, lock, root=root)
-            projection = lock.get("storage_projection")
-            if not isinstance(projection, dict):
-                raise HouseHunterError("Mountain source lock lacks a storage projection")
-            ensure_storage_budget(
-                paths.data / "mountain",
-                reserve_bytes=int(projection["prepared_pack_bytes"]),
-            )
             pack, pack_lock = prepare_regions(
                 configured,
                 target,
@@ -464,6 +453,7 @@ def mountain_prepare(
                 source_lock_path=lock_path,
                 region_config_path=region_path,
                 prepared_lock_path=prepared_lock.expanduser().resolve() if prepared_lock else None,
+                managed_root=paths.data / "mountain" if destination is None else None,
             )
             staging_root = paths.data / "mountain" / "staging"
             if (
@@ -857,15 +847,15 @@ def inspect_place(query: str) -> None:
 
 @app.command()
 def export(
-    format: Annotated[str, typer.Option("--format", help="csv or parquet")] = "csv",
+    format: Annotated[str, typer.Option("--format", help="csv, json, or parquet")] = "csv",
     output: Annotated[Path | None, typer.Option("--output")] = None,
     level: Annotated[str, typer.Option("--level", help="tract or county")] = "tract",
 ) -> None:
     """Export the selected immutable snapshot table."""
     selected = format.lower()
     geography = level.lower()
-    if selected not in {"csv", "parquet"}:
-        _abort(HouseHunterError("Export format must be csv or parquet"))
+    if selected not in {"csv", "json", "parquet"}:
+        _abort(HouseHunterError("Export format must be csv, json, or parquet"))
     if geography not in {"tract", "county"}:
         _abort(HouseHunterError("Export level must be tract or county"))
     table = "counties" if geography == "county" else "places"
