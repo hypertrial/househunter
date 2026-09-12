@@ -42,7 +42,9 @@ produce a county score. Tract and county percentiles are not comparable.
 - Pinned rows: 3,144 county/county-equivalent records
 - Metric: official Community Conditions Health Group, integer 1–10 or null
 - Canonical logical SHA-256: `516e1e1408fe3dbb65273c9de75c67cfd6d5eed15f1ad18a8e91e6c6d54ca3fb`
-- Raw cache: `data/raw/chrr/community_conditions_2025.json` with `metadata.json`
+- Raw cache: an atomic `data/raw/chrr/current.json` pointer selects a verified
+  generation containing `community_conditions_2025.json` and `metadata.json`;
+  legacy flat caches remain readable and are migrated on refresh
 - Processed artifact: `data/processed/chrr_county.parquet`
 
 Group 1 represents the healthiest community conditions and Group 10 the least
@@ -76,20 +78,60 @@ Mountain Score is a separate, derived contextual layer. Its maintainer build acc
 - 2020 Census blocks with 15-digit GEOID, `POP20`, geometry, and one internal point.
 
 These large inputs are neither bundled nor fetched by `./scripts/run-app`. A reviewed
-JSON source lock supplies the exact HTTPS URL or local path, byte size, SHA-256,
-acquisition date, declared CRS/schema/count, and filename for every file. Production
-builds reject unlocked files. The lock also contains `expected_states` with exact
-block and population totals for the 50 states and DC; any missing state, extra state,
-or total mismatch prevents promotion. Region configuration names only locked files
-and supplies the equal-area target CRS and source field mappings.
+JSON source lock v2 supplies the exact HTTPS URL or local path, byte size, SHA-256,
+acquisition date, actual CRS/schema/count, and filename for every file. It also pins
+reviewed HTTPS hosts, ordered elevation precedence, the exact sorted national block
+GEOID digest, per-state block/population expectations, a block-driven tile inventory,
+and a storage projection. Production preparation rejects an alias or incomplete region
+CRS: CONUS/DC is EPSG:5070, Alaska is EPSG:3338, and Hawaii is a reviewed fixed
+equal-area WKT. Region configuration names only locked files.
 
-`househunter mountain download` verifies bytes before atomically publishing them to
-the selected source root. `househunter mountain build` uses 100 km processing cores
-with a 100 km halo and a coarse 250 m grid. It validates the candidate, writes
-content-addressed block/tract/county Parquet files plus a manifest, and atomically
-updates `data/mountain/current.json` only for a complete national release. The normal
-snapshot reads only tract/county Parquet and the manifest, so Rasterio, Shapely,
-PyProj, SciPy, Pyogrio, and NumPy are optional maintainer dependencies.
+`househunter mountain inventory` reads only the normalized Census block/internal-point
+inputs and emits the exact signed tile coordinates, per-tile counts/population, all-state
+expectations, sorted GEOID digest, and a conservative pack/release/work high-water
+projection. Review and copy those values into source-lock v2 before acquiring the much
+larger elevation and access inputs.
+
+`househunter mountain download` disables ambient proxies, permits only the lock's
+reviewed HTTPS hosts, revalidates every redirect, checks declared length while
+streaming, verifies bytes before atomic publication, and maintains the unrelated-disk
+reserve. `househunter mountain prepare` uses 100 km processing cores with exact 100 km
+halos on the CRS-origin 250 m lattice. Every logical tile stores float32 elevation,
+uint8 PAD codes, float32 additive trail-hit cells, and int32 block sample indexes. The
+pack manifest checksums every file and every tile's canonical raw-metric result; a
+separate lock anchors the content-addressed pack.
+
+ZIP inputs require a lock entry for every member, its size and SHA-256, the exact total
+expanded size, an extraction root, and the dataset paths consumed by region configuration.
+Extraction rejects absolute/parent/backslash paths, links, devices, encryption, nested
+archives, duplicate or case-colliding entries, unlisted files, more than 200,000 members,
+over 30 GB expanded, or a member compression ratio above 100:1. Extracted inputs are
+published atomically. A default managed staging directory is removed only after the
+derived prepared pack and its external lock have both validated; explicit source roots
+are never cleanup targets.
+
+`househunter mountain build --source-lock ... --prepared-pack ... --prepared-lock ...
+--workers 4` verifies both independent locks and the pack, runs
+one bounded persistent process pool, writes atomic per-tile raw Parquet shards, and
+assembles them in canonical tile/GEOID order. Percentiles remain one national
+population-weighted lower-rank ECDF per component; no tile or state percentile or
+aggregate is cached. A generated candidate is written inside the release filesystem,
+validated once by reconstructing block percentiles/composite and tract/county
+aggregates, renamed to its content identity, and then exposed through the Mountain
+pointer. The timed path finishes only after the normal HouseHunter snapshot is rebuilt
+and queryable. It also publishes one content-addressed compact fallback under
+`data/mountain/compact/`. Failure restores the prior full and compact Mountain pointers
+and leaves the prior app snapshot intact.
+
+The prepared pack is capped at 22 GB; work shards and any one full release at 4 GB;
+active plus rollback releases at 8 GB. The implementation targets 45 GB and hard-stops
+before 50,000,000,000 allocated bytes while retaining at least 10 GB of unrelated free
+space. Cleanup is limited to direct, marked, non-symlink children of managed Mountain
+work/release/prepared/compact directories. Successful preparation retains only the new
+prepared pack; successful publication retains one compact fallback. The compact
+tract/county fallback must remain below 50 MiB.
+The normal snapshot reads only tract/county Parquet and the manifest, so Rasterio,
+Shapely, PyProj, SciPy, Pyogrio, and NumPy are optional maintainer dependencies.
 
 The approximation is explicit:
 
@@ -107,10 +149,18 @@ The approximation is explicit:
 
 The manifest records the source lock, pipeline and score versions, release identity,
 coverage, row counts, checksums, and whether national completeness was proven. The
-validator recomputes release identity, hashes, block domains, tract/county aggregates,
-and coverage semantics before a release can be promoted. A promoted release changes
+validator recomputes release identity, hashes, block domains, every component
+percentile and composite from rounded block raw values, tract/county aggregates, and
+coverage semantics before a release can be promoted. A promoted release changes
 the main HouseHunter build identity; an absent release produces null Mountain fields
 with `unavailable` status rather than silently substituting zero.
+
+Source-lock v2 validation reads the real raster/vector/Parquet metadata and requires
+its CRS, layer, exact schema, and record/cell count to equal the reviewed contract.
+Region configuration must consume every locked GIS dataset in the correct family and
+layer, preserve DEM precedence, and assign Alaska, Hawaii, and CONUS/DC Census blocks
+to their fixed projected-CRS partitions. Block Parquet is accepted only for the legacy
+raw-block path; it cannot stand in for DEM, PAD-US, or trail inputs.
 
 ## Download contract
 

@@ -84,7 +84,7 @@ addresses.
 househunter sources [--json]
 househunter download [--source fema|fema_counties|chrr|all]
 househunter build [--state CO]
-househunter rank [--state CO] [--county STCOFIPS] [--level tract|county] [--metric risk|community-conditions] [--mountain-min 0..100] [--order best|worst] [--limit N] [--include-unranked]
+househunter rank [--state CO] [--county STCOFIPS] [--level tract|county] [--metric risk|community-conditions|mountain] [--mountain-min 0..100] [--order best|worst] [--limit N] [--include-unranked]
 househunter inspect TRACT_FIPS|COUNTY_FIPS
 househunter lookup "1670 Broadway, Denver, CO" [--allow-approximate]
 househunter export --format parquet|csv [--level tract|county] [--output PATH]
@@ -151,16 +151,55 @@ The native GIS stack is maintainer-only and optional:
 
 ```console
 uv sync --extra mountain
-uv run househunter mountain download --source-lock /path/to/source-lock.json --destination /path/to/sources
-uv run househunter mountain build --data-release 2026q3 --source-lock /path/to/source-lock.json --regions /path/to/regions.json --source-root /path/to/sources
+uv run househunter mountain inventory --regions /path/to/regions.json --source-root /path/to/block-sources --output /path/to/inventory.json
+uv run househunter mountain download --source-lock /path/to/source-lock-v2.json
+uv run househunter mountain prepare --source-lock /path/to/source-lock-v2.json --regions /path/to/regions.json --source-root data/mountain/staging/SOURCE_LOCK_PREFIX
+uv run househunter mountain build --data-release 2026q3 --source-lock /path/to/source-lock-v2.json --prepared-pack /path/to/PACK_ID --prepared-lock /path/to/PACK_ID.lock.json --workers 4 --fresh
 uv run househunter mountain validate data/mountain/releases/RELEASE_ID
 uv run househunter mountain inspect 08013012101
+uv run househunter mountain bundle data/mountain/releases/RELEASE_ID --output /path/to/househunter/assets/mountain
 ```
 
-Production promotion requires a checksum lock for every consumed input and exact
-expected block and population totals for all 50 states plus DC. Using
+Production preparation requires source-lock v2: exact checksums and metadata for every
+consumed input, reviewed HTTPS hosts and redirects, ordered DEM precedence, complete
+region CRS definitions, exact block and population totals for all 50 states plus DC,
+the sorted national GEOID digest, and a qualified tile/storage projection. Preparation
+writes 100 km cores with exact 100 km halos to a content-addressed pack and emits a
+separate prepared-pack lock. Using
 `--allow-partial --no-promote` is available for small development fixtures; partial releases can
 never become the active runtime release.
+
+Prepared builds require both locks: the reviewed source lock is the independent trust
+anchor for the source inventory, while the prepared lock anchors every immutable tile.
+Promoting a separately supplied release additionally requires the prepared pack so its
+raw block metrics can be recomputed and compared exactly; validation without promotion
+does not require those inputs.
+
+Prepared builds use one bounded pool of one to four worker processes. `--resume` reuses
+only checksum-valid shards for the same pack and pipeline; `--fresh` clears only the
+marked work directory for that pack. A successful promoted prepared build rebuilds the
+normal snapshot, preserves one rollback release, removes older owned releases and work
+shards, publishes the validated under-50-MiB managed compact fallback, and writes a
+timing report under `data/mountain/reports/`. The Mountain workflow
+enforces a 45 GB engineering ceiling, stops before 50,000,000,000 managed bytes, and
+preserves 10 GB of unrelated free filesystem space.
+
+The national laptop acceptance gate runs two clean four-worker builds and checks the
+55-minute runtime, 24 GiB aggregate RSS, swap growth, 45/50 GB storage limits, identical
+release and Parquet identities, and a queryable Mountain-ranked snapshot:
+
+```console
+uv run python scripts/benchmark_mountain.py \
+  --source-lock /path/to/source-lock-v2.json \
+  --prepared-pack /path/to/PACK_ID \
+  --prepared-lock /path/to/PACK_ID.lock.json \
+  --data-release 2026q3
+```
+
+Before the timed gate, `scripts/compare_mountain_builds.py` proves exact canonical raw
+table and release-hash equality among the legacy serial source build and prepared builds
+using one and four workers. Both scripts emit machine-readable reports beneath
+`data/mountain/` by default.
 
 The committed `web/dist/` must match `npm run build`. The Python wheel packages the
 compiled UI and the derived map assets exactly once. Raw third-party files and generated

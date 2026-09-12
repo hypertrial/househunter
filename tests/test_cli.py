@@ -3,10 +3,108 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
+import househunter.cli as cli_module
 from househunter.cli import app
 from househunter.config import RuntimePaths
+from househunter.errors import HouseHunterError
+
+
+def test_mountain_rank_uses_high_scores_for_best_and_low_scores_for_worst(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    directions: list[str] = []
+
+    class FakeStore:
+        def __init__(self, paths: RuntimePaths) -> None:
+            pass
+
+        def __enter__(self) -> FakeStore:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            pass
+
+        def list_places(self, **kwargs: object) -> dict[str, object]:
+            directions.append(str(kwargs["direction"]))
+            return {"items": []}
+
+    monkeypatch.setattr(cli_module, "Store", FakeStore)
+    runner = CliRunner()
+
+    best = runner.invoke(app, ["rank", "--metric", "mountain", "--order", "best"])
+    worst = runner.invoke(app, ["rank", "--metric", "mountain", "--order", "worst"])
+
+    assert best.exit_code == 0, best.output
+    assert worst.exit_code == 0, worst.output
+    assert directions == ["desc", "asc"]
+
+
+def test_mountain_snapshot_rebuild_restores_previous_pointer_on_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = RuntimePaths.from_root(tmp_path)
+    pointer = paths.data / "mountain" / "current.json"
+    pointer.parent.mkdir(parents=True)
+    previous = b'{"release_id":"previous"}\n'
+    pointer.write_bytes(b'{"release_id":"candidate"}\n')
+    previous_snapshot = b'{"build_id":"previous"}\n'
+    paths.current.write_bytes(previous_snapshot)
+
+    def publish_compact(*args: object, **kwargs: object) -> Path:
+        compact_pointer = paths.data / "mountain" / "compact" / "current.json"
+        compact_pointer.parent.mkdir(parents=True)
+        compact_pointer.write_bytes(b'{"release_id":"candidate"}\n')
+        return compact_pointer.parent / "candidate"
+
+    def fail_build(*args: object, **kwargs: object) -> Path:
+        paths.current.write_bytes(b'{"build_id":"candidate"}\n')
+        raise RuntimeError("snapshot failed")
+
+    monkeypatch.setattr("househunter.mountain.write_and_promote_compact_fallback", publish_compact)
+    monkeypatch.setattr(cli_module, "build_snapshot", fail_build)
+
+    with pytest.raises(RuntimeError, match="snapshot failed"):
+        cli_module._rebuild_after_mountain_promotion(
+            paths,
+            previous,
+            tmp_path / "release",
+            {"release_id": "candidate"},
+        )
+
+    assert pointer.read_bytes() == previous
+    assert not (paths.data / "mountain" / "compact" / "current.json").exists()
+    assert paths.current.read_bytes() == previous_snapshot
+
+
+def test_mountain_publication_reports_cleanup_as_nonfatal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    paths = RuntimePaths.from_root(tmp_path)
+    monkeypatch.setattr(
+        "househunter.mountain.write_and_promote_compact_fallback",
+        lambda *args, **kwargs: tmp_path / "compact",
+    )
+    monkeypatch.setattr(cli_module, "build_snapshot", lambda *args, **kwargs: tmp_path / "snapshot")
+    monkeypatch.setattr(
+        "househunter.mountain.prune_owned_releases",
+        lambda *args, **kwargs: (_ for _ in ()).throw(HouseHunterError("disk busy")),
+    )
+    monkeypatch.setattr("househunter.mountain.prune_owned_compact_fallbacks", lambda *args: [])
+
+    snapshot, compact, warnings = cli_module._rebuild_after_mountain_promotion(
+        paths,
+        None,
+        tmp_path / "release",
+        {"release_id": "candidate"},
+    )
+
+    assert snapshot == tmp_path / "snapshot"
+    assert compact == tmp_path / "compact"
+    assert warnings == ["Mountain full release cleanup pending: disk busy"]
+    assert "cleanup pending" in capsys.readouterr().err
 
 
 def test_cli_build_rank_inspect_export_and_sources(
@@ -43,6 +141,14 @@ def test_cli_build_rank_inspect_export_and_sources(
     assert "GROUP" in community.output
     assert "01001" in community.output
     assert "    5" in community.output
+
+    mountain = runner.invoke(
+        app,
+        ["rank", "--metric", "mountain", "--state", "AL", "--include-unranked"],
+    )
+    assert mountain.exit_code == 0, mountain.output
+    assert "SCORE" in mountain.output
+    assert "01001000100" in mountain.output
 
     county_filter = runner.invoke(app, ["rank", "--county", "01001"])
     assert county_filter.exit_code == 0

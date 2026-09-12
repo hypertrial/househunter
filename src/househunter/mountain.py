@@ -5,6 +5,8 @@ import math
 import os
 import re
 import shutil
+import time
+import uuid
 from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -17,6 +19,14 @@ if TYPE_CHECKING:
 from .config import RuntimePaths, canonical_json, sha256_bytes, sha256_file
 from .errors import HouseHunterError
 from .geography import STATE_BY_FIPS
+from .mountain_paths import (
+    OWNERSHIP_MARKER,
+    ensure_owned_child,
+    ensure_safe_directory,
+    lexical_path,
+    remove_owned_child,
+    require_owned_child,
+)
 
 PIPELINE_VERSION = "mountain_pipeline_v1"
 SCORE_VERSION = "mountain_score_v1"
@@ -79,6 +89,15 @@ MOUNTAIN_RUNTIME_COLUMNS = [
     "mountain_population_coverage",
     "mountain_coverage_status",
 ]
+BUNDLED_COMPACT_RELEASE = Path(__file__).with_name("assets") / "mountain"
+FULL_RELEASE_MAX_BYTES = 4_000_000_000
+COMPACT_RELEASE_MAX_BYTES = 50 * 1024 * 1024
+
+
+def _allocated_tree_bytes(path: Path) -> int:
+    return sum(
+        item.lstat().st_blocks * 512 for item in (path, *path.rglob("*")) if not item.is_symlink()
+    )
 
 
 def window_cells(radius_km: float, cell_size_m: float = 250) -> int:
@@ -317,6 +336,62 @@ def score_blocks(frame: pl.DataFrame, *, minimum_coverage: float = 0.995) -> pl.
     return scored.sort("block_geoid")
 
 
+def _reconstruct_block_scores(frame: pl.DataFrame) -> pl.DataFrame:
+    """Independent Polars oracle used only to validate persisted national scores."""
+    reconstructed = frame.with_columns(
+        *(
+            pl.col(column).round(precision).alias(column)
+            for column, precision in RAW_PRECISION.items()
+        )
+    )
+    for raw, percentile in RAW_COMPONENTS.items():
+        calibration_weight = (
+            pl.when(
+                pl.col("state").is_in(IN_SCOPE_STATES)
+                & (pl.col("pop20") > 0)
+                & pl.col(raw).is_not_null()
+            )
+            .then(pl.col("pop20"))
+            .otherwise(0)
+            .alias("_weight")
+        )
+        ranks = (
+            reconstructed.select(raw, calibration_weight)
+            .filter(pl.col(raw).is_not_null())
+            .group_by(raw)
+            .agg(pl.col("_weight").sum())
+            .sort(raw)
+        )
+        total = ranks["_weight"].sum()
+        if not total:
+            raise HouseHunterError("Mountain validation has no populated valid calibrators")
+        ranks = ranks.with_columns(
+            ((pl.col("_weight").cum_sum() - pl.col("_weight")) * 100 / total)
+            .round(2)
+            .alias(percentile)
+        ).select(raw, percentile)
+        reconstructed = reconstructed.join(ranks, on=raw, how="left")
+    return (
+        reconstructed.with_columns(
+            sum(pl.col(column) * weight for column, weight in SCORE_WEIGHTS.items())
+            .round(2)
+            .alias("mountain_score"),
+            pl.lit(SCORE_VERSION).alias("mountain_score_version"),
+            pl.lit(PIPELINE_VERSION).alias("mountain_pipeline_version"),
+        )
+        .with_columns(
+            *(
+                pl.when(pl.col("state").is_in(IN_SCOPE_STATES))
+                .then(pl.col(column))
+                .otherwise(pl.lit(None, dtype=pl.Float64))
+                .alias(column)
+                for column in SCORE_COLUMNS
+            )
+        )
+        .sort("block_geoid")
+    )
+
+
 def aggregate_scores(blocks: pl.DataFrame, geography: str) -> pl.DataFrame:
     """Produce population-weighted tract or county values from identical block scores."""
     if geography not in {"tract_geoid", "county_fips"}:
@@ -394,7 +469,18 @@ def aggregate_scores(blocks: pl.DataFrame, geography: str) -> pl.DataFrame:
     )
 
 
-def validate_national_expectations(blocks: pl.DataFrame, expectations: dict[str, object]) -> None:
+def national_block_geoid_sha256(blocks: pl.DataFrame) -> str:
+    _require_columns(blocks, ["block_geoid"])
+    geoids = blocks.select("block_geoid").sort("block_geoid")["block_geoid"].to_list()
+    return sha256_bytes(("\n".join(geoids) + "\n").encode())
+
+
+def validate_national_expectations(
+    blocks: pl.DataFrame,
+    expectations: dict[str, object],
+    *,
+    expected_block_geoid_sha256: str | None = None,
+) -> None:
     """Require exact pinned Census block counts and population totals by state."""
     if set(expectations) != IN_SCOPE_STATES:
         missing = sorted(IN_SCOPE_STATES - set(expectations))
@@ -405,7 +491,26 @@ def validate_national_expectations(blocks: pl.DataFrame, expectations: dict[str,
             "Mountain Census expectations must cover the 50 states and DC: "
             + "; ".join(detail for detail in details if detail)
         )
-    _require_columns(blocks, ["state", "pop20"])
+    _require_columns(blocks, ["block_geoid", "state", "pop20"])
+    if (
+        not blocks.schema["pop20"].is_integer()
+        or blocks.select(pl.col("pop20").is_null().any()).item()
+        or blocks.select(pl.col("state").is_null().any()).item()
+    ):
+        raise HouseHunterError("Mountain Census block population/state types are invalid")
+    state_lookup = pl.DataFrame(
+        {"_state_fips": list(STATE_BY_FIPS), "_expected_state": list(STATE_BY_FIPS.values())}
+    )
+    invalid_state_rows = (
+        blocks.select("block_geoid", "state")
+        .with_columns(pl.col("block_geoid").str.slice(0, 2).alias("_state_fips"))
+        .join(state_lookup, on="_state_fips", how="left")
+        .filter(
+            pl.col("_expected_state").is_null() | (pl.col("state") != pl.col("_expected_state"))
+        )
+    )
+    if invalid_state_rows.height:
+        raise HouseHunterError("Mountain Census block state does not match its GEOID")
     actual = {
         row["state"]: row
         for row in blocks.group_by("state")
@@ -436,6 +541,11 @@ def validate_national_expectations(blocks: pl.DataFrame, expectations: dict[str,
                 f"expected {expected_blocks:,} blocks/{expected_population:,} people, "
                 f"found {observed['blocks']:,}/{observed['population']:,}"
             )
+    if (
+        expected_block_geoid_sha256 is not None
+        and national_block_geoid_sha256(blocks) != expected_block_geoid_sha256
+    ):
+        raise HouseHunterError("Mountain national block GEOIDs differ from the reviewed lock")
 
 
 def write_release(
@@ -445,6 +555,7 @@ def write_release(
     data_release: str,
     sources: dict[str, object],
     national_expectations: dict[str, object] | None = None,
+    validate: bool = True,
 ) -> Path:
     """Write one deterministic, checksummed compact release plus local block detail."""
     scored = score_blocks(raw_blocks)
@@ -452,9 +563,7 @@ def write_release(
         validate_national_expectations(scored, national_expectations)
     tracts = aggregate_scores(scored, "tract_geoid")
     counties = aggregate_scores(scored, "county_fips")
-    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
-    if temporary.exists():
-        shutil.rmtree(temporary)
+    temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
     temporary.mkdir(parents=True)
     try:
         outputs = {
@@ -464,6 +573,7 @@ def write_release(
         }
         for path, frame in outputs.values():
             frame.write_parquet(path, compression="zstd", statistics=True)
+        (temporary / OWNERSHIP_MARKER).write_text("release-v1\n")
         manifest = {
             "schema_version": 1,
             "pipeline_version": PIPELINE_VERSION,
@@ -471,6 +581,9 @@ def write_release(
             "data_release": data_release,
             "national_complete": national_expectations is not None,
             "national_expectations": national_expectations,
+            "block_geoid_sha256": national_block_geoid_sha256(scored)
+            if national_expectations is not None
+            else None,
             "sources": sources,
             "files": {
                 name: {
@@ -485,7 +598,8 @@ def write_release(
         (temporary / "manifest.json").write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n"
         )
-        validate_release(temporary)
+        if validate:
+            validate_release(temporary)
         if destination.exists():
             raise HouseHunterError(f"Mountain release already exists: {destination}")
         os.replace(temporary, destination)
@@ -502,9 +616,15 @@ def _complete_release_expectations(manifest: dict[str, object]) -> dict[str, obj
         raise HouseHunterError("Complete Mountain release lacks national expectations")
     sources = manifest.get("sources")
     items = sources.get("items") if isinstance(sources, dict) else None
+    if (
+        not isinstance(sources, dict)
+        or sources.get("source_lock_schema_version") != 2
+        or not isinstance(sources.get("source_lock_sha256"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", str(sources.get("source_lock_sha256"))) is None
+    ):
+        raise HouseHunterError("Complete Mountain release lacks reviewed source-lock provenance")
     required_source_fields = {
         "name",
-        "url",
         "acquired_at",
         "crs",
         "schema",
@@ -525,9 +645,14 @@ def _complete_release_expectations(manifest: dict[str, object]) -> dict[str, obj
 
 
 def validate_release(
-    path: Path, *, maximum_compact_bytes: int = 50 * 1024 * 1024
+    path: Path,
+    *,
+    maximum_compact_bytes: int = 50 * 1024 * 1024,
+    maximum_release_bytes: int = FULL_RELEASE_MAX_BYTES,
 ) -> dict[str, object]:
     """Validate a Mountain release without trusting filenames or metadata."""
+    if path.is_symlink() or (path / "manifest.json").is_symlink():
+        raise HouseHunterError("Mountain release cannot use symlinked roots or files")
     try:
         manifest = json.loads((path / "manifest.json").read_text())
     except (OSError, json.JSONDecodeError) as exc:
@@ -544,8 +669,23 @@ def validate_release(
     if manifest.get("release_id") != expected_release_id:
         raise HouseHunterError("Mountain release identity does not match its manifest")
     files = manifest.get("files")
-    if not isinstance(files, dict) or set(files) != {"blocks", "tracts", "counties"}:
+    if (
+        not isinstance(files, dict)
+        or set(files) != {"blocks", "tracts", "counties"}
+        or any(not isinstance(metadata, dict) for metadata in files.values())
+    ):
         raise HouseHunterError("Mountain release manifest has an invalid file set")
+    expected_entries = {
+        "manifest.json",
+        *(str(metadata.get("filename")) for metadata in files.values()),
+    }
+    actual_entries = {child.name for child in path.iterdir()}
+    if (
+        not expected_entries <= actual_entries
+        or actual_entries - expected_entries - {OWNERSHIP_MARKER}
+        or any(child.is_symlink() or not child.is_file() for child in path.iterdir())
+    ):
+        raise HouseHunterError("Mountain release contains unexpected or unsafe entries")
     frames: dict[str, pl.DataFrame] = {}
     for name, metadata in files.items():
         if not isinstance(metadata, dict) or Path(
@@ -553,6 +693,8 @@ def validate_release(
         ).name != metadata.get("filename"):
             raise HouseHunterError(f"Mountain release has an invalid {name} filename")
         file_path = path / metadata["filename"]
+        if file_path.is_symlink():
+            raise HouseHunterError(f"Mountain {name} artifact cannot be a symlink")
         try:
             frame = pl.read_parquet(file_path)
         except (OSError, pl.exceptions.PolarsError) as exc:
@@ -601,10 +743,35 @@ def validate_release(
     if blocks.filter(pl.col("pop20") < 0).height:
         raise HouseHunterError("Mountain block population is negative")
     _validate_block_ranges(blocks, label="block")
+    rounded_raw = blocks.select(
+        pl.col(column).round(precision).alias(column) for column, precision in RAW_PRECISION.items()
+    )
+    if not blocks.select(*RAW_PRECISION).equals(rounded_raw):
+        raise HouseHunterError("Mountain block raw metrics are not canonically rounded")
+    raw_columns = [
+        "block_geoid",
+        "tract_geoid",
+        "county_fips",
+        "state",
+        "pop20",
+        *RAW_PRECISION,
+    ]
+    recomputed_blocks = _reconstruct_block_scores(blocks.select(raw_columns))
+    score_columns = [
+        "block_geoid",
+        *SCORE_COLUMNS,
+        "mountain_score_version",
+        "mountain_pipeline_version",
+    ]
+    if not blocks.select(score_columns).equals(recomputed_blocks.select(score_columns)):
+        raise HouseHunterError("Mountain block scores do not match rounded national raw metrics")
     expectations = manifest.get("national_expectations")
     if manifest["national_complete"]:
         expectations = _complete_release_expectations(manifest)
-        validate_national_expectations(blocks, expectations)
+        digest = manifest.get("block_geoid_sha256")
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise HouseHunterError("Complete Mountain release lacks its block GEOID digest")
+        validate_national_expectations(blocks, expectations, expected_block_geoid_sha256=digest)
     elif expectations is not None:
         raise HouseHunterError("Partial Mountain release cannot claim national expectations")
     for name, geography in (("tracts", "tract_geoid"), ("counties", "county_fips")):
@@ -619,13 +786,23 @@ def validate_release(
             f"Mountain compact artifact is {compact_bytes:,} bytes; "
             f"maximum is {maximum_compact_bytes:,}"
         )
-    return {**manifest, "compact_bytes": compact_bytes}
+    release_bytes = sum(
+        child.lstat().st_blocks * 512 for child in path.rglob("*") if not child.is_symlink()
+    )
+    if release_bytes > maximum_release_bytes:
+        raise HouseHunterError(
+            f"Mountain release is {release_bytes:,} allocated bytes; "
+            f"maximum is {maximum_release_bytes:,}"
+        )
+    return {**manifest, "compact_bytes": compact_bytes, "allocated_bytes": release_bytes}
 
 
 def load_compact_release(
     path: Path,
 ) -> tuple[dict[str, object], pl.DataFrame, pl.DataFrame]:
     """Load only the promoted tract/county artifact needed by application builds."""
+    if path.is_symlink() or (path / "manifest.json").is_symlink():
+        raise HouseHunterError("Mountain runtime release cannot use symlinked roots or files")
     try:
         manifest = json.loads((path / "manifest.json").read_text())
     except (OSError, json.JSONDecodeError) as exc:
@@ -652,6 +829,8 @@ def load_compact_release(
         ).name != metadata.get("filename"):
             raise HouseHunterError(f"Mountain release has an invalid {name} filename")
         file_path = path / str(metadata["filename"])
+        if file_path.is_symlink():
+            raise HouseHunterError(f"Mountain {name} artifact cannot be a symlink")
         try:
             frame = pl.read_parquet(file_path)
         except (OSError, pl.exceptions.PolarsError) as exc:
@@ -667,17 +846,65 @@ def load_compact_release(
 
 def current_compact_release(
     paths: RuntimePaths,
+    *,
+    bundled_path: Path | None = None,
 ) -> tuple[Path, dict[str, object], pl.DataFrame, pl.DataFrame] | None:
-    pointer = paths.data / "mountain" / "current.json"
+    mountain_root = paths.data / "mountain"
+    releases_root = mountain_root / "releases"
+    if mountain_root.is_symlink() or releases_root.is_symlink():
+        raise HouseHunterError("Mountain runtime path cannot contain symlinked managed roots")
+    pointer = mountain_root / "current.json"
     if not pointer.is_file():
-        return None
+        managed_fallback = False
+        if bundled_path is not None:
+            bundled = bundled_path
+        else:
+            compact_root = mountain_root / "compact"
+            compact_pointer = compact_root / "current.json"
+            bundled = BUNDLED_COMPACT_RELEASE
+            if compact_pointer.is_file():
+                if compact_root.is_symlink() or compact_pointer.is_symlink():
+                    raise HouseHunterError("Mountain compact fallback path cannot be a symlink")
+                try:
+                    compact_metadata = json.loads(compact_pointer.read_text())
+                    compact_id = str(compact_metadata["release_id"])
+                except (OSError, KeyError, json.JSONDecodeError) as exc:
+                    raise HouseHunterError(
+                        f"Mountain compact fallback pointer is invalid: {exc}"
+                    ) from exc
+                unresolved = compact_root / compact_id
+                if (
+                    compact_metadata.get("schema_version") != 1
+                    or re.fullmatch(r"[0-9a-f]{16}", compact_id) is None
+                    or unresolved.is_symlink()
+                ):
+                    raise HouseHunterError("Mountain compact fallback pointer is invalid")
+                bundled = unresolved
+                managed_fallback = True
+        if not (bundled / "manifest.json").is_file():
+            if managed_fallback:
+                raise HouseHunterError("Mountain compact fallback pointer is invalid")
+            return None
+        if managed_fallback and (
+            not (bundled / OWNERSHIP_MARKER).is_file() or (bundled / OWNERSHIP_MARKER).is_symlink()
+        ):
+            raise HouseHunterError("Mountain compact fallback is unowned")
+        manifest, tracts, counties = load_compact_release(bundled)
+        if managed_fallback and manifest["release_id"] != bundled.name:
+            raise HouseHunterError("Mountain compact fallback pointer and release disagree")
+        return bundled, manifest, tracts, counties
+    if pointer.is_symlink():
+        raise HouseHunterError("Current Mountain release pointer cannot be a symlink")
     try:
         metadata = json.loads(pointer.read_text())
         release_id = str(metadata["release_id"])
     except (OSError, KeyError, json.JSONDecodeError) as exc:
         raise HouseHunterError(f"Current Mountain release pointer is invalid: {exc}") from exc
-    releases = (paths.data / "mountain" / "releases").resolve()
-    release = (releases / release_id).resolve()
+    releases = releases_root.resolve()
+    unresolved_release = releases / release_id
+    if unresolved_release.is_symlink():
+        raise HouseHunterError("Current Mountain release pointer is invalid")
+    release = unresolved_release.resolve()
     if metadata.get("schema_version") != 1 or not release.is_relative_to(releases):
         raise HouseHunterError("Current Mountain release pointer is invalid")
     manifest, tracts, counties = load_compact_release(release)
@@ -686,36 +913,333 @@ def current_compact_release(
     return release, manifest, tracts, counties
 
 
-def promote_release(paths: RuntimePaths, candidate: Path) -> Path:
-    """Atomically promote a validated local release without replacing a good pointer early."""
-    manifest = validate_release(candidate)
+def _current_release_ids(root: Path) -> tuple[str | None, str | None]:
+    pointer = root / "current.json"
+    if not pointer.is_file():
+        return None, None
+    if pointer.is_symlink():
+        raise HouseHunterError("Current Mountain release pointer cannot be a symlink")
+    try:
+        payload = json.loads(pointer.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None, None
+
+    def release_id(key: str) -> str | None:
+        value = payload.get(key)
+        return value if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{16}", value) else None
+
+    return release_id("release_id"), release_id("rollback_release_id")
+
+
+def _publish_pointer(root: Path, release_id: str, rollback_release_id: str | None) -> None:
+    payload: dict[str, object] = {"schema_version": 1, "release_id": release_id}
+    if rollback_release_id and rollback_release_id != release_id:
+        payload["rollback_release_id"] = rollback_release_id
+    temporary_pointer = root / f".current.{uuid.uuid4().hex}.tmp"
+    temporary_pointer.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    os.replace(temporary_pointer, root / "current.json")
+
+
+def _promote_validated_release(
+    paths: RuntimePaths,
+    candidate: Path,
+    manifest: dict[str, object],
+    *,
+    move_candidate: bool,
+) -> Path:
     if manifest["national_complete"] is not True:
         raise HouseHunterError("Partial Mountain releases cannot be promoted")
     root = paths.data / "mountain"
     releases = root / "releases"
-    releases.mkdir(parents=True, exist_ok=True)
+    releases = ensure_safe_directory(releases)
     release_id = str(manifest["release_id"])
-    target = (releases / release_id).resolve()
-    if not target.is_relative_to(releases.resolve()):
-        raise HouseHunterError("Mountain release path escapes the release directory")
+    target = lexical_path(releases / release_id)
+    previous, previous_rollback = _current_release_ids(root)
     if target.exists():
+        require_owned_child(target, releases, name_pattern=r"[0-9a-f]{16}")
         validate_release(target)
+        if move_candidate and candidate != target:
+            remove_owned_child(candidate, releases, name_pattern=r"\.[0-9a-f]{32}\.tmp")
+    elif move_candidate:
+        require_owned_child(candidate, releases, name_pattern=r"\.[0-9a-f]{32}\.tmp")
+        os.replace(candidate, target)
     else:
-        temporary = releases / f".{release_id}.{os.getpid()}.tmp"
-        if temporary.exists():
-            shutil.rmtree(temporary)
+        temporary = releases / f".{release_id}.{uuid.uuid4().hex}.tmp"
         try:
             shutil.copytree(candidate, temporary)
+            (temporary / OWNERSHIP_MARKER).write_text("release-v1\n")
             validate_release(temporary)
             os.replace(temporary, target)
         except BaseException:
+            if (
+                temporary.is_dir()
+                and not temporary.is_symlink()
+                and (temporary / OWNERSHIP_MARKER).is_file()
+                and not (temporary / OWNERSHIP_MARKER).is_symlink()
+            ):
+                remove_owned_child(
+                    temporary,
+                    releases,
+                    name_pattern=r"\.[0-9a-f]{16}\.[0-9a-f]{32}\.tmp",
+                )
+            raise
+    rollback = previous_rollback if previous == release_id else previous
+    _publish_pointer(root, release_id, rollback)
+    return target
+
+
+def promote_release(
+    paths: RuntimePaths,
+    candidate: Path,
+    *,
+    reviewed_source_lock: dict[str, object],
+    reviewed_source_lock_sha256: str,
+    expected_raw_blocks: pl.DataFrame,
+) -> Path:
+    """Defensively validate and copy an externally supplied candidate before promotion."""
+    manifest = validate_release(candidate)
+    sources = manifest.get("sources")
+    if (
+        not isinstance(sources, dict)
+        or sources.get("source_lock_schema_version") != 2
+        or sources.get("source_lock_sha256") != reviewed_source_lock_sha256
+    ):
+        raise HouseHunterError(
+            "Mountain candidate does not match the independently reviewed source lock"
+        )
+    if manifest.get("block_geoid_sha256") != reviewed_source_lock.get(
+        "block_geoid_sha256"
+    ) or manifest.get("national_expectations") != reviewed_source_lock.get("expected_states"):
+        raise HouseHunterError("Mountain candidate differs from the reviewed national inventory")
+    expected = score_blocks(expected_raw_blocks).sort("block_geoid")
+    blocks_file = candidate / manifest["files"]["blocks"]["filename"]
+    actual = pl.read_parquet(blocks_file).sort("block_geoid")
+    if actual.columns != expected.columns or not actual.equals(expected):
+        raise HouseHunterError("Mountain candidate differs from prepared-pack raw metrics")
+    return _promote_validated_release(paths, candidate, manifest, move_candidate=False)
+
+
+def write_and_promote_release(
+    paths: RuntimePaths,
+    raw_blocks: pl.DataFrame,
+    *,
+    data_release: str,
+    sources: dict[str, object],
+    national_expectations: dict[str, object],
+    timings: dict[str, float] | None = None,
+) -> tuple[Path, dict[str, object]]:
+    """Write, definitively validate once, and atomically promote a generated release."""
+    releases = paths.data / "mountain" / "releases"
+    releases = ensure_safe_directory(releases)
+    candidate = releases / f".{uuid.uuid4().hex}.tmp"
+    try:
+        candidate_started = time.monotonic()
+        write_release(
+            raw_blocks,
+            candidate,
+            data_release=data_release,
+            sources=sources,
+            national_expectations=national_expectations,
+            validate=False,
+        )
+        if timings is not None:
+            timings["scoring_aggregation_write_seconds"] = round(
+                time.monotonic() - candidate_started, 3
+            )
+        validation_started = time.monotonic()
+        manifest = validate_release(candidate)
+        if timings is not None:
+            timings["independent_validation_seconds"] = round(
+                time.monotonic() - validation_started, 3
+            )
+        promotion_started = time.monotonic()
+        target = _promote_validated_release(paths, candidate, manifest, move_candidate=True)
+        if timings is not None:
+            timings["promotion_seconds"] = round(time.monotonic() - promotion_started, 3)
+        return target, manifest
+    except BaseException:
+        if (
+            candidate.exists()
+            and not candidate.is_symlink()
+            and (candidate / OWNERSHIP_MARKER).is_file()
+            and not (candidate / OWNERSHIP_MARKER).is_symlink()
+        ):
+            remove_owned_child(candidate, releases, name_pattern=r"\.[0-9a-f]{32}\.tmp")
+        raise
+
+
+def restore_release_pointer(paths: RuntimePaths, pointer: bytes | None) -> None:
+    """Restore the exact prior pointer after a downstream snapshot failure."""
+    root = paths.data / "mountain"
+    current = root / "current.json"
+    if pointer is None:
+        current.unlink(missing_ok=True)
+        return
+    temporary = root / f".current.{uuid.uuid4().hex}.tmp"
+    temporary.write_bytes(pointer)
+    os.replace(temporary, current)
+
+
+def prune_owned_releases(paths: RuntimePaths) -> list[str]:
+    """Retain the active and rollback full releases; remove only marked older releases."""
+    root = paths.data / "mountain"
+    releases = root / "releases"
+    if not releases.is_dir():
+        return []
+    releases = ensure_safe_directory(releases)
+    try:
+        pointer_path = root / "current.json"
+        if pointer_path.is_symlink():
+            raise HouseHunterError("Cannot prune through a symlinked Mountain pointer")
+        pointer = json.loads(pointer_path.read_text())
+    except HouseHunterError:
+        raise
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HouseHunterError(
+            f"Cannot prune Mountain releases with an invalid pointer: {exc}"
+        ) from exc
+    protected = {pointer.get("release_id"), pointer.get("rollback_release_id")}
+    removed: list[str] = []
+    for child in releases.iterdir():
+        if (
+            child.name in protected
+            or re.fullmatch(r"[0-9a-f]{16}", child.name) is None
+            or child.is_symlink()
+            or not child.is_dir()
+            or not (child / OWNERSHIP_MARKER).is_file()
+            or (child / OWNERSHIP_MARKER).is_symlink()
+        ):
+            continue
+        remove_owned_child(child, releases, name_pattern=r"[0-9a-f]{16}")
+        removed.append(child.name)
+    return sorted(removed)
+
+
+def write_and_promote_compact_fallback(
+    paths: RuntimePaths,
+    release: Path,
+    manifest: dict[str, object],
+) -> Path:
+    """Atomically publish the compact managed fallback for a validated release."""
+    runtime_manifest, _, _ = load_compact_release(release)
+    release_id = str(manifest.get("release_id", ""))
+    if runtime_manifest.get("release_id") != release_id:
+        raise HouseHunterError("Mountain compact fallback source was not definitively validated")
+    files = runtime_manifest["files"]
+    compact_bytes = sum(
+        (release / files[name]["filename"]).stat().st_size for name in ("tracts", "counties")
+    )
+    if compact_bytes > COMPACT_RELEASE_MAX_BYTES:
+        raise HouseHunterError(
+            f"Mountain compact artifact is {compact_bytes:,} bytes; "
+            f"maximum is {COMPACT_RELEASE_MAX_BYTES:,}"
+        )
+    root = ensure_safe_directory(paths.data / "mountain" / "compact")
+    target = lexical_path(root / release_id)
+    if target.exists():
+        require_owned_child(target, root, name_pattern=r"[0-9a-f]{16}")
+        existing, _, _ = load_compact_release(target)
+        if existing.get("release_id") != release_id:
+            raise HouseHunterError("Mountain compact fallback identity collision")
+    else:
+        temporary = ensure_owned_child(
+            root / f".{release_id}.{uuid.uuid4().hex}.tmp",
+            root,
+            name_pattern=r"\.[0-9a-f]{16}\.[0-9a-f]{32}\.tmp",
+            marker_value="compact-release-v1\n",
+        )
+        try:
+            shutil.copy2(release / "manifest.json", temporary / "manifest.json")
+            for name in ("tracts", "counties"):
+                filename = str(files[name]["filename"])
+                shutil.copy2(release / filename, temporary / filename)
+            copied, _, _ = load_compact_release(temporary)
+            if copied.get("release_id") != release_id:
+                raise HouseHunterError("Mountain compact fallback copy differs from its release")
+            if _allocated_tree_bytes(temporary) > COMPACT_RELEASE_MAX_BYTES:
+                raise HouseHunterError("Mountain compact fallback exceeds its 50 MiB budget")
+            os.replace(temporary, target)
+        except BaseException:
             if temporary.exists():
-                shutil.rmtree(temporary)
+                remove_owned_child(
+                    temporary,
+                    root,
+                    name_pattern=r"\.[0-9a-f]{16}\.[0-9a-f]{32}\.tmp",
+                )
             raise
     pointer = root / "current.json"
-    temporary_pointer = root / ".current.json.tmp"
+    temporary_pointer = root / f".current.{uuid.uuid4().hex}.tmp"
     temporary_pointer.write_text(
         json.dumps({"schema_version": 1, "release_id": release_id}, indent=2, sort_keys=True) + "\n"
     )
     os.replace(temporary_pointer, pointer)
     return target
+
+
+def restore_compact_pointer(paths: RuntimePaths, pointer: bytes | None) -> None:
+    """Restore the prior compact-fallback pointer during publication rollback."""
+    root = ensure_safe_directory(paths.data / "mountain" / "compact")
+    current = root / "current.json"
+    if pointer is None:
+        current.unlink(missing_ok=True)
+        return
+    temporary = root / f".current.{uuid.uuid4().hex}.tmp"
+    temporary.write_bytes(pointer)
+    os.replace(temporary, current)
+
+
+def prune_owned_compact_fallbacks(paths: RuntimePaths) -> list[str]:
+    """Retain only the active compact fallback and remove marked older copies."""
+    root = paths.data / "mountain" / "compact"
+    if not root.is_dir():
+        return []
+    root = ensure_safe_directory(root)
+    pointer = root / "current.json"
+    if pointer.is_symlink():
+        raise HouseHunterError("Cannot prune through a symlinked compact fallback pointer")
+    try:
+        metadata = json.loads(pointer.read_text())
+        protected = str(metadata["release_id"])
+    except (OSError, KeyError, json.JSONDecodeError) as exc:
+        raise HouseHunterError(
+            f"Cannot prune compact fallbacks with an invalid pointer: {exc}"
+        ) from exc
+    if metadata.get("schema_version") != 1 or re.fullmatch(r"[0-9a-f]{16}", protected) is None:
+        raise HouseHunterError("Cannot prune compact fallbacks with an invalid pointer")
+    removed: list[str] = []
+    for child in root.iterdir():
+        if child.name == protected or re.fullmatch(r"[0-9a-f]{16}", child.name) is None:
+            continue
+        if (
+            child.is_symlink()
+            or not child.is_dir()
+            or not (child / OWNERSHIP_MARKER).is_file()
+            or (child / OWNERSHIP_MARKER).is_symlink()
+        ):
+            continue
+        remove_owned_child(child, root, name_pattern=r"[0-9a-f]{16}")
+        removed.append(child.name)
+    return sorted(removed)
+
+
+def write_compact_bundle(release: Path, destination: Path) -> Path:
+    """Write an atomic tract/county-only runtime fallback from a validated release."""
+    manifest = validate_release(release)
+    temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+    if destination.exists():
+        raise HouseHunterError(f"Mountain compact bundle already exists: {destination}")
+    temporary.mkdir(parents=True)
+    try:
+        shutil.copy2(release / "manifest.json", temporary / "manifest.json")
+        files = manifest["files"]
+        for name in ("tracts", "counties"):
+            shutil.copy2(release / files[name]["filename"], temporary / files[name]["filename"])
+        load_compact_release(temporary)
+        if _allocated_tree_bytes(temporary) > COMPACT_RELEASE_MAX_BYTES:
+            raise HouseHunterError("Mountain compact bundle exceeds its 50 MiB budget")
+        os.replace(temporary, destination)
+    except BaseException:
+        if temporary.exists():
+            shutil.rmtree(temporary)
+        raise
+    return destination

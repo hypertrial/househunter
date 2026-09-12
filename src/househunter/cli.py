@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
+import time
+import uuid
 import webbrowser
 from pathlib import Path
 from typing import Annotated
@@ -13,7 +16,7 @@ import uvicorn
 from .api import create_app
 from .build import build_snapshot
 from .chrr import download_chrr
-from .config import RuntimePaths, load_config
+from .config import RuntimePaths, load_config, sha256_file
 from .download import download_fema, download_fema_counties, source_statuses
 from .errors import AmbiguousPlaceError, HouseHunterError
 from .geocode import lookup_address
@@ -47,6 +50,59 @@ def _release_slug(value: str) -> str:
     return value.lower()
 
 
+def _record_cleanup_warning(
+    label: str, exc: HouseHunterError | OSError, warnings: list[str]
+) -> None:
+    warning = f"Mountain {label} cleanup pending: {exc}"
+    warnings.append(warning)
+    typer.echo(f"Warning: {warning}", err=True)
+
+
+def _rebuild_after_mountain_promotion(
+    paths: RuntimePaths,
+    previous_pointer: bytes | None,
+    promoted_release: Path,
+    release_manifest: dict[str, object],
+) -> tuple[Path, Path, list[str]]:
+    """Publish compact/runtime views or restore both Mountain pointers on failure."""
+    from .mountain import (
+        prune_owned_compact_fallbacks,
+        prune_owned_releases,
+        restore_compact_pointer,
+        restore_release_pointer,
+        write_and_promote_compact_fallback,
+    )
+
+    compact_pointer = paths.data / "mountain" / "compact" / "current.json"
+    previous_compact = compact_pointer.read_bytes() if compact_pointer.is_file() else None
+    if paths.current.is_symlink():
+        raise HouseHunterError("HouseHunter snapshot pointer cannot be a symlink")
+    previous_snapshot = paths.current.read_bytes() if paths.current.is_file() else None
+    try:
+        compact = write_and_promote_compact_fallback(paths, promoted_release, release_manifest)
+        snapshot = build_snapshot(paths, progress=_progress)
+    except BaseException:
+        restore_release_pointer(paths, previous_pointer)
+        restore_compact_pointer(paths, previous_compact)
+        temporary = paths.current.with_name(f".{paths.current.name}.{uuid.uuid4().hex}.tmp")
+        if previous_snapshot is None:
+            paths.current.unlink(missing_ok=True)
+        else:
+            temporary.write_bytes(previous_snapshot)
+            os.replace(temporary, paths.current)
+        raise
+    cleanup_warnings: list[str] = []
+    for label, cleanup in (
+        ("full release", prune_owned_releases),
+        ("compact fallback", prune_owned_compact_fallbacks),
+    ):
+        try:
+            cleanup(paths)
+        except (HouseHunterError, OSError) as exc:
+            _record_cleanup_warning(label, exc, cleanup_warnings)
+    return snapshot, compact, cleanup_warnings
+
+
 @mountain_app.command("download")
 def mountain_download(
     source_lock: Annotated[Path, typer.Option("--source-lock", exists=True, dir_okay=False)],
@@ -54,14 +110,54 @@ def mountain_download(
 ) -> None:
     """Download the exact files named by a maintainer source lock."""
     from .mountain_gis import download_sources as download_mountain_sources
+    from .mountain_pack import ensure_storage_budget
+    from .mountain_paths import ensure_owned_child, lexical_path
 
     paths = _paths()
-    target = (destination or paths.data / "mountain" / "sources").expanduser().resolve()
+    managed_staging = paths.data / "mountain" / "staging"
+    target = (
+        destination.expanduser().resolve()
+        if destination is not None
+        else lexical_path(managed_staging / sha256_file(source_lock)[:16])
+    )
     try:
         with exclusive_lock(paths.job_lock):
+            if destination is None:
+                target = ensure_owned_child(
+                    target,
+                    managed_staging,
+                    name_pattern=r"[0-9a-f]{16}",
+                    marker_value="staging-v1\n",
+                )
+                lock = json.loads(source_lock.read_text())
+                expected = sum(
+                    int(item["size"])
+                    + (
+                        int(item.get("archive", {}).get("total_uncompressed_size", 0))
+                        if not (
+                            target / str(item.get("archive", {}).get("root", "missing"))
+                        ).exists()
+                        else 0
+                    )
+                    for item in lock["sources"]
+                    if not (target / str(item["filename"])).is_file()
+                    or (target / str(item["filename"])).stat().st_size != int(item["size"])
+                    or (
+                        item.get("archive") is not None
+                        and not (target / str(item["archive"].get("root", "missing"))).exists()
+                    )
+                )
+                ensure_storage_budget(paths.data / "mountain", reserve_bytes=expected)
             output = download_mountain_sources(source_lock.expanduser().resolve(), target)
         typer.echo(str(output))
-    except (HouseHunterError, OSError) as exc:
+    except (
+        HouseHunterError,
+        OSError,
+        KeyError,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as exc:
         _abort(HouseHunterError(str(exc)))
 
 
@@ -72,6 +168,10 @@ def mountain_build(
     regions: Annotated[Path | None, typer.Option("--regions", dir_okay=False)] = None,
     source_root: Annotated[Path | None, typer.Option("--source-root", file_okay=False)] = None,
     raw_blocks: Annotated[Path | None, typer.Option("--raw-blocks", dir_okay=False)] = None,
+    prepared_pack: Annotated[Path | None, typer.Option("--prepared-pack", file_okay=False)] = None,
+    prepared_lock: Annotated[Path | None, typer.Option("--prepared-lock", dir_okay=False)] = None,
+    workers: Annotated[int, typer.Option("--workers", min=1, max=4)] = 4,
+    resume: Annotated[bool, typer.Option("--resume/--fresh")] = True,
     output: Annotated[Path | None, typer.Option("--output")] = None,
     promote: Annotated[bool, typer.Option("--promote/--no-promote")] = True,
     allow_partial: Annotated[bool, typer.Option("--allow-partial")] = False,
@@ -82,41 +182,127 @@ def mountain_build(
     from .mountain import (
         promote_release,
         validate_national_expectations,
+        validate_release,
+        write_and_promote_release,
         write_release,
     )
     from .mountain_gis import (
         build_region_raw_metrics,
         load_regions,
+        load_source_lock_contract,
         locked_source_paths,
         verify_region_sources_locked,
         verify_source_lock,
     )
+    from .mountain_pack import (
+        build_prepared_raw_metrics,
+        ensure_storage_budget,
+        remove_owned_work_directory,
+        verify_prepared_pack,
+    )
+    from .mountain_paths import ensure_safe_directory, lexical_path
 
-    if bool(raw_blocks) == bool(regions):
-        _abort(HouseHunterError("Provide exactly one of --raw-blocks or --regions"))
+    if sum(bool(value) for value in (raw_blocks, regions, prepared_pack)) != 1:
+        _abort(
+            HouseHunterError("Provide exactly one of --prepared-pack, --raw-blocks, or --regions")
+        )
+    if bool(prepared_pack) != bool(prepared_lock):
+        _abort(HouseHunterError("--prepared-pack and --prepared-lock must be provided together"))
+    if prepared_pack and source_lock is None:
+        _abort(HouseHunterError("National prepared builds require --source-lock"))
+    if prepared_pack and allow_partial:
+        _abort(HouseHunterError("Prepared Mountain builds must satisfy the national contract"))
+    if prepared_pack and promote and output is not None:
+        _abort(HouseHunterError("Prepared promoted builds write directly to managed releases"))
     if allow_partial and promote:
         _abort(HouseHunterError("Partial Mountain builds cannot be promoted"))
     paths = _paths()
     try:
         release_slug = _release_slug(data_release)
         candidate = (
-            (output or paths.data / "mountain" / "candidates" / release_slug).expanduser().resolve()
+            output.expanduser().resolve()
+            if output is not None
+            else lexical_path(paths.data / "mountain" / "candidates" / release_slug)
         )
+        if output is None:
+            ensure_safe_directory(candidate.parent)
         with exclusive_lock(paths.job_lock):
+            started = time.monotonic()
             source_metadata: dict[str, object] = {}
             lock: dict[str, object] | None = None
+            work: Path | None = None
+            performance: dict[str, object] = {}
             if source_lock:
-                lock = verify_source_lock(
-                    source_lock.expanduser().resolve(),
-                    root=source_root.expanduser().resolve() if source_root else None,
+                resolved_lock = source_lock.expanduser().resolve()
+                lock = (
+                    load_source_lock_contract(resolved_lock, require_v2=True)
+                    if prepared_pack
+                    else verify_source_lock(
+                        resolved_lock,
+                        root=source_root.expanduser().resolve() if source_root else None,
+                    )
                 )
                 source_metadata = {
+                    "source_lock_schema_version": lock["schema_version"],
+                    "source_lock_sha256": sha256_file(resolved_lock),
                     "items": [
-                        {key: value for key, value in item.items() if key != "path"}
+                        {key: value for key, value in item.items() if key not in {"path", "url"}}
                         for item in lock["sources"]
-                    ]
+                    ],
                 }
-            if raw_blocks:
+                if not allow_partial and lock.get("schema_version") != 2:
+                    raise HouseHunterError("National Mountain builds require source-lock v2")
+            if prepared_pack:
+                assert prepared_lock is not None
+                assert source_lock is not None
+                pack = lexical_path(prepared_pack)
+                pack_lock = prepared_lock.expanduser().resolve()
+                manifest = verify_prepared_pack(
+                    pack,
+                    pack_lock,
+                    reviewed_source_lock_path=source_lock.expanduser().resolve(),
+                    require_source_lock_v2=True,
+                )
+                grid = manifest["grid"]
+                if (
+                    grid.get("cell_size_m") != 250
+                    or grid.get("tile_size_m") != 100_000
+                    or grid.get("halo_m") != 100_000
+                    or any(tile.get("shape") != [1_200, 1_200] for tile in manifest["tiles"])
+                ):
+                    raise HouseHunterError(
+                        "National Mountain builds require exact v1 250 m/100 km tiles"
+                    )
+                work_root = paths.data / "mountain" / "work"
+                work_root.mkdir(parents=True, exist_ok=True)
+                work = work_root / str(manifest["pack_id"])
+                if not resume and work.exists():
+                    remove_owned_work_directory(work, work_root)
+                blocks, performance = build_prepared_raw_metrics(
+                    pack,
+                    pack_lock,
+                    work,
+                    workers=workers,
+                    resume=resume,
+                    managed_root=paths.data / "mountain",
+                    verified_manifest=manifest,
+                )
+                expectations = manifest.get("state_expectations")
+                provenance = manifest.get("source_provenance", {})
+                if not isinstance(expectations, dict) or not isinstance(provenance, dict):
+                    raise HouseHunterError("Prepared Mountain pack lacks national provenance")
+                source_metadata = {
+                    **provenance,
+                    "source_lock_schema_version": manifest["source_lock_schema_version"],
+                    "source_lock_sha256": manifest["source_lock_sha256"],
+                    "prepared_pack": {
+                        "schema_version": 1,
+                        "pack_id": manifest["pack_id"],
+                        "prepared_lock_sha256": sha256_file(pack_lock),
+                        "source_lock_sha256": manifest["source_lock_sha256"],
+                    },
+                }
+            elif raw_blocks:
                 raw_path = raw_blocks.expanduser().resolve()
                 if not allow_partial and lock is None:
                     raise HouseHunterError("National raw-block builds require --source-lock")
@@ -142,24 +328,188 @@ def mountain_build(
                     for region in configured_regions
                 ]
                 blocks = pl.concat(regional)
-            expectations: dict[str, object] | None = None
-            if not allow_partial:
+            if not prepared_pack:
+                expectations: dict[str, object] | None = None
+            if not allow_partial and not prepared_pack:
                 expectations = lock.get("expected_states") if lock else None
                 if not isinstance(expectations, dict):
                     raise HouseHunterError(
                         "National Mountain builds require expected_states in the source lock"
                     )
-                validate_national_expectations(blocks, expectations)
-            release = write_release(
-                blocks,
-                candidate,
-                data_release=data_release,
-                sources=source_metadata,
-                national_expectations=expectations,
-            )
-            final = promote_release(paths, release) if promote else release
+                validate_national_expectations(
+                    blocks,
+                    expectations,
+                    expected_block_geoid_sha256=lock.get("block_geoid_sha256")
+                    if lock and lock.get("schema_version") == 2
+                    else None,
+                )
+            if prepared_pack:
+                assert expectations is not None
+                validate_national_expectations(
+                    blocks,
+                    expectations,
+                    expected_block_geoid_sha256=manifest["block_geoid_sha256"],
+                )
+            pointer_path = paths.data / "mountain" / "current.json"
+            previous_pointer = pointer_path.read_bytes() if pointer_path.is_file() else None
+            if promote and output is None and expectations is not None:
+                ensure_storage_budget(paths.data / "mountain", reserve_bytes=4_000_000_000)
+                release_timings: dict[str, float] = {}
+                final, release_manifest = write_and_promote_release(
+                    paths,
+                    blocks,
+                    data_release=data_release,
+                    sources=source_metadata,
+                    national_expectations=expectations,
+                    timings=release_timings,
+                )
+                performance.update(release_timings)
+            else:
+                release = write_release(
+                    blocks,
+                    candidate,
+                    data_release=data_release,
+                    sources=source_metadata,
+                    national_expectations=expectations,
+                )
+                final = (
+                    promote_release(
+                        paths,
+                        release,
+                        reviewed_source_lock=lock or {},
+                        reviewed_source_lock_sha256=str(source_metadata["source_lock_sha256"]),
+                        expected_raw_blocks=blocks,
+                    )
+                    if promote
+                    else release
+                )
+                release_manifest = validate_release(final if not promote else release)
+            snapshot_path: Path | None = None
+            if promote:
+                snapshot_started = time.monotonic()
+                snapshot_path, compact_path, cleanup_warnings = _rebuild_after_mountain_promotion(
+                    paths, previous_pointer, final, release_manifest
+                )
+                performance["snapshot_seconds"] = round(time.monotonic() - snapshot_started, 3)
+                performance["compact_path"] = str(compact_path)
+                performance["cleanup_warnings"] = cleanup_warnings
+                if prepared_pack and work is not None:
+                    try:
+                        remove_owned_work_directory(work, paths.data / "mountain" / "work")
+                    except (HouseHunterError, OSError) as exc:
+                        _record_cleanup_warning("work shard", exc, cleanup_warnings)
+            total_seconds = round(time.monotonic() - started, 3)
+            if prepared_pack:
+                reports = ensure_safe_directory(paths.data / "mountain" / "reports")
+                report = {
+                    **performance,
+                    "release_id": release_manifest["release_id"],
+                    "snapshot_id": snapshot_path.name if snapshot_path else None,
+                    "total_seconds": total_seconds,
+                    "under_55_minutes": total_seconds < 55 * 60,
+                }
+                report_path = reports / f"{release_manifest['release_id']}-{uuid.uuid4().hex}.json"
+                report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
         typer.echo(str(final))
     except (HouseHunterError, OSError, pl.exceptions.PolarsError) as exc:
+        _abort(HouseHunterError(str(exc)))
+
+
+@mountain_app.command("prepare")
+def mountain_prepare(
+    source_lock: Annotated[Path, typer.Option("--source-lock", exists=True, dir_okay=False)],
+    regions: Annotated[Path, typer.Option("--regions", exists=True, dir_okay=False)],
+    source_root: Annotated[Path, typer.Option("--source-root", exists=True, file_okay=False)],
+    destination: Annotated[Path | None, typer.Option("--destination")] = None,
+    prepared_lock: Annotated[Path | None, typer.Option("--prepared-lock-output")] = None,
+) -> None:
+    """Build an immutable v1 prepared source pack outside the timed build SLA."""
+    from .mountain_gis import load_regions, verify_region_sources_locked, verify_source_lock
+    from .mountain_pack import (
+        ensure_storage_budget,
+        prepare_regions,
+        prune_owned_prepared_packs,
+        remove_owned_staging_directory,
+    )
+    from .mountain_paths import OWNERSHIP_MARKER, lexical_path
+
+    paths = _paths()
+    try:
+        lock_path = source_lock.expanduser().resolve()
+        root_input = lexical_path(source_root)
+        root = root_input.resolve()
+        region_path = regions.expanduser().resolve()
+        target = (
+            destination.expanduser().resolve()
+            if destination is not None
+            else lexical_path(paths.data / "mountain" / "prepared")
+        )
+        with exclusive_lock(paths.job_lock):
+            lock = verify_source_lock(lock_path, root=root)
+            if lock.get("schema_version") != 2:
+                raise HouseHunterError("National prepared packs require reviewed source-lock v2")
+            configured = load_regions(region_path, root)
+            verify_region_sources_locked(configured, lock, root=root)
+            projection = lock.get("storage_projection")
+            if not isinstance(projection, dict):
+                raise HouseHunterError("Mountain source lock lacks a storage projection")
+            ensure_storage_budget(
+                paths.data / "mountain",
+                reserve_bytes=int(projection["prepared_pack_bytes"]),
+            )
+            pack, pack_lock = prepare_regions(
+                configured,
+                target,
+                state_by_fips=STATE_BY_FIPS,
+                source_lock_path=lock_path,
+                region_config_path=region_path,
+                prepared_lock_path=prepared_lock.expanduser().resolve() if prepared_lock else None,
+            )
+            staging_root = paths.data / "mountain" / "staging"
+            if (
+                root_input.parent == lexical_path(staging_root)
+                and (root_input / OWNERSHIP_MARKER).is_file()
+                and not pack.is_relative_to(root)
+            ):
+                remove_owned_staging_directory(root_input, staging_root)
+            if destination is None:
+                prune_owned_prepared_packs(target, keep=pack)
+        typer.echo(
+            json.dumps(
+                {"pack": str(pack), "prepared_lock": str(pack_lock)},
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    except (HouseHunterError, OSError) as exc:
+        _abort(HouseHunterError(str(exc)))
+
+
+@mountain_app.command("inventory")
+def mountain_inventory(
+    regions: Annotated[Path, typer.Option("--regions", exists=True, dir_okay=False)],
+    source_root: Annotated[Path, typer.Option("--source-root", exists=True, file_okay=False)],
+    output: Annotated[Path | None, typer.Option("--output", dir_okay=False)] = None,
+) -> None:
+    """Compute the exact national block/tile inventory before large source downloads."""
+    from .mountain_gis import load_regions, qualify_national_inventory
+
+    try:
+        configured = load_regions(
+            regions.expanduser().resolve(), source_root.expanduser().resolve()
+        )
+        report = qualify_national_inventory(configured, state_by_fips=STATE_BY_FIPS)
+        rendered = json.dumps(report, indent=2, sort_keys=True) + "\n"
+        if output:
+            destination = output.expanduser().resolve()
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+            temporary.write_text(rendered)
+            os.replace(temporary, destination)
+            typer.echo(str(destination))
+        else:
+            typer.echo(rendered, nl=False)
+    except (HouseHunterError, OSError) as exc:
         _abort(HouseHunterError(str(exc)))
 
 
@@ -167,20 +517,104 @@ def mountain_build(
 def mountain_validate(
     release: Annotated[Path, typer.Argument(exists=True, file_okay=False)],
     promote: Annotated[bool, typer.Option("--promote/--no-promote")] = False,
+    source_lock: Annotated[
+        Path | None, typer.Option("--source-lock", exists=True, dir_okay=False)
+    ] = None,
+    prepared_pack: Annotated[
+        Path | None, typer.Option("--prepared-pack", exists=True, file_okay=False)
+    ] = None,
+    prepared_lock: Annotated[
+        Path | None, typer.Option("--prepared-lock", exists=True, dir_okay=False)
+    ] = None,
+    workers: Annotated[int, typer.Option("--workers", min=1, max=4)] = 4,
 ) -> None:
     """Validate a candidate release and optionally promote it."""
     from .mountain import promote_release
     from .mountain import validate_release as validate_mountain_release
+    from .mountain_gis import load_source_lock_contract
+    from .mountain_pack import (
+        build_prepared_raw_metrics,
+        remove_owned_work_directory,
+        verify_prepared_pack,
+    )
+    from .mountain_paths import lexical_path
 
     paths = _paths()
     try:
         with exclusive_lock(paths.job_lock):
-            report = validate_mountain_release(release.expanduser().resolve())
+            manifest = validate_mountain_release(release.expanduser().resolve())
+            report = {
+                key: value
+                for key, value in manifest.items()
+                if key not in {"sources", "national_expectations"}
+            }
             if promote:
-                report["promoted_path"] = str(
-                    promote_release(paths, release.expanduser().resolve())
+                if source_lock is None or prepared_pack is None or prepared_lock is None:
+                    raise HouseHunterError(
+                        "Promoting an external Mountain release requires --source-lock, "
+                        "--prepared-pack, and --prepared-lock"
+                    )
+                reviewed = source_lock.expanduser().resolve()
+                reviewed_contract = load_source_lock_contract(reviewed, require_v2=True)
+                pack = lexical_path(prepared_pack)
+                pack_lock = prepared_lock.expanduser().resolve()
+                pack_manifest = verify_prepared_pack(
+                    pack,
+                    pack_lock,
+                    reviewed_source_lock_path=reviewed,
+                    require_source_lock_v2=True,
                 )
+                work_root = paths.data / "mountain" / "work"
+                work = work_root / str(pack_manifest["pack_id"])
+                expected_raw, _ = build_prepared_raw_metrics(
+                    pack,
+                    pack_lock,
+                    work,
+                    workers=workers,
+                    resume=True,
+                    managed_root=paths.data / "mountain",
+                    verified_manifest=pack_manifest,
+                )
+                pointer_path = paths.data / "mountain" / "current.json"
+                previous_pointer = pointer_path.read_bytes() if pointer_path.is_file() else None
+                promoted = promote_release(
+                    paths,
+                    release.expanduser().resolve(),
+                    reviewed_source_lock=reviewed_contract,
+                    reviewed_source_lock_sha256=sha256_file(reviewed),
+                    expected_raw_blocks=expected_raw,
+                )
+                report["promoted_path"] = str(promoted)
+                snapshot, compact, cleanup_warnings = _rebuild_after_mountain_promotion(
+                    paths, previous_pointer, promoted, manifest
+                )
+                report["snapshot_path"] = str(snapshot)
+                report["compact_path"] = str(compact)
+                report["cleanup_warnings"] = cleanup_warnings
+                try:
+                    remove_owned_work_directory(work, work_root)
+                except (HouseHunterError, OSError) as exc:
+                    _record_cleanup_warning("work shard", exc, cleanup_warnings)
         typer.echo(json.dumps(report, indent=2, sort_keys=True))
+    except (HouseHunterError, OSError) as exc:
+        _abort(HouseHunterError(str(exc)))
+
+
+@mountain_app.command("bundle")
+def mountain_bundle(
+    release: Annotated[Path, typer.Argument(exists=True, file_okay=False)],
+    output: Annotated[Path, typer.Option("--output")],
+) -> None:
+    """Generate a validated tract/county-only bundled runtime fallback."""
+    from .mountain import write_compact_bundle
+
+    paths = _paths()
+    try:
+        with exclusive_lock(paths.job_lock):
+            result = write_compact_bundle(
+                release.expanduser().resolve(), output.expanduser().resolve()
+            )
+        typer.echo(str(result))
     except (HouseHunterError, OSError) as exc:
         _abort(HouseHunterError(str(exc)))
 
@@ -193,14 +627,18 @@ def mountain_inspect(
     """Inspect a 15-digit block, 11-digit tract, or 5-digit county release row."""
     import polars as pl
 
+    from .mountain import current_compact_release
+
     if not geoid.isdigit() or len(geoid) not in {5, 11, 15}:
         _abort(HouseHunterError("Mountain GEOID must contain 5, 11, or 15 digits"))
     paths = _paths()
     try:
         root = release.expanduser().resolve() if release else None
         if root is None:
-            pointer = json.loads((paths.data / "mountain" / "current.json").read_text())
-            root = paths.data / "mountain" / "releases" / pointer["release_id"]
+            current = current_compact_release(paths)
+            if current is None:
+                raise HouseHunterError("No promoted or bundled Mountain release is available")
+            root = current[0]
         filename = {5: "counties.parquet", 11: "tracts.parquet", 15: "blocks.parquet"}[len(geoid)]
         artifact = root / filename
         if not artifact.is_file():
@@ -297,23 +735,33 @@ def rank(
     limit: Annotated[int, typer.Option("--limit", min=1, max=500)] = 25,
     include_unranked: Annotated[bool, typer.Option("--include-unranked")] = False,
     mountain_min: Annotated[float | None, typer.Option("--mountain-min", min=0, max=100)] = None,
-    metric: Annotated[str, typer.Option("--metric", help="risk or community-conditions")] = "risk",
+    metric: Annotated[
+        str,
+        typer.Option("--metric", help="risk, community-conditions, or mountain"),
+    ] = "risk",
     order: Annotated[str, typer.Option("--order", help="best or worst")] = "best",
 ) -> None:
-    """Rank geographies by FEMA risk or CHR&R Community Conditions."""
+    """Rank geographies by FEMA risk, Community Conditions, or Mountain Score."""
     selected = level.lower()
     if selected not in {"tract", "county"}:
         _abort(HouseHunterError("Rank level must be tract or county"))
     if selected == "county" and county:
         _abort(HouseHunterError("--county filters tracts; omit it when ranking counties"))
     selected_metric = metric.lower()
-    if selected_metric not in {"risk", "community-conditions"}:
-        _abort(HouseHunterError("Rank metric must be risk or community-conditions"))
+    if selected_metric not in {"risk", "community-conditions", "mountain"}:
+        _abort(HouseHunterError("Rank metric must be risk, community-conditions, or mountain"))
     selected_order = order.lower()
     if selected_order not in {"best", "worst"}:
         _abort(HouseHunterError("Rank order must be best or worst"))
-    sort = "risk_score" if selected_metric == "risk" else "community_conditions_group"
-    direction = "asc" if selected_order == "best" else "desc"
+    sort = {
+        "risk": "risk_score",
+        "community-conditions": "community_conditions_group",
+        "mountain": "mountain_score",
+    }[selected_metric]
+    if selected_metric == "mountain":
+        direction = "desc" if selected_order == "best" else "asc"
+    else:
+        direction = "asc" if selected_order == "best" else "desc"
     try:
         with Store(_paths()) as store:
             if selected == "county":
@@ -325,7 +773,7 @@ def rank(
                     sort=sort,
                     direction=direction,
                 )
-                label = "SCORE" if selected_metric == "risk" else "GROUP"
+                label = "GROUP" if selected_metric == "community-conditions" else "SCORE"
                 typer.echo(f"COUNTY_FIPS  {label:<5}  STATE  NAME")
             else:
                 result = store.list_places(
@@ -337,17 +785,19 @@ def rank(
                     sort=sort,
                     direction=direction,
                 )
-                label = "SCORE" if selected_metric == "risk" else "GROUP"
+                label = "GROUP" if selected_metric == "community-conditions" else "SCORE"
                 typer.echo(f"TRACT_ID     {label:<5}  STATE")
         for row in result["items"]:
             value = (
                 row["risk_score"]
                 if selected_metric == "risk"
+                else row["mountain_score"]
+                if selected_metric == "mountain"
                 else row["community_conditions_group"]
             )
             score = (
                 f"{value:.1f}"
-                if selected_metric == "risk" and value is not None
+                if selected_metric in {"risk", "mountain"} and value is not None
                 else str(value)
                 if value is not None
                 else "—"

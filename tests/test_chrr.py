@@ -8,6 +8,7 @@ import polars as pl
 import pytest
 import yaml
 
+import househunter.chrr as chrr_module
 from househunter.chrr import (
     build_processed,
     download_chrr,
@@ -228,6 +229,156 @@ def test_chrr_cancellation_preserves_verified_cache(
             download_chrr(paths, client=client, force=True, cancelled=cancelled)
     assert raw.read_bytes() == previous_raw
     assert metadata.read_bytes() == previous_metadata
+
+
+def test_chrr_pointer_failure_preserves_verified_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _source()
+    config_path = tmp_path / "sources.yml"
+    config_path.write_text(yaml.safe_dump({"schema_version": 1, "chrr": source}))
+    monkeypatch.setenv("HOUSEHUNTER_CONFIG", str(config_path))
+    paths = RuntimePaths.from_root(tmp_path)
+    with httpx.Client(transport=_stable_handler(source)) as client:
+        download_chrr(paths, client=client)
+        raw, metadata = raw_paths(paths)
+        previous_raw = raw.read_bytes()
+        previous_metadata = metadata.read_bytes()
+        real_replace = chrr_module.os.replace
+
+        def fail_pointer_replace(source_path: Path, destination: Path) -> None:
+            if Path(destination).name == "current.json":
+                raise OSError("simulated pointer publication failure")
+            real_replace(source_path, destination)
+
+        monkeypatch.setattr("househunter.chrr.os.replace", fail_pointer_replace)
+        with pytest.raises(OSError, match="simulated pointer publication failure"):
+            download_chrr(paths, client=client, force=True)
+
+    current_raw, current_metadata = raw_paths(paths)
+    assert current_raw.read_bytes() == previous_raw
+    assert current_metadata.read_bytes() == previous_metadata
+
+
+def test_chrr_managed_cache_metadata_is_not_repaired_in_place(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _source()
+    config_path = tmp_path / "sources.yml"
+    config_path.write_text(yaml.safe_dump({"schema_version": 1, "chrr": source}))
+    monkeypatch.setenv("HOUSEHUNTER_CONFIG", str(config_path))
+    paths = RuntimePaths.from_root(tmp_path)
+    with httpx.Client(transport=_stable_handler(source)) as client:
+        download_chrr(paths, client=client)
+        first_raw, first_metadata = raw_paths(paths)
+        first_metadata.write_text("{}\n")
+        refreshed_raw = download_chrr(paths, client=client)
+
+    assert refreshed_raw != first_raw
+    assert raw_paths(paths)[1] != first_metadata
+    validate_cached_chrr(refreshed_raw, source)
+
+
+def test_chrr_cancellation_after_pointer_commit_reports_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _source()
+    config_path = tmp_path / "sources.yml"
+    config_path.write_text(yaml.safe_dump({"schema_version": 1, "chrr": source}))
+    monkeypatch.setenv("HOUSEHUNTER_CONFIG", str(config_path))
+    paths = RuntimePaths.from_root(tmp_path)
+    cancelled = False
+    real_publish = chrr_module._publish_cache_generation
+
+    def publish_then_cancel(*args: object, **kwargs: object) -> Path:
+        nonlocal cancelled
+        published = real_publish(*args, **kwargs)  # type: ignore[arg-type]
+        cancelled = True
+        return published
+
+    def progress(_value: int, _message: str) -> None:
+        if cancelled:
+            raise InterruptedError("Job cancelled")
+
+    monkeypatch.setattr(chrr_module, "_publish_cache_generation", publish_then_cancel)
+    with httpx.Client(transport=_stable_handler(source)) as client:
+        published = download_chrr(
+            paths,
+            client=client,
+            progress=progress,
+            cancelled=lambda: cancelled,
+            force=True,
+        )
+
+    assert published == raw_paths(paths)[0]
+    validate_cached_chrr(published, source)
+
+
+def test_chrr_rejects_symlinked_generation_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _source()
+    config_path = tmp_path / "sources.yml"
+    config_path.write_text(yaml.safe_dump({"schema_version": 1, "chrr": source}))
+    monkeypatch.setenv("HOUSEHUNTER_CONFIG", str(config_path))
+    paths = RuntimePaths.from_root(tmp_path)
+    paths.ensure()
+    cache = paths.raw / "chrr"
+    cache.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (cache / "generations").symlink_to(outside, target_is_directory=True)
+
+    with (
+        httpx.Client(transport=_stable_handler(source)) as client,
+        pytest.raises(SourceContractError, match="real directory"),
+    ):
+        download_chrr(paths, client=client, force=True)
+
+    assert list(outside.iterdir()) == []
+
+
+def test_chrr_retains_only_current_and_rollback_generations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _source()
+    config_path = tmp_path / "sources.yml"
+    config_path.write_text(yaml.safe_dump({"schema_version": 1, "chrr": source}))
+    monkeypatch.setenv("HOUSEHUNTER_CONFIG", str(config_path))
+    paths = RuntimePaths.from_root(tmp_path)
+
+    with httpx.Client(transport=_stable_handler(source)) as client:
+        for _ in range(4):
+            download_chrr(paths, client=client, force=True)
+
+    generations = paths.raw / "chrr" / "generations"
+    retained = [path for path in generations.iterdir() if len(path.name) == 64]
+    assert len(retained) == 2
+    assert raw_paths(paths)[0].parent in retained
+
+
+@pytest.mark.parametrize("broken_symlink", [False, True])
+def test_chrr_rejects_missing_pointer_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, broken_symlink: bool
+) -> None:
+    source = _source()
+    config_path = tmp_path / "sources.yml"
+    config_path.write_text(yaml.safe_dump({"schema_version": 1, "chrr": source}))
+    monkeypatch.setenv("HOUSEHUNTER_CONFIG", str(config_path))
+    paths = RuntimePaths.from_root(tmp_path)
+    paths.ensure()
+    cache = paths.raw / "chrr"
+    generations = cache / "generations"
+    generations.mkdir(parents=True)
+    generation = "a" * 64
+    if broken_symlink:
+        (generations / generation).symlink_to(tmp_path / "missing", target_is_directory=True)
+    (cache / "current.json").write_text(json.dumps({"generation": generation}) + "\n")
+
+    with pytest.raises(SourceContractError, match="missing|real directory"):
+        raw_paths(paths)
+
+    assert not (generations / generation).is_dir()
 
 
 @pytest.mark.parametrize(

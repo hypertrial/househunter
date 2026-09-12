@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import httpx
 import polars as pl
@@ -21,11 +23,125 @@ Cancelled = Callable[[], bool]
 RAW_NAME = "community_conditions_2025.json"
 METADATA_NAME = "metadata.json"
 PROCESSED_NAME = "chrr_county.parquet"
+CURRENT_NAME = "current.json"
+GENERATIONS_NAME = "generations"
+OWNERSHIP_MARKER = ".househunter-owned"
+
+
+def _is_hex(value: str, length: int) -> bool:
+    return len(value) == length and all(character in "0123456789abcdef" for character in value)
+
+
+def _pointer_generation(directory: Path) -> str | None:
+    pointer = directory / CURRENT_NAME
+    if not pointer.exists() and not pointer.is_symlink():
+        return None
+    if pointer.is_symlink() or not pointer.is_file():
+        raise SourceContractError("CHR&R cache pointer must be a regular file")
+    try:
+        generation = json.loads(pointer.read_text())["generation"]
+    except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise SourceContractError(f"Cannot read CHR&R cache pointer: {exc}") from exc
+    if not isinstance(generation, str) or not _is_hex(generation, 64):
+        raise SourceContractError("CHR&R cache pointer contains an invalid generation")
+    return generation
+
+
+def _require_real_directory(path: Path) -> None:
+    if path.is_symlink() or not path.is_dir():
+        raise SourceContractError(f"CHR&R managed cache path must be a real directory: {path}")
+
+
+def _remove_owned_generation(path: Path, generations: Path) -> None:
+    if path.parent != generations or path.is_symlink() or not path.is_dir():
+        raise SourceContractError("Refusing to remove an unsafe CHR&R cache path")
+    marker = path / OWNERSHIP_MARKER
+    if marker.is_symlink() or not marker.is_file():
+        raise SourceContractError("Refusing to remove an unowned CHR&R cache generation")
+    shutil.rmtree(path)
 
 
 def raw_paths(paths: RuntimePaths) -> tuple[Path, Path]:
     directory = paths.raw / "chrr"
+    if directory.exists() or directory.is_symlink():
+        _require_real_directory(directory)
+    generation = _pointer_generation(directory)
+    if generation is not None:
+        directory = directory / GENERATIONS_NAME / generation
+        if not directory.exists() and not directory.is_symlink():
+            raise SourceContractError("CHR&R cache pointer target is missing")
+        _require_real_directory(directory)
+        marker = directory / OWNERSHIP_MARKER
+        if marker.is_symlink() or not marker.is_file():
+            raise SourceContractError("CHR&R cache generation is not owned by HouseHunter")
+        for name in (RAW_NAME, METADATA_NAME):
+            path = directory / name
+            if path.is_symlink() or not path.is_file():
+                raise SourceContractError("CHR&R cache generation contains an invalid artifact")
     return directory / RAW_NAME, directory / METADATA_NAME
+
+
+def _publish_cache_generation(
+    paths: RuntimePaths,
+    source: dict[str, Any],
+    source_rows: list[dict[str, Any]],
+    frame: pl.DataFrame,
+    digest: str,
+) -> Path:
+    directory = paths.raw / "chrr"
+    _require_real_directory(directory)
+    generations = directory / GENERATIONS_NAME
+    generations.mkdir(parents=True, exist_ok=True)
+    _require_real_directory(generations)
+    previous_generation = _pointer_generation(directory)
+    temporary = generations / f".{uuid4().hex}.tmp"
+    temporary.mkdir()
+    (temporary / OWNERSHIP_MARKER).write_text("HouseHunter CHR&R cache generation\n")
+    staged_raw = temporary / RAW_NAME
+    staged_metadata = temporary / METADATA_NAME
+    try:
+        staged_raw.write_bytes(canonical_json({"rows": source_rows}) + b"\n")
+        _write_metadata(staged_metadata, source, staged_raw, frame, digest, datetime.now(UTC))
+        staged_frame, staged_digest = validate_cached_chrr(staged_raw, source)
+        _validate_metadata(staged_metadata, source, staged_raw, staged_frame, staged_digest)
+        generation = sha256_bytes(staged_raw.read_bytes() + staged_metadata.read_bytes())
+        published = generations / generation
+        if published.exists():
+            _require_real_directory(published)
+            marker = published / OWNERSHIP_MARKER
+            if marker.is_symlink() or not marker.is_file():
+                raise SourceContractError("Existing CHR&R cache generation is not owned")
+            for name in (RAW_NAME, METADATA_NAME):
+                path = published / name
+                if path.is_symlink() or not path.is_file():
+                    raise SourceContractError("Existing CHR&R cache generation is invalid")
+            existing_bytes = (published / RAW_NAME).read_bytes() + (
+                published / METADATA_NAME
+            ).read_bytes()
+            if sha256_bytes(existing_bytes) != generation:
+                raise SourceContractError("Existing CHR&R cache generation is corrupt")
+            _remove_owned_generation(temporary, generations)
+        else:
+            os.replace(temporary, published)
+        for child in generations.iterdir():
+            if child.name in {generation, previous_generation}:
+                continue
+            if _is_hex(child.name, 64) or (
+                child.name.startswith(".")
+                and child.name.endswith(".tmp")
+                and _is_hex(child.name[1:-4], 32)
+            ):
+                _remove_owned_generation(child, generations)
+        pointer_temporary = directory / f".{CURRENT_NAME}.{uuid4().hex}.tmp"
+        try:
+            pointer_temporary.write_bytes(canonical_json({"generation": generation}) + b"\n")
+            os.replace(pointer_temporary, directory / CURRENT_NAME)
+        finally:
+            pointer_temporary.unlink(missing_ok=True)
+        return published / RAW_NAME
+    finally:
+        if temporary.exists():
+            _remove_owned_generation(temporary, generations)
 
 
 def _logical_rows(frame: pl.DataFrame) -> list[list[Any]]:
@@ -46,9 +162,7 @@ def validate_rows(rows: list[dict[str, Any]], source: dict[str, Any]) -> pl.Data
     for row in rows:
         group = row.get("CommunityConditions_Group")
         if group is not None and (not isinstance(group, int) or isinstance(group, bool)):
-            raise SourceContractError(
-                "CHR&R Community Conditions groups must be integers or null"
-            )
+            raise SourceContractError("CHR&R Community Conditions groups must be integers or null")
     normalized = [
         {
             "county_fips": "" if row.get("fipscode") is None else str(row["fipscode"]),
@@ -108,9 +222,7 @@ def _validate_layer(client: httpx.Client, source: dict[str, Any]) -> int:
         "dataLastEditDate": source["data_last_edit_ms"],
     }
     mismatches = {
-        key: edits.get(key)
-        for key, value in expected_edits.items()
-        if edits.get(key) != value
+        key: edits.get(key) for key, value in expected_edits.items() if edits.get(key) != value
     }
     if mismatches:
         raise SourceContractError(
@@ -183,9 +295,7 @@ def _validate_metadata(
         raise SourceContractError(f"Cannot read CHR&R metadata: {exc}") from exc
     expected = _metadata(source, raw, frame, digest, downloaded_at)
     mismatches = {
-        key: metadata.get(key)
-        for key, value in expected.items()
-        if metadata.get(key) != value
+        key: metadata.get(key) for key, value in expected.items() if metadata.get(key) != value
     }
     if mismatches:
         raise SourceContractError(f"CHR&R metadata does not match the cache: {mismatches}")
@@ -204,6 +314,7 @@ def download_chrr(
     raw, metadata_path = raw_paths(paths)
     raw.parent.mkdir(parents=True, exist_ok=True)
     source = load_config()["chrr"]
+    managed_cache = (paths.raw / "chrr" / CURRENT_NAME).is_file()
     if cancelled and cancelled():
         raise InterruptedError("CHR&R download cancelled")
     if raw.is_file() and not force:
@@ -216,11 +327,18 @@ def download_chrr(
             try:
                 _validate_metadata(metadata_path, source, raw, frame, digest)
             except SourceContractError:
-                downloaded_at = datetime.fromtimestamp(raw.stat().st_mtime, UTC)
-                _write_metadata(metadata_path, source, raw, frame, digest, downloaded_at)
-            if progress:
-                progress(100, "Using verified CHR&R cache")
-            return raw
+                if not managed_cache:
+                    downloaded_at = datetime.fromtimestamp(raw.stat().st_mtime, UTC)
+                    _write_metadata(metadata_path, source, raw, frame, digest, downloaded_at)
+                    if progress:
+                        progress(100, "Using verified CHR&R cache")
+                    return raw
+                if progress:
+                    progress(0, "Cached CHR&R metadata failed verification; refreshing")
+            else:
+                if progress:
+                    progress(100, "Using verified CHR&R cache")
+                return raw
 
     owns_client = client is None
     http = client or httpx.Client(timeout=httpx.Timeout(30, connect=15), follow_redirects=True)
@@ -280,12 +398,13 @@ def download_chrr(
             }
             for row in frame.iter_rows(named=True)
         ]
-        temporary = raw.with_suffix(".json.tmp")
-        temporary.write_bytes(canonical_json({"rows": source_rows}) + b"\n")
-        os.replace(temporary, raw)
-        _write_metadata(metadata_path, source, raw, frame, digest, datetime.now(UTC))
+        raw = _publish_cache_generation(paths, source, source_rows, frame, digest)
         if progress:
-            progress(100, "CHR&R download verified")
+            try:
+                progress(100, "CHR&R download verified")
+            except InterruptedError:
+                if not cancelled or not cancelled():
+                    raise
         return raw
     finally:
         if owns_client:
@@ -303,6 +422,8 @@ def build_processed(paths: RuntimePaths) -> tuple[pl.DataFrame, str]:
     try:
         _validate_metadata(metadata_path, source, raw, frame, digest)
     except SourceContractError:
+        if (paths.raw / "chrr" / CURRENT_NAME).is_file():
+            raise
         downloaded_at = datetime.fromtimestamp(raw.stat().st_mtime, UTC)
         _write_metadata(metadata_path, source, raw, frame, digest, downloaded_at)
     processed = frame.with_columns(
@@ -325,10 +446,10 @@ def build_processed(paths: RuntimePaths) -> tuple[pl.DataFrame, str]:
 
 def source_status(paths: RuntimePaths) -> SourceStatus:
     source = load_config()["chrr"]
-    raw, metadata_path = raw_paths(paths)
-    if not raw.is_file():
-        return SourceStatus(source="chrr", version=source["version"], cached=False)
     try:
+        raw, metadata_path = raw_paths(paths)
+        if not raw.is_file():
+            return SourceStatus(source="chrr", version=source["version"], cached=False)
         frame, digest = validate_cached_chrr(raw, source)
         retrieved_at = _validate_metadata(metadata_path, source, raw, frame, digest)
         return SourceStatus(
@@ -341,5 +462,8 @@ def source_status(paths: RuntimePaths) -> SourceStatus:
         )
     except SourceContractError as exc:
         return SourceStatus(
-            source="chrr", version=source["version"], cached=True, error=str(exc)
+            source="chrr",
+            version=source["version"],
+            cached=(paths.raw / "chrr").exists(),
+            error=str(exc),
         )

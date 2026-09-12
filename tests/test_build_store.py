@@ -12,7 +12,12 @@ from househunter.build import BUILD_SCHEMA_VERSION, build_snapshot
 from househunter.config import RuntimePaths
 from househunter.errors import HouseHunterError
 from househunter.geography import STATE_BY_FIPS
-from househunter.mountain import IN_SCOPE_STATES, promote_release, write_release
+from househunter.mountain import (
+    IN_SCOPE_STATES,
+    national_block_geoid_sha256,
+    promote_release,
+    write_release,
+)
 from househunter.store import Store
 
 
@@ -68,6 +73,8 @@ def _promote_mountain_fixture(paths: RuntimePaths, root: Path) -> None:
         root / "mountain-candidate",
         data_release="fixture-2020",
         sources={
+            "source_lock_schema_version": 2,
+            "source_lock_sha256": "1" * 64,
             "items": [
                 {
                     "name": "fixture",
@@ -80,11 +87,21 @@ def _promote_mountain_fixture(paths: RuntimePaths, root: Path) -> None:
                     "size": 1,
                     "sha256": "0" * 64,
                 }
-            ]
+            ],
         },
         national_expectations=expectations,
     )
-    promote_release(paths, candidate)
+    promote_release(
+        paths,
+        candidate,
+        reviewed_source_lock={
+            "schema_version": 2,
+            "expected_states": expectations,
+            "block_geoid_sha256": national_block_geoid_sha256(raw),
+        },
+        reviewed_source_lock_sha256="1" * 64,
+        expected_raw_blocks=raw,
+    )
 
 
 def test_build_is_content_addressed_and_queryable(

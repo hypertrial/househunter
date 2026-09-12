@@ -17,11 +17,62 @@ EXPECTED_TRACTS = 85_154
 EXPECTED_COUNTIES = 3_232
 JURISDICTIONS = frozenset(
     {
-        "AK", "AL", "AR", "AS", "AZ", "CA", "CO", "CT", "DC", "DE", "FL", "GA",
-        "GU", "HI", "IA", "ID", "IL", "IN", "KS", "KY", "LA", "MA", "MD", "ME",
-        "MI", "MN", "MO", "MP", "MS", "MT", "NC", "ND", "NE", "NH", "NJ", "NM",
-        "NV", "NY", "OH", "OK", "OR", "PA", "PR", "RI", "SC", "SD", "TN", "TX",
-        "UT", "VA", "VI", "VT", "WA", "WI", "WV", "WY",
+        "AK",
+        "AL",
+        "AR",
+        "AS",
+        "AZ",
+        "CA",
+        "CO",
+        "CT",
+        "DC",
+        "DE",
+        "FL",
+        "GA",
+        "GU",
+        "HI",
+        "IA",
+        "ID",
+        "IL",
+        "IN",
+        "KS",
+        "KY",
+        "LA",
+        "MA",
+        "MD",
+        "ME",
+        "MI",
+        "MN",
+        "MO",
+        "MP",
+        "MS",
+        "MT",
+        "NC",
+        "ND",
+        "NE",
+        "NH",
+        "NJ",
+        "NM",
+        "NV",
+        "NY",
+        "OH",
+        "OK",
+        "OR",
+        "PA",
+        "PR",
+        "RI",
+        "SC",
+        "SD",
+        "TN",
+        "TX",
+        "UT",
+        "VA",
+        "VI",
+        "VT",
+        "WA",
+        "WI",
+        "WV",
+        "WY",
     }
 )
 ENTRY_FIELDS = {
@@ -130,10 +181,14 @@ def _topology_ids(path: Path, entry: dict[str, Any]) -> set[str]:
         raise ValueError(f"Map asset has missing or duplicate identifiers: {path.name}")
     if len(ids) != entry["feature_count"]:
         raise ValueError(f"Map asset feature count mismatch: {path.name}")
-    allowed_types = {"LineString", "MultiLineString"} if entry["level"] == "state" else {
-        "Polygon",
-        "MultiPolygon",
-    }
+    allowed_types = (
+        {"LineString", "MultiLineString"}
+        if entry["level"] == "state"
+        else {
+            "Polygon",
+            "MultiPolygon",
+        }
+    )
     for geometry in geometries:
         if geometry.get("type") not in allowed_types:
             raise ValueError(f"Map asset has an invalid geometry type: {path.name}")
@@ -203,8 +258,7 @@ def load_manifest(directory: Path | None = None, *, verify_files: bool = True) -
             or not isinstance(bounds, list)
             or len(bounds) != 4
             or any(
-                not isinstance(value, (int, float)) or not math.isfinite(value)
-                for value in bounds
+                not isinstance(value, (int, float)) or not math.isfinite(value) for value in bounds
             )
         ):
             raise ValueError("Map asset manifest contains invalid counts, sizes, or bounds")
@@ -254,9 +308,7 @@ def load_manifest(directory: Path | None = None, *, verify_files: bool = True) -
     return manifest
 
 
-def topology_ids(
-    manifest: dict[str, Any], key: str, directory: Path | None = None
-) -> set[str]:
+def topology_ids(manifest: dict[str, Any], key: str, directory: Path | None = None) -> set[str]:
     entry = next((item for item in manifest["files"] if item["key"] == key), None)
     if entry is None:
         raise ValueError(f"Map asset manifest is missing {key}")

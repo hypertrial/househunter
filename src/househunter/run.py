@@ -30,9 +30,7 @@ def _progress(value: int, message: str) -> None:
     print(f"[{value:3d}%] {message}", file=sys.stderr)
 
 
-def _scale_progress(
-    progress: Progress | None, start: int, end: int
-) -> Progress | None:
+def _scale_progress(progress: Progress | None, start: int, end: int) -> Progress | None:
     if progress is None:
         return None
 

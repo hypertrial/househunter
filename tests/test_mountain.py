@@ -15,11 +15,19 @@ from househunter.mountain import (
     IN_SCOPE_STATES,
     access_metrics,
     aggregate_scores,
+    current_compact_release,
+    national_block_geoid_sha256,
     promote_release,
+    prune_owned_compact_fallbacks,
+    prune_owned_releases,
     score_blocks,
     terrain_metrics,
+    validate_national_expectations,
     validate_release,
     window_cells,
+    write_and_promote_compact_fallback,
+    write_and_promote_release,
+    write_compact_bundle,
     write_release,
 )
 
@@ -126,6 +134,8 @@ def _national_expectations(blocks: pl.DataFrame) -> dict[str, object]:
 
 def _source_provenance() -> dict[str, object]:
     return {
+        "source_lock_schema_version": 2,
+        "source_lock_sha256": "1" * 64,
         "items": [
             {
                 "name": "fixture",
@@ -138,7 +148,15 @@ def _source_provenance() -> dict[str, object]:
                 "size": 1,
                 "sha256": "0" * 64,
             }
-        ]
+        ],
+    }
+
+
+def _reviewed_source_lock(blocks: pl.DataFrame) -> dict[str, object]:
+    return {
+        "schema_version": 2,
+        "expected_states": _national_expectations(blocks),
+        "block_geoid_sha256": national_block_geoid_sha256(blocks),
     }
 
 
@@ -249,6 +267,66 @@ def test_release_rejects_forged_identity(tmp_path) -> None:
         validate_release(release)
 
 
+def test_release_recomputes_block_percentiles_instead_of_trusting_scores(tmp_path) -> None:
+    release = write_release(
+        _raw_blocks(), tmp_path / "candidate", data_release="fixture", sources={}
+    )
+    blocks_path = release / "blocks.parquet"
+    blocks = pl.read_parquet(blocks_path).with_columns(
+        pl.when(pl.col("block_geoid") == "010010001001001")
+        .then(50.0)
+        .otherwise(pl.col("mountain_score"))
+        .alias("mountain_score")
+    )
+    blocks.write_parquet(blocks_path, compression="zstd", statistics=True)
+    manifest_path = release / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["files"]["blocks"]["sha256"] = sha256_file(blocks_path)
+    identity = {key: item for key, item in manifest.items() if key != "release_id"}
+    manifest["release_id"] = sha256_bytes(canonical_json(identity))[:16]
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+
+    with pytest.raises(HouseHunterError, match="do not match rounded national raw metrics"):
+        validate_release(release)
+
+
+def test_release_rejects_noncanonical_raw_precision(tmp_path) -> None:
+    release = write_release(
+        _raw_blocks(), tmp_path / "candidate", data_release="fixture", sources={}
+    )
+    blocks_path = release / "blocks.parquet"
+    blocks = pl.read_parquet(blocks_path).with_columns(
+        (pl.col("relief_5km_m") + 0.4).alias("relief_5km_m")
+    )
+    blocks.write_parquet(blocks_path, compression="zstd", statistics=True)
+    manifest_path = release / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["files"]["blocks"]["sha256"] = sha256_file(blocks_path)
+    identity = {key: item for key, item in manifest.items() if key != "release_id"}
+    manifest["release_id"] = sha256_bytes(canonical_json(identity))[:16]
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+
+    with pytest.raises(HouseHunterError, match="canonically rounded"):
+        validate_release(release)
+
+
+def test_national_validation_rejects_state_geoid_and_fractional_population() -> None:
+    blocks = _national_blocks()
+    expectations = _national_expectations(blocks)
+    wrong_state = blocks.with_columns(
+        pl.when(pl.col("state") == "AL")
+        .then(pl.lit("AK"))
+        .otherwise(pl.col("state"))
+        .alias("state")
+    )
+    with pytest.raises(HouseHunterError, match="state does not match"):
+        validate_national_expectations(wrong_state, expectations)
+
+    fractional_population = blocks.with_columns(pl.col("pop20").cast(pl.Float64))
+    with pytest.raises(HouseHunterError, match="population/state types"):
+        validate_national_expectations(fractional_population, expectations)
+
+
 @pytest.mark.parametrize(
     ("column", "value", "message"),
     [("relief_5km_m", -1.0, "relief_5km_m"), ("trail_access_pct", 101.0, "trail_access_pct")],
@@ -285,11 +363,216 @@ def test_promotion_is_atomic_and_content_addressed(tmp_path) -> None:
         sources=_source_provenance(),
         national_expectations=_national_expectations(blocks),
     )
-    promoted = promote_release(paths, candidate)
+    promoted = promote_release(
+        paths,
+        candidate,
+        reviewed_source_lock=_reviewed_source_lock(blocks),
+        reviewed_source_lock_sha256="1" * 64,
+        expected_raw_blocks=blocks,
+    )
     pointer = json.loads((paths.data / "mountain" / "current.json").read_text())
 
     assert promoted.name == pointer["release_id"]
-    assert promote_release(paths, candidate) == promoted
+    assert (
+        promote_release(
+            paths,
+            candidate,
+            reviewed_source_lock=_reviewed_source_lock(blocks),
+            reviewed_source_lock_sha256="1" * 64,
+            expected_raw_blocks=blocks,
+        )
+        == promoted
+    )
+
+
+def test_external_promotion_rejects_mismatched_source_lock(tmp_path) -> None:
+    from househunter.config import RuntimePaths
+
+    paths = RuntimePaths.from_root(tmp_path)
+    blocks = _national_blocks()
+    candidate = write_release(
+        blocks,
+        tmp_path / "candidate",
+        data_release="fixture",
+        sources=_source_provenance(),
+        national_expectations=_national_expectations(blocks),
+    )
+
+    with pytest.raises(HouseHunterError, match="independently reviewed source lock"):
+        promote_release(
+            paths,
+            candidate,
+            reviewed_source_lock=_reviewed_source_lock(blocks),
+            reviewed_source_lock_sha256="2" * 64,
+            expected_raw_blocks=blocks,
+        )
+
+    assert not (paths.data / "mountain" / "current.json").exists()
+
+
+def test_external_promotion_rejects_values_not_recomputed_from_pack(tmp_path) -> None:
+    from househunter.config import RuntimePaths
+
+    paths = RuntimePaths.from_root(tmp_path)
+    blocks = _national_blocks()
+    changed = blocks.with_columns(
+        pl.when(pl.col("block_geoid") == blocks["block_geoid"][0])
+        .then(pl.col("relief_20km_m") + 1.0)
+        .otherwise(pl.col("relief_20km_m"))
+        .alias("relief_20km_m")
+    )
+    candidate = write_release(
+        changed,
+        tmp_path / "candidate",
+        data_release="fixture",
+        sources=_source_provenance(),
+        national_expectations=_national_expectations(blocks),
+    )
+
+    with pytest.raises(HouseHunterError, match="prepared-pack raw metrics"):
+        promote_release(
+            paths,
+            candidate,
+            reviewed_source_lock=_reviewed_source_lock(blocks),
+            reviewed_source_lock_sha256="1" * 64,
+            expected_raw_blocks=blocks,
+        )
+
+    assert not (paths.data / "mountain" / "current.json").exists()
+
+
+def test_raw_block_promotion_runs_shared_snapshot_finalizer(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    blocks = _national_blocks()
+    raw = tmp_path / "raw.parquet"
+    blocks.write_parquet(raw)
+    source_lock = tmp_path / "source-lock.json"
+    source_lock.write_text("{}\n")
+    lock = {
+        "schema_version": 2,
+        "sources": [{**_source_provenance()["items"][0], "path": str(raw)}],
+        "expected_states": _national_expectations(blocks),
+        "block_geoid_sha256": national_block_geoid_sha256(blocks),
+    }
+    finalized: list[object] = []
+
+    monkeypatch.setenv("HOUSEHUNTER_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr("househunter.mountain_gis.verify_source_lock", lambda *args, **kwargs: lock)
+    monkeypatch.setattr(
+        "househunter.mountain_gis.locked_source_paths", lambda *args, **kwargs: {raw.resolve()}
+    )
+
+    def finalize(*args: object, **kwargs: object) -> tuple[object, object, list[object]]:
+        finalized.append(args)
+        return tmp_path / "snapshot", tmp_path / "compact", []
+
+    monkeypatch.setattr("househunter.cli._rebuild_after_mountain_promotion", finalize)
+    result = CliRunner().invoke(
+        app,
+        [
+            "mountain",
+            "build",
+            "--data-release",
+            "fixture",
+            "--raw-blocks",
+            str(raw),
+            "--source-lock",
+            str(source_lock),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(finalized) == 1
+
+
+def test_generated_promotion_retains_current_and_one_rollback(tmp_path) -> None:
+    from househunter.config import RuntimePaths
+
+    paths = RuntimePaths.from_root(tmp_path)
+    blocks = _national_blocks()
+    releases = []
+    for number in range(3):
+        release, _ = write_and_promote_release(
+            paths,
+            blocks,
+            data_release=f"fixture-{number}",
+            sources=_source_provenance(),
+            national_expectations=_national_expectations(blocks),
+        )
+        releases.append(release)
+
+    repeated, _ = write_and_promote_release(
+        paths,
+        blocks,
+        data_release="fixture-2",
+        sources=_source_provenance(),
+        national_expectations=_national_expectations(blocks),
+    )
+
+    removed = prune_owned_releases(paths)
+    pointer = json.loads((paths.data / "mountain" / "current.json").read_text())
+    assert pointer["release_id"] == releases[2].name
+    assert pointer["rollback_release_id"] == releases[1].name
+    assert repeated == releases[2]
+    assert removed == [releases[0].name]
+    assert releases[1].is_dir() and releases[2].is_dir()
+
+
+def test_runtime_uses_validated_bundled_fallback_without_pointer(tmp_path) -> None:
+    from househunter.config import RuntimePaths
+
+    paths = RuntimePaths.from_root(tmp_path / "runtime")
+    blocks = _national_blocks()
+    release = write_release(
+        blocks,
+        tmp_path / "release",
+        data_release="fixture",
+        sources=_source_provenance(),
+        national_expectations=_national_expectations(blocks),
+    )
+    bundle = write_compact_bundle(release, tmp_path / "bundle")
+
+    loaded = current_compact_release(paths, bundled_path=bundle)
+
+    assert loaded is not None
+    assert loaded[0] == bundle
+    assert loaded[1]["release_id"] == validate_release(release)["release_id"]
+
+
+def test_managed_compact_fallback_is_atomic_queryable_and_pruned(tmp_path) -> None:
+    from househunter.config import RuntimePaths
+
+    paths = RuntimePaths.from_root(tmp_path / "runtime")
+    blocks = _national_blocks()
+    first_release = write_release(
+        blocks,
+        tmp_path / "first-release",
+        data_release="fixture-1",
+        sources=_source_provenance(),
+        national_expectations=_national_expectations(blocks),
+    )
+    first_manifest = validate_release(first_release)
+    first = write_and_promote_compact_fallback(paths, first_release, first_manifest)
+
+    loaded = current_compact_release(paths)
+    assert loaded is not None
+    assert loaded[0] == first
+    assert loaded[1]["release_id"] == first_manifest["release_id"]
+
+    second_release = write_release(
+        blocks,
+        tmp_path / "second-release",
+        data_release="fixture-2",
+        sources=_source_provenance(),
+        national_expectations=_national_expectations(blocks),
+    )
+    second_manifest = validate_release(second_release)
+    second = write_and_promote_compact_fallback(paths, second_release, second_manifest)
+
+    assert prune_owned_compact_fallbacks(paths) == [first.name]
+    assert second.is_dir()
+    assert not first.exists()
 
 
 def test_complete_release_cannot_be_self_asserted(tmp_path) -> None:
@@ -303,16 +586,31 @@ def test_complete_release_cannot_be_self_asserted(tmp_path) -> None:
         )
 
 
+def test_national_expectations_reject_same_count_and_population_geoid_substitution() -> None:
+    blocks = _national_blocks()
+    digest = national_block_geoid_sha256(blocks)
+    substituted = blocks.with_columns(
+        pl.when(pl.col("block_geoid") == blocks["block_geoid"][0])
+        .then(pl.lit("010010001009999"))
+        .otherwise(pl.col("block_geoid"))
+        .alias("block_geoid")
+    )
+
+    with pytest.raises(HouseHunterError, match="GEOIDs differ"):
+        validate_national_expectations(
+            substituted,
+            _national_expectations(blocks),
+            expected_block_geoid_sha256=digest,
+        )
+
+
 def test_complete_release_rejects_blocks_outside_national_scope(tmp_path) -> None:
     blocks = _national_blocks()
-    territory = (
-        blocks.head(1)
-        .with_columns(
-            pl.lit("720010001001001").alias("block_geoid"),
-            pl.lit("72001000100").alias("tract_geoid"),
-            pl.lit("72001").alias("county_fips"),
-            pl.lit("PR").alias("state"),
-        )
+    territory = blocks.head(1).with_columns(
+        pl.lit("720010001001001").alias("block_geoid"),
+        pl.lit("72001000100").alias("tract_geoid"),
+        pl.lit("72001").alias("county_fips"),
+        pl.lit("PR").alias("state"),
     )
 
     with pytest.raises(HouseHunterError, match="unexpected PR"):
