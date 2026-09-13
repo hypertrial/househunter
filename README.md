@@ -128,6 +128,10 @@ land, and mapped trail access, combined at 45%, 20%, 20%, and 15%. Population-ze
 blocks receive raw measurements but do not affect percentile calibration. Promotable
 releases cover exactly the 50 states plus DC; Puerto Rico and the other territories
 remain outside the scoring scope and are `unavailable` at runtime.
+Connecticut tract scores are reconciled to FEMA's planning-region identifiers by
+their unique six-digit tract codes. Connecticut's nine planning-region county rows
+remain unavailable because the Mountain release contains the eight 2020 counties;
+HouseHunter does not substitute approximate county aggregates.
 The score does not claim property views, trail quality, drive time, or guaranteed
 public access.
 

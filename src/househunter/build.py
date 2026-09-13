@@ -29,6 +29,10 @@ Progress = Callable[[int, str], None]
 Cancelled = Callable[[], bool]
 
 BUILD_SCHEMA_VERSION = 8
+MOUNTAIN_RUNTIME_GEOGRAPHY_VERSION = "mountain_runtime_geography_v1"
+_CONNECTICUT_UNMATCHED_ZERO_POPULATION_TRACTS = frozenset(
+    {"09001990000", "09007990100", "09009990000", "09011990100"}
+)
 _SNAPSHOT_FILES = (
     "build.json",
     "places.parquet",
@@ -97,8 +101,58 @@ def _attach_mountain_scores(
         )
     release, manifest, mountain_tracts, mountain_counties = current
 
-    def attach(frame: pl.DataFrame, mountain: pl.DataFrame) -> pl.DataFrame:
-        expected = frame.filter(pl.col("state").is_in(sorted(IN_SCOPE_STATES))).select("place_id")
+    def reconcile_connecticut_tracts(
+        frame: pl.DataFrame, mountain: pl.DataFrame
+    ) -> pl.DataFrame:
+        targets = frame.filter(pl.col("state") == "CT").select(
+            pl.col("place_id").alias("_target_id"),
+            pl.col("place_id").str.slice(-6).alias("_tract_code"),
+        )
+        if targets.is_empty():
+            return mountain
+        sources = mountain.filter(pl.col("place_id").str.starts_with("09")).with_columns(
+            pl.col("place_id").str.slice(-6).alias("_tract_code")
+        )
+        mapped = sources.join(targets, on="_tract_code", how="inner")
+        unmatched = sources.join(targets, on="_tract_code", how="anti")
+        if (
+            targets["_tract_code"].n_unique() != targets.height
+            or mapped["_tract_code"].n_unique() != mapped.height
+            or mapped.height != targets.height
+        ):
+            raise HouseHunterError("Mountain Connecticut tract reconciliation is ambiguous")
+        if (
+            set(unmatched["place_id"]) != _CONNECTICUT_UNMATCHED_ZERO_POPULATION_TRACTS
+            or unmatched.filter(
+                pl.col("mountain_coverage_status").is_null()
+                | (pl.col("mountain_coverage_status") != "zero_population")
+                | pl.col("mountain_population_coverage").is_null()
+                | (pl.col("mountain_population_coverage") != 0)
+                | pl.col("mountain_score").is_not_null()
+            ).height
+        ):
+            raise HouseHunterError("Mountain Connecticut tract exceptions differ")
+        return pl.concat(
+            [
+                mountain.filter(~pl.col("place_id").str.starts_with("09")),
+                mapped.drop("place_id", "_tract_code")
+                .rename({"_target_id": "place_id"})
+                .select(mountain.columns),
+            ]
+        )
+
+    def attach(
+        frame: pl.DataFrame,
+        mountain: pl.DataFrame,
+        *,
+        reconcile_ct: bool = False,
+        allow_missing_states: frozenset[str] = frozenset(),
+    ) -> pl.DataFrame:
+        if reconcile_ct:
+            mountain = reconcile_connecticut_tracts(frame, mountain)
+        expected = frame.filter(
+            pl.col("state").is_in(sorted(IN_SCOPE_STATES - allow_missing_states))
+        ).select("place_id")
         missing_ids = expected.join(mountain.select("place_id"), on="place_id", how="anti")
         if missing_ids.height:
             raise HouseHunterError(
@@ -123,8 +177,8 @@ def _attach_mountain_scores(
         )
 
     return (
-        attach(places, mountain_tracts),
-        attach(counties, mountain_counties),
+        attach(places, mountain_tracts, reconcile_ct=True),
+        attach(counties, mountain_counties, allow_missing_states=frozenset({"CT"})),
         {
             "checksum": sha256_file(release / "manifest.json"),
             "data_release": str(manifest["data_release"]),
@@ -473,6 +527,7 @@ def build_snapshot(
         "fema_counties_release": county_source["release"],
         "chrr": chrr_source["version"],
         "chrr_release_year": chrr_source["release_year"],
+        "mountain_runtime_geography": MOUNTAIN_RUNTIME_GEOGRAPHY_VERSION,
     }
     mountain_release = current_compact_release(paths)
     if mountain_release is None:

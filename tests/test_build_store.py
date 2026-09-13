@@ -10,6 +10,7 @@ import yaml
 
 from househunter.build import (
     BUILD_SCHEMA_VERSION,
+    MOUNTAIN_RUNTIME_GEOGRAPHY_VERSION,
     _attach_mountain_scores,
     _cached_snapshot_artifacts_valid,
     build_snapshot,
@@ -19,6 +20,7 @@ from househunter.errors import BuildNotFoundError, HouseHunterError
 from househunter.geography import STATE_BY_FIPS
 from househunter.mountain import (
     IN_SCOPE_STATES,
+    MOUNTAIN_RUNTIME_COLUMNS,
     national_block_geoid_sha256,
     promote_release,
     write_release,
@@ -197,6 +199,10 @@ def test_build_joins_promoted_mountain_release_and_changes_identity(
     assert with_mountain != without_mountain
     metadata = json.loads((with_mountain / "build.json").read_text())
     assert metadata["source_vintages"]["mountain"] == "fixture-2020"
+    assert (
+        metadata["source_vintages"]["mountain_runtime_geography"]
+        == MOUNTAIN_RUNTIME_GEOGRAPHY_VERSION
+    )
     with Store(paths) as store:
         alabama = store.place_detail("01001000100")["summary"]
         alaska = store.place_detail("02001000100")["summary"]
@@ -207,32 +213,81 @@ def test_build_joins_promoted_mountain_release_and_changes_identity(
         ]
 
 
-def test_mountain_runtime_rejects_missing_in_scope_rows_and_marks_territories_outside_scope(
+def test_mountain_runtime_reconciles_connecticut_tracts_and_marks_missing_counties(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     paths = RuntimePaths.from_root(tmp_path)
     places = pl.DataFrame(
-        {"place_id": ["01001000100", "72001000100"], "state": ["AL", "PR"]}
+        {"place_id": ["09110100100", "72001000100"], "state": ["CT", "PR"]}
     )
-    counties = pl.DataFrame({"place_id": ["01001", "72001"], "state": ["AL", "PR"]})
-    columns = {
-        "mountain_score": pl.Series([], dtype=pl.Float64),
-        "mountain_population_coverage": pl.Series([], dtype=pl.Float64),
-        "mountain_coverage_status": pl.Series([], dtype=pl.String),
-    }
-    empty = pl.DataFrame({"place_id": pl.Series([], dtype=pl.String), **columns})
+    counties = pl.DataFrame({"place_id": ["09110", "72001"], "state": ["CT", "PR"]})
+    ids = [
+        "09001100100",
+        "09001990000",
+        "09007990100",
+        "09009990000",
+        "09011990100",
+    ]
+    strings = {"mountain_score_version", "mountain_pipeline_version"}
+    mountain_tracts = pl.DataFrame(
+        {
+            "place_id": ids,
+            **{
+                column: pl.Series(column, [None] * len(ids), dtype=pl.Float64)
+                for column in MOUNTAIN_RUNTIME_COLUMNS
+                if column not in strings | {"mountain_coverage_status"}
+            },
+            "mountain_score": [42.0, None, None, None, None],
+            "mountain_score_version": ["mountain_score_v1"] * len(ids),
+            "mountain_pipeline_version": ["mountain_pipeline_v1"] * len(ids),
+            "mountain_population_coverage": [1.0, 0.0, 0.0, 0.0, 0.0],
+            "mountain_coverage_status": ["sufficient"] + ["zero_population"] * 4,
+        }
+    ).select("place_id", *MOUNTAIN_RUNTIME_COLUMNS)
+    mountain_counties = mountain_tracts.head(0)
+    (tmp_path / "manifest.json").write_text("{}")
     monkeypatch.setattr(
         "househunter.mountain.current_compact_release",
         lambda paths: (
             tmp_path,
             {"data_release": "fixture", "score_version": "mountain_score_v1"},
-            empty,
-            empty,
+            mountain_tracts,
+            mountain_counties,
         ),
     )
 
-    with pytest.raises(HouseHunterError, match="missing 1 in-scope"):
+    attached, attached_counties, _ = _attach_mountain_scores(places, counties, paths)
+    assert attached["mountain_score"].to_list() == [42.0, None]
+    assert attached["mountain_coverage_status"].to_list() == ["sufficient", "outside_scope"]
+    assert attached_counties["mountain_coverage_status"].to_list() == [
+        "unavailable",
+        "outside_scope",
+    ]
+
+    poisoned = mountain_tracts.with_columns(
+        pl.when(pl.col("place_id") == "09001990000")
+        .then(pl.lit("sufficient"))
+        .otherwise(pl.col("mountain_coverage_status"))
+        .alias("mountain_coverage_status")
+    )
+    monkeypatch.setattr(
+        "househunter.mountain.current_compact_release",
+        lambda paths: (
+            tmp_path,
+            {"data_release": "fixture", "score_version": "mountain_score_v1"},
+            poisoned,
+            mountain_counties,
+        ),
+    )
+    with pytest.raises(HouseHunterError, match="tract exceptions differ"):
         _attach_mountain_scores(places, counties, paths)
+
+    with pytest.raises(HouseHunterError, match="missing 1 in-scope"):
+        _attach_mountain_scores(
+            pl.DataFrame({"place_id": ["01001000100"], "state": ["AL"]}),
+            pl.DataFrame({"place_id": ["01001"], "state": ["AL"]}),
+            paths,
+        )
 
     monkeypatch.setattr("househunter.mountain.current_compact_release", lambda paths: None)
     attached, attached_counties, _ = _attach_mountain_scores(places, counties, paths)

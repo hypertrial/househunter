@@ -192,6 +192,37 @@ def test_zero_population_does_not_change_calibration() -> None:
     )
 
 
+def test_scoring_normalizes_only_window_filter_float_noise() -> None:
+    raw = _raw_blocks().with_columns(
+        pl.Series("rugged_fraction_20km", [-3.8e-12, 0.5, 1.0 + 1e-10]),
+        pl.lit(-1.1e-11).alias("public_mountain_access_raw"),
+        pl.lit(-1.5e-12).alias("mountain_trail_km_25"),
+    )
+    empty = (
+        raw.head(1)
+        .with_columns(
+            pl.lit("020010001001999").alias("block_geoid"),
+            pl.lit("02001000100").alias("tract_geoid"),
+            pl.lit("02001").alias("county_fips"),
+            pl.lit("AK").alias("state"),
+            pl.lit(0, dtype=pl.Int64).alias("pop20"),
+            pl.lit(None, dtype=pl.Float64).alias("relief_20km_m"),
+            pl.lit(-6.940493).alias("rugged_fraction_20km"),
+        )
+    )
+
+    scored = score_blocks(raw.vstack(empty)).sort("block_geoid")
+
+    assert scored["rugged_fraction_20km"].to_list() == [0.0, 0.5, 1.0, None]
+    assert scored["public_mountain_access_raw"].to_list() == [0.0] * 4
+    assert scored["mountain_trail_km_25"].to_list() == [0.0] * 4
+
+    with pytest.raises(HouseHunterError, match="invalid rugged_fraction_20km"):
+        score_blocks(raw.with_columns(pl.lit(-0.01).alias("rugged_fraction_20km")))
+    with pytest.raises(HouseHunterError, match="invalid public_mountain_access_raw"):
+        score_blocks(raw.with_columns(pl.lit(-0.01).alias("public_mountain_access_raw")))
+
+
 def test_population_coverage_gate_is_national_and_per_state() -> None:
     raw = _raw_blocks().with_columns(
         pl.when(pl.col("state") == "AK")

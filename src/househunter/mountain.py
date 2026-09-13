@@ -280,6 +280,28 @@ def score_blocks(frame: pl.DataFrame, *, minimum_coverage: float = 0.995) -> pl.
         raise HouseHunterError("Mountain data contains invalid block GEOIDs")
     if frame.filter(pl.col("pop20") < 0).height:
         raise HouseHunterError("Mountain data contains negative block population")
+    frame = frame.with_columns(
+        *(
+            pl.when(pl.col(column).is_between(-1e-9, 0, closed="both"))
+            .then(0.0)
+            .otherwise(pl.col(column))
+            .alias(column)
+            for column in RAW_PRECISION
+        )
+    )
+    rugged = pl.col("rugged_fraction_20km")
+    frame = frame.with_columns(
+        pl.when(
+            pl.col("relief_20km_m").is_null()
+            & (pl.col("pop20") == 0)
+            & rugged.is_not_null()
+        )
+        .then(None)
+        .when(rugged.is_between(1, 1 + 1e-9, closed="both"))
+        .then(1.0)
+        .otherwise(rugged)
+        .alias("rugged_fraction_20km")
+    )
     for column in RAW_PRECISION:
         invalid = pl.col(column).is_not_null() & (
             ~pl.col(column).is_finite() | (pl.col(column) < 0)

@@ -195,6 +195,12 @@ coverage semantics before a release can be promoted. A promoted release changes
 the main HouseHunter build identity; an absent release produces null Mountain fields
 with `unavailable` status rather than silently substituting zero.
 
+FEMA v1.20 uses Connecticut planning-region FIPS while the locked 2020 block source
+uses legacy Connecticut county FIPS. Runtime tract rows are reconciled only when the
+six-digit tract code forms a unique, complete mapping. The four unmatched legacy rows
+are zero-population water tracts. The nine FEMA planning-region county rows remain
+explicitly unavailable because the release has no exact planning-region aggregates.
+
 Source-lock v2 validation reads the real raster/vector/Parquet metadata and requires
 its CRS, layer, exact schema, and record/cell count to equal the reviewed contract.
 Region configuration must consume every locked GIS dataset in the correct family and
