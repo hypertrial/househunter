@@ -55,4 +55,3 @@ and local Pad state out of this public repository.
   and Playwright Chromium and WebKit e2e in `web/`.
 
 These commands are wrapped by `scripts/verify-fast` and `scripts/verify`.
-Native GitHub CI is the independent verification source.
