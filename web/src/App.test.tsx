@@ -1,9 +1,9 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import App, { communityLabel, mapFocusTarget, mapTooltipClass, mountainLabel, SCORE_BANDS, scoreBand, scoreLabel, scoreToneClass, sortedHazardPercentiles, STATE_ABBREVIATIONS } from "./App";
+import App, { communityLabel, mapFocusTarget, mapTooltipClass, mountainLabel, scoreBand, scoreLabel, scorePillLabel, sortedHazardPercentiles, STATE_ABBREVIATIONS } from "./App";
 import RiskMap from "./RiskMap";
-import { cameraFromTransform, COMMUNITY_GROUP_COLORS, communityGroupColor, readHash, relativeTransform, transformFromCamera } from "./map";
-import type { HazardPercentile, PlaceSummary } from "./types";
+import { cameraFromTransform, COMMUNITY_COLOR_SCALE, COMMUNITY_GROUP_COLORS, communityGroupColor, FEMA_COLOR_SCALE, MAP_COLORS, METRIC_COLOR_SCALES, metricColor, MOUNTAIN_COLOR_SCALE, MOUNTAIN_COLORS, mountainColor, readHash, relativeTransform, scoreColor, transformFromCamera } from "./map";
+import type { HazardPercentile, MapScore, PlaceSummary } from "./types";
 
 const tract: PlaceSummary = {
   place_id: "08013012101", name: "08013012101", state: "CO", place_type: "tract",
@@ -82,16 +82,13 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("score semantics", () => {
-  it("bins the displayed one-decimal percentile at every boundary", () => {
+  it("retains qualitative score labels independently of continuous colors", () => {
     expect([0, 19.94, 19.96, 39.94, 39.96, 59.96, 79.96, 100].map(scoreBand)).toEqual([
       "low", "low", "below", "below", "typical", "high", "highest", "highest",
     ]);
-    expect(scoreBand(null)).toBeNull(); expect(scoreBand(101)).toBeNull(); expect(scoreToneClass(null)).toBe("missing");
-    expect([0, 20, 40, 60, 80].map(scoreToneClass)).toEqual([
-      "score-low", "score-below", "score-typical", "score-high", "score-highest",
-    ]);
+    expect(scoreBand(null)).toBeNull(); expect(scoreBand(101)).toBeNull();
     expect(scoreLabel({ ...tract, risk_score: 19.96 })).toBe("20.0");
-    expect(SCORE_BANDS.map((item) => item.label)).toEqual(["0–20", "20–40", "40–60", "60–80", "80–100"]);
+    expect(scorePillLabel({ ...tract, risk_score: 19.96 })).toBe("20.0, below typical");
   });
   it("sorts hazards high-to-low with unrated last", () => {
     const values: HazardPercentile[] = [{ code: "TSUN", label: "Tsunami", percentile: null }, { code: "AVLN", label: "Avalanche", percentile: 10 }, { code: "WFIR", label: "Wildfire", percentile: 80 }];
@@ -105,13 +102,83 @@ describe("score semantics", () => {
     expect(readHash("#metric=mountain&mountain_min=80")).toMatchObject({ metric: "mountain", mountainMin: 80 });
     expect(readHash("#metric=quality").metric).toBe("fema");
   });
-  it("uses ten fixed Community Conditions colors and honest null labels", () => {
+  it("uses bounded fixed-domain continuous color scales and honest null labels", () => {
+    expect(FEMA_COLOR_SCALE).toHaveLength(256);
+    expect(MOUNTAIN_COLOR_SCALE).toHaveLength(256);
+    expect(COMMUNITY_COLOR_SCALE).toHaveLength(256);
+    expect(METRIC_COLOR_SCALES.fema).toMatchObject({
+      minimum: 0, maximum: 100, ticks: [0, 20, 40, 60, 80, 100],
+    });
+    expect(METRIC_COLOR_SCALES["community-conditions"]).toMatchObject({
+      minimum: 1, maximum: 10, ticks: [1, 3, 5, 7, 10],
+    });
+    expect(METRIC_COLOR_SCALES.fema.gradient.match(/#[\da-f]{6}/g)).toHaveLength(256);
+    expect(METRIC_COLOR_SCALES["community-conditions"].gradient.match(/#[\da-f]{6}/g))
+      .toHaveLength(256);
+    expect(METRIC_COLOR_SCALES.mountain.gradient.match(/#[\da-f]{6}/g)).toHaveLength(256);
+    expect(scoreColor(0)).toBe(MAP_COLORS.low);
+    expect(scoreColor(25)).toBe(MAP_COLORS.below);
+    expect(scoreColor(50)).toBe(MAP_COLORS.typical);
+    expect(scoreColor(75)).toBe(MAP_COLORS.high);
+    expect(scoreColor(100)).toBe(MAP_COLORS.highest);
+    expect(scoreColor(19.8)).not.toBe(scoreColor(20.2));
+    expect(scoreColor(null)).toBeNull();
+    expect(scoreColor(Number.NaN)).toBeNull();
+    expect(scoreColor(-0.1)).toBeNull();
+    expect(scoreColor(100.1)).toBeNull();
+    expect(mountainColor(0)).toBe(MOUNTAIN_COLORS.low);
+    expect(mountainColor(25)).toBe(MOUNTAIN_COLORS.below);
+    expect(mountainColor(50)).toBe(MOUNTAIN_COLORS.typical);
+    expect(mountainColor(75)).toBe(MOUNTAIN_COLORS.high);
+    expect(mountainColor(100)).toBe(MOUNTAIN_COLORS.highest);
     expect(COMMUNITY_GROUP_COLORS).toHaveLength(10);
     expect(communityGroupColor(1)).toBe("#7fa87e");
     expect(communityGroupColor(10)).toBe("#b14a3c");
+    expect(communityGroupColor(1.5)).toBeNull();
     expect(communityGroupColor(null)).toBeNull();
     expect(communityLabel({ ...county, community_conditions_group: null })).toBe("Not grouped");
     expect(mountainLabel(tract)).toBe("82.5 /100");
+  });
+  it("interpolates between anchors without recreating former score bands", () => {
+    expect(scoreColor(12.5)).toBe("#a2ac64");
+    expect(scoreColor(37.5)).toBe("#cbac39");
+    for (const boundary of [20, 40, 60, 80]) {
+      expect(scoreColor(boundary - 0.1)).not.toBe(scoreColor(boundary + 0.1));
+      expect(mountainColor(boundary - 0.1)).not.toBe(mountainColor(boundary + 0.1));
+    }
+    const femaColors = new Set(Array.from({ length: 10_001 }, (_, index) => scoreColor(index / 100)));
+    const mountainColors = new Set(Array.from({ length: 10_001 }, (_, index) => mountainColor(index / 100)));
+    expect(femaColors.size).toBeGreaterThan(5);
+    expect(femaColors.size).toBeLessThanOrEqual(256);
+    expect(mountainColors.size).toBeGreaterThan(5);
+    expect(mountainColors.size).toBeLessThanOrEqual(256);
+  });
+  it("rejects every invalid scale value and keeps Community groups on official integer anchors", () => {
+    for (const invalid of [Number.NEGATIVE_INFINITY, Number.POSITIVE_INFINITY, Number.NaN, -0.1, 100.1]) {
+      expect(scoreColor(invalid)).toBeNull();
+      expect(mountainColor(invalid)).toBeNull();
+    }
+    expect(Array.from({ length: 10 }, (_, index) => communityGroupColor(index + 1)))
+      .toEqual(COMMUNITY_GROUP_COLORS);
+    for (const invalid of [Number.NEGATIVE_INFINITY, Number.POSITIVE_INFINITY, Number.NaN, 0, 1.5, 11]) {
+      expect(communityGroupColor(invalid)).toBeNull();
+    }
+  });
+  it("uses the fixed shared scales on the map independently of unrelated metric values", () => {
+    const row: MapScore = {
+      place_id: "08013012101",
+      risk_score: 21.25,
+      coverage_status: "complete",
+      community_conditions_group: 2,
+      mountain_score: 82.5,
+      mountain_coverage_status: "complete",
+    };
+    expect(metricColor(row, "fema")).toBe(scoreColor(21.25));
+    expect(metricColor({ ...row, mountain_score: 0 }, "fema")).toBe(scoreColor(21.25));
+    expect(metricColor(row, "mountain")).toBe(mountainColor(82.5));
+    expect(metricColor({ ...row, risk_score: 100 }, "mountain")).toBe(mountainColor(82.5));
+    expect(metricColor(row, "community-conditions")).toBe(communityGroupColor(2));
+    expect(metricColor(null, "fema")).toBeNull();
   });
   it("computes the gesture delta from the last committed camera", () => {
     expect(relativeTransform(
@@ -398,14 +465,113 @@ it("renders the map as the only primary UI with all retained controls", async ()
   expect(screen.getByRole("region", { name: "More actions" })).toBeVisible();
   fireEvent.click(screen.getByRole("button", { name: "Export snapshot" }));
   const exports = screen.getByRole("navigation", { name: "Exports" });
+  expect(screen.getByRole("button", { name: "More" })).toHaveAttribute("aria-expanded", "true");
+  expect(screen.getByRole("button", { name: "More" })).toHaveAttribute("aria-controls", "exports-panel");
   expect(within(exports).getByRole("link", { name: "Tracts CSV" })).toHaveAttribute("href", "/api/v1/exports/places.csv");
   expect(within(exports).getByRole("link", { name: "Tracts Parquet" })).toHaveAttribute("href", "/api/v1/exports/places.parquet");
   expect(within(exports).getByRole("link", { name: "Counties CSV" })).toHaveAttribute("href", "/api/v1/exports/counties.csv");
   expect(within(exports).getByRole("link", { name: "Counties Parquet" })).toHaveAttribute("href", "/api/v1/exports/counties.parquet");
-  expect(screen.getByLabelText("Score color scale, lower is better")).toHaveTextContent("not property-level risk");
+  const legend = screen.getByLabelText("Continuous score color scale, lower is better");
+  expect(legend).toHaveTextContent("not property-level risk");
+  expect(legend.querySelector(".legend-gradient")).toHaveStyle({
+    backgroundImage: expect.stringContaining("linear-gradient"),
+  });
+  expect(within(legend).getByRole("img", {
+    name: "FEMA Risk continuous color ramp from 0 to 100",
+  })).toBeVisible();
+  for (const tick of ["0", "20", "40", "60", "80", "100"]) {
+    expect(within(legend).getByText(tick)).toBeVisible();
+  }
+  expect(within(legend).getByText("Unranked")).toBeVisible();
+  expect(legend.querySelector(".missing-key .hatched")).toHaveAttribute("aria-hidden", "true");
   expect(screen.getByRole("img", { name: /focusable USA tract risk map/i })).toBeVisible();
   expect(screen.queryByRole("table")).not.toBeInTheDocument();
   expect(screen.queryByText("Next")).not.toBeInTheDocument();
+});
+
+it("keeps the committed legend and accessible map description aligned during metric rendering", async () => {
+  vi.stubGlobal("fetch", mockFetch());
+  render(<App />);
+  await screen.findAllByText("1 tracts interactive", {}, { timeout: 3000 });
+  const canvas = screen.getByRole("img", { name: /focusable USA tract risk map/i });
+
+  fireEvent.click(screen.getByRole("button", { name: "Mountain Score" }));
+
+  expect(screen.getByText("Updating Mountain Score map…")).toBeVisible();
+  expect(canvas).toHaveAttribute("aria-busy", "true");
+  expect(canvas).toHaveAccessibleName(/tract risk map/i);
+  expect(screen.getByLabelText("Continuous score color scale, lower is better")).toBeVisible();
+  expect(screen.queryByLabelText(/Continuous Mountain Score color scale/)).not.toBeInTheDocument();
+
+  expect(await screen.findByLabelText(
+    "Continuous Mountain Score color scale, higher means more mountain characteristics",
+  )).toBeVisible();
+  await waitFor(() => expect(canvas).toHaveAttribute("aria-busy", "false"));
+  expect(canvas).toHaveAccessibleName(/tract Mountain Score map/i);
+  expect(document.querySelector(".map-updating")).not.toBeInTheDocument();
+});
+
+it("commits only the final metric after rapid successive map changes", async () => {
+  vi.stubGlobal("fetch", mockFetch());
+  render(<App />);
+  await screen.findAllByText("1 tracts interactive", {}, { timeout: 3000 });
+  const canvas = screen.getByRole("img", { name: /focusable USA tract risk map/i });
+
+  fireEvent.click(screen.getByRole("button", { name: "Mountain Score" }));
+  fireEvent.click(screen.getByRole("button", { name: "Community Conditions" }));
+
+  expect(canvas).toHaveAttribute("aria-busy", "true");
+  expect(screen.getByLabelText("Continuous score color scale, lower is better")).toBeVisible();
+  const finalLegend = await screen.findByLabelText(
+    "Continuous Community Conditions color scale, Group 1 is healthiest",
+  );
+  expect(finalLegend).toBeVisible();
+  await waitFor(() => expect(canvas).toHaveAttribute("aria-busy", "false"));
+  expect(canvas).toHaveAccessibleName(/tract Community Conditions map/i);
+  expect(screen.queryByLabelText(/Continuous Mountain Score color scale/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/Updating .* map…/)).not.toBeInTheDocument();
+});
+
+it("finishes a metric transition when active filters leave no interactive geographies", async () => {
+  vi.stubGlobal("fetch", mockFetch());
+  render(<App />);
+  await screen.findAllByText("1 tracts interactive", {}, { timeout: 3000 });
+
+  fireEvent.click(screen.getByRole("button", { name: "Filters" }));
+  fireEvent.change(screen.getByLabelText("Minimum Mountain Score"), { target: { value: "100" } });
+  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+  fireEvent.click(screen.getByRole("button", { name: "Mountain Score" }));
+
+  const canvas = screen.getByRole("img", { name: /focusable USA tract/i });
+  expect(await screen.findByLabelText(
+    "Continuous Mountain Score color scale, higher means more mountain characteristics",
+  )).toBeVisible();
+  await waitFor(() => expect(canvas).toHaveAttribute("aria-busy", "false"));
+  expect(document.querySelector(".map-updating")).not.toBeInTheDocument();
+});
+
+it("reports effective filters and does not expose an ineffective Community checkbox", async () => {
+  vi.stubGlobal("fetch", mockFetch());
+  render(<App />);
+  await screen.findByText("HouseHunter");
+
+  fireEvent.click(screen.getByRole("button", { name: "Filters" }));
+  fireEvent.click(screen.getByRole("checkbox", { name: "Show FEMA-unranked geographies" }));
+  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+  expect(screen.getByRole("button", { name: "Filters · On" })).toBeVisible();
+
+  fireEvent.click(screen.getByRole("button", { name: "Community Conditions" }));
+  expect(screen.getByRole("button", { name: "Filters" })).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "Filters" }));
+  expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+  expect(screen.getByText("Not-grouped geographies always remain visible on this layer.")).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "Filters" }));
+
+  fireEvent.click(screen.getByRole("button", { name: "Mountain Score" }));
+  expect(screen.getByRole("button", { name: "Filters · On" })).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "Filters · On" }));
+  expect(screen.getByRole("checkbox", { name: "Show Mountain-unavailable geographies" }))
+    .toBeChecked();
 });
 
 it("shows fresh loading feedback and does not refetch when closing extremes", async () => {
@@ -442,7 +608,18 @@ it("switches to Community Conditions and browses county groups without changing 
   expect(screen.getByRole("button", { name: "FEMA Risk" })).toHaveAttribute("aria-pressed", "true");
   fireEvent.click(screen.getByRole("button", { name: "Community Conditions" }));
   await waitFor(() => expect(window.location.hash).toContain("metric=community-conditions"));
-  expect(screen.getByLabelText("Community Conditions groups, Group 1 is healthiest")).toBeVisible();
+  const legend = await screen.findByLabelText(
+    "Continuous Community Conditions color scale, Group 1 is healthiest",
+  );
+  expect(legend).toBeVisible();
+  expect(within(legend).getByRole("img", {
+    name: "Community Conditions color ramp from Group 1 to Group 10",
+  })).toBeVisible();
+  for (const tick of ["1", "3", "5", "7", "10"]) {
+    expect(within(legend).getByText(tick)).toBeVisible();
+  }
+  expect(within(legend).getByText("Not grouped")).toBeVisible();
+  expect(legend.querySelector(".missing-key .hatched")).toHaveAttribute("aria-hidden", "true");
   fireEvent.click(screen.getByRole("button", { name: "Best / Worst" }));
   const panel = await screen.findByRole("region", { name: "Best and worst Community Conditions" });
   expect(await within(panel).findByRole("heading", { name: "Best present · Group 2 · 1 counties" })).toBeVisible();
@@ -489,7 +666,18 @@ it("maps and filters Mountain Score with an honest expandable breakdown", async 
   await screen.findByText("HouseHunter");
 
   fireEvent.click(screen.getByRole("button", { name: "Mountain Score" }));
-  expect(screen.getByLabelText("Mountain Score color scale, higher means more mountain characteristics")).toBeVisible();
+  const legend = await screen.findByLabelText(
+    "Continuous Mountain Score color scale, higher means more mountain characteristics",
+  );
+  expect(legend).toBeVisible();
+  expect(within(legend).getByRole("img", {
+    name: "Mountain Score continuous color ramp from 0 to 100",
+  })).toBeVisible();
+  for (const tick of ["0", "20", "40", "60", "80", "100"]) {
+    expect(within(legend).getByText(tick)).toBeVisible();
+  }
+  expect(within(legend).getByText("Unavailable")).toBeVisible();
+  expect(legend.querySelector(".missing-key .hatched")).toHaveAttribute("aria-hidden", "true");
   fireEvent.click(screen.getByRole("button", { name: /^Filters/ }));
   fireEvent.change(screen.getByLabelText("Minimum Mountain Score"), { target: { value: "80" } });
   fireEvent.click(screen.getByRole("button", { name: "Apply" }));
@@ -500,6 +688,11 @@ it("maps and filters Mountain Score with an honest expandable breakdown", async 
   fireEvent.click(screen.getByRole("button", { name: "Find tract" }));
   const drawer = await screen.findByRole("dialog", { name: "Tract detail" });
   expect(await within(drawer).findByLabelText("Mountain Score")).toHaveClass("active");
+  expect(within(drawer).getByLabelText("FEMA risk").querySelector(":scope > span"))
+    .toHaveStyle({ color: scoreColor(tract.risk_score)! });
+  const wildfire = within(drawer).getByText("Wildfire").closest(".contribution");
+  expect(wildfire?.querySelector(".bar i"))
+    .toHaveStyle({ backgroundColor: scoreColor(hazards[0].percentile)! });
   fireEvent.click(within(drawer).getByText("Mountain Score breakdown"));
   expect(within(drawer).getByText(/property-specific views/)).toBeVisible();
   expect(within(drawer).getByText(/1,200 m/)).toBeVisible();

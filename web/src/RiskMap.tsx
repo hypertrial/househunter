@@ -35,6 +35,8 @@ interface Props {
   manifestUrl: string;
   level: "tract" | "county";
   metric?: Metric;
+  displayMetric?: Metric;
+  busy?: boolean;
   rows: MapScore[];
   selected: string;
   state: string;
@@ -48,6 +50,8 @@ interface Props {
   onPreview: (preview: MapPreview | null) => void;
   onCamera: (camera: CameraState) => void;
   onStatus: (message: string) => void;
+  onVisibleCommit?: (metric: Metric) => void;
+  onInteractiveCommit?: (metric: Metric) => void;
 }
 
 interface RenderFrame {
@@ -147,6 +151,8 @@ export default function RiskMap({
   manifestUrl,
   level,
   metric = "fema",
+  displayMetric = metric,
+  busy = displayMetric !== metric,
   rows,
   selected,
   state,
@@ -160,6 +166,8 @@ export default function RiskMap({
   onPreview,
   onCamera,
   onStatus,
+  onVisibleCommit,
+  onInteractiveCommit,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const baseRef = useRef<RenderFrame | null>(null);
@@ -177,6 +185,7 @@ export default function RiskMap({
   const detailRef = useRef(new Map<string, MapFeature[]>());
   const detailPendingRef = useRef(new Map<string, Promise<void>>());
   const detailFailuresRef = useRef(new Map<string, Error>());
+  const detailVersionRef = useRef(0);
   const manifestRef = useRef<MapManifest | null>(null);
   const loadedLevelRef = useRef<"tract" | "county" | "">("");
   const hitBuildRef = useRef(0);
@@ -288,13 +297,21 @@ export default function RiskMap({
     const { width, height, ratio } = dimensionsRef.current;
     const renderTransform = transformRef.current;
     const hitSemanticKey = [
-      geometryVersion, rowsVersionRef.current, level, metric, state, county, showUnranked,
+      geometryVersion, detailVersionRef.current, rowsVersionRef.current, level, metric, state, county, showUnranked,
       neutralOnly,
     ].join("|");
     const renderKey = [
       width, height, ratio, hitSemanticKey, renderTransform.k, renderTransform.x, renderTransform.y,
     ].join("|");
-    if (renderKeyRef.current === renderKey) return;
+    if (renderKeyRef.current === renderKey && hitRef.current && hitSemanticKeyRef.current === hitSemanticKey) {
+      ++hitBuildRef.current;
+      pickingRef.current = true;
+      drawTransformed();
+      onVisibleCommit?.(metric);
+      onInteractiveCommit?.(metric);
+      onStatus(`${colorIdsRef.current.length.toLocaleString()} ${level}s interactive`);
+      return;
+    }
     profile(`draw start ${renderKey}`);
     const base = document.createElement("canvas");
     const hit = document.createElement("canvas");
@@ -363,7 +380,7 @@ export default function RiskMap({
       const stroke = filtered ? "#233038" : "rgba(9,15,18,.54)";
       const projectionKey = projectorsRef.current?.byState.get(featureState) ? featureState : "main";
       const fillKey = typeof fill === "string" ? fill : "hatch";
-      const groupKey = `${projectionKey}|${featureState}|${fillKey}|${alpha}|${stroke}`;
+      const groupKey = `${projectionKey}|${fillKey}|${alpha}|${stroke}`;
       let group = currentGroups.get(groupKey);
       if (!group || group.items.length >= 100) {
         group = { items: [], projection, fill, alpha, stroke };
@@ -390,12 +407,14 @@ export default function RiskMap({
       baseRef.current = { canvas: base, transform: renderTransform, width, height, ratio };
       renderKeyRef.current = renderKey;
       drawTransformed();
+      onVisibleCommit?.(metric);
       profile("visible canvas painted");
       if (geographies.length) onStatus(`${geographies.length.toLocaleString()} ${level}s mapped`);
       if (neutralOnly || !geographies.length) {
         hitRef.current = null;
         colorIdsRef.current = [];
         featureByIdRef.current.clear();
+        onInteractiveCommit?.(metric);
         return;
       }
       let index = 0;
@@ -422,6 +441,7 @@ export default function RiskMap({
           featureByIdRef.current = featureById;
           hitSemanticKeyRef.current = hitSemanticKey;
           pickingRef.current = true;
+          onInteractiveCommit?.(metric);
           onStatus(`${geographies.length.toLocaleString()} ${level}s interactive`);
         }
       };
@@ -451,6 +471,7 @@ export default function RiskMap({
           context.lineWidth = 0.8 / renderTransform.k;
           context.stroke();
           const stateCode = String(item.properties?.state || item.id || "");
+          if (width < 480 && renderTransform.k < 2 && !TERRITORY_BOXES[stateCode]) continue;
           const label = item.properties?.label;
           const projectedLabel = label ? projection(label) : null;
           const [x, y] = projectedLabel || path.centroid(item);
@@ -494,7 +515,7 @@ export default function RiskMap({
     };
     if (geographies.length) onStatus(`Rendering ${geographies.length.toLocaleString()} ${level}s`);
     window.requestAnimationFrame(paintVisibleLayer);
-  }, [county, drawTransformed, effectiveFeatures, geometryVersion, level, metric, neutralOnly, onStatus, projectionFor, showUnranked, state]);
+  }, [county, drawTransformed, effectiveFeatures, geometryVersion, level, metric, neutralOnly, onInteractiveCommit, onStatus, onVisibleCommit, projectionFor, showUnranked, state]);
 
   const scheduleDraw = useCallback(() => {
     window.cancelAnimationFrame(drawFrameRef.current);
@@ -509,6 +530,7 @@ export default function RiskMap({
       ++settleGenerationRef.current;
       featuresRef.current = [];
       detailRef.current.clear();
+      detailVersionRef.current = 0;
       detailFailuresRef.current.clear();
       geometryByIdRef.current.clear();
       detailByIdRef.current.clear();
@@ -634,6 +656,7 @@ export default function RiskMap({
         if (!response.ok) throw new Error(`Detailed tract request failed for ${code} (${response.status})`);
         const detailed = featuresFrom(await response.json() as Topology);
         detailRef.current.set(code, detailed);
+        detailVersionRef.current += 1;
         for (const item of detailed) {
           detailByIdRef.current.set(String(item.id || item.properties?.place_id || ""), item);
         }
@@ -840,7 +863,8 @@ export default function RiskMap({
       className="risk-canvas"
       role="img"
       tabIndex={0}
-      aria-label={`Focusable USA ${level} ${metric === "fema" ? "risk" : metric === "mountain" ? "Mountain Score" : "Community Conditions"} map. ${metric === "fema" ? "Lower FEMA ALR_NPCTL is better." : metric === "mountain" ? "Higher Mountain Score means greater nearby mountain and access characteristics." : "Group 1 is healthiest and Group 10 least healthy; tract values are county-level."} Use arrow keys to move the focus cursor, plus and minus to zoom, and Enter to select.`}
+      aria-busy={busy}
+      aria-label={`Focusable USA ${level} ${displayMetric === "fema" ? "risk" : displayMetric === "mountain" ? "Mountain Score" : "Community Conditions"} map. ${displayMetric === "fema" ? "Lower FEMA ALR_NPCTL is better." : displayMetric === "mountain" ? "Higher Mountain Score means greater nearby mountain and access characteristics." : "Group 1 is healthiest and Group 10 least healthy; tract values are county-level."} Use arrow keys to move the focus cursor, plus and minus to zoom, and Enter to select.`}
       onKeyDown={keyboard}
     />
     <div className="map-zoom" aria-label="Map controls">

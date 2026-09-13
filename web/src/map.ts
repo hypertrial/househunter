@@ -24,6 +24,67 @@ export const MOUNTAIN_COLORS = {
   highest: "#d9bd76",
 } as const;
 
+const COLOR_SCALE_SIZE = 256;
+
+function colorScale(anchors: readonly string[]): readonly string[] {
+  const channels = anchors.map((color) => [
+    Number.parseInt(color.slice(1, 3), 16),
+    Number.parseInt(color.slice(3, 5), 16),
+    Number.parseInt(color.slice(5, 7), 16),
+  ]);
+  const positions = anchors.map((_, index) =>
+    Math.round(index * (COLOR_SCALE_SIZE - 1) / (anchors.length - 1))
+  );
+  return Array.from({ length: COLOR_SCALE_SIZE }, (_, index) => {
+    let right = 1;
+    while (index > positions[right]) right += 1;
+    const left = right - 1;
+    const mix = (index - positions[left]) / (positions[right] - positions[left]);
+    const rgb = channels[left].map((channel, offset) =>
+      Math.round(channel + (channels[right][offset] - channel) * mix)
+    );
+    return `#${rgb.map((channel) => channel.toString(16).padStart(2, "0")).join("")}`;
+  });
+}
+
+function gradient(colors: readonly string[]): string {
+  return `linear-gradient(90deg, ${colors.map((color, index) =>
+    `${color} ${index * 100 / colors.length}% ${(index + 1) * 100 / colors.length}%`
+  ).join(", ")})`;
+}
+
+const FEMA_ANCHORS = Object.values(MAP_COLORS);
+const MOUNTAIN_ANCHORS = Object.values(MOUNTAIN_COLORS);
+
+export const FEMA_COLOR_SCALE = colorScale(FEMA_ANCHORS);
+export const COMMUNITY_COLOR_SCALE = colorScale(COMMUNITY_GROUP_COLORS);
+export const MOUNTAIN_COLOR_SCALE = colorScale(MOUNTAIN_ANCHORS);
+
+export const METRIC_COLOR_SCALES = {
+  fema: {
+    minimum: 0, maximum: 100, ticks: [0, 20, 40, 60, 80, 100],
+    distinguishAt: [20, 40, 60, 80],
+    colors: FEMA_COLOR_SCALE, gradient: gradient(FEMA_COLOR_SCALE),
+  },
+  "community-conditions": {
+    minimum: 1, maximum: 10, ticks: [1, 3, 5, 7, 10],
+    distinguishAt: [],
+    colors: COMMUNITY_COLOR_SCALE, gradient: gradient(COMMUNITY_COLOR_SCALE),
+  },
+  mountain: {
+    minimum: 0, maximum: 100, ticks: [0, 20, 40, 60, 80, 100],
+    distinguishAt: [20, 40, 60, 80],
+    colors: MOUNTAIN_COLOR_SCALE, gradient: gradient(MOUNTAIN_COLOR_SCALE),
+  },
+} as const satisfies Record<Metric, {
+  minimum: number;
+  maximum: number;
+  ticks: readonly number[];
+  distinguishAt: readonly number[];
+  colors: readonly string[];
+  gradient: string;
+}>;
+
 export const STATE_FIPS = {
   AK: "02", AL: "01", AR: "05", AS: "60", AZ: "04", CA: "06", CO: "08", CT: "09",
   DC: "11", DE: "10", FL: "12", GA: "13", GU: "66", HI: "15", IA: "19", ID: "16",
@@ -47,22 +108,51 @@ export function scoreBand(value: number | null): ScoreBand | null {
 }
 
 export function scoreColor(value: number | null): string | null {
-  const band = scoreBand(value);
-  return band ? MAP_COLORS[band] : null;
+  return scaleColor(value, METRIC_COLOR_SCALES.fema);
 }
 
 export function communityGroupColor(value: number | null): string | null {
-  return value !== null && Number.isInteger(value) && value >= 1 && value <= 10
-    ? COMMUNITY_GROUP_COLORS[value - 1]
+  return value !== null && Number.isInteger(value)
+    ? scaleColor(value, METRIC_COLOR_SCALES["community-conditions"])
     : null;
+}
+
+export function mountainColor(value: number | null): string | null {
+  return scaleColor(value, METRIC_COLOR_SCALES.mountain);
+}
+
+function scaleColor(
+  value: number | null,
+  scale: {
+    minimum: number;
+    maximum: number;
+    distinguishAt: readonly number[];
+    colors: readonly string[];
+  },
+): string | null {
+  const { minimum, maximum, colors } = scale;
+  if (value === null || !Number.isFinite(value) || value < minimum || value > maximum) {
+    return null;
+  }
+  let index = Math.round((value - minimum) / (maximum - minimum) * (colors.length - 1));
+  for (const boundary of scale.distinguishAt) {
+    const boundaryIndex = Math.round(
+      (boundary - minimum) / (maximum - minimum) * (colors.length - 1),
+    );
+    if (value < boundary || index !== boundaryIndex) continue;
+    const lowerColor = colors[index];
+    while (index < colors.length - 1 && colors[index] === lowerColor) index += 1;
+  }
+  return colors[index];
 }
 
 export function metricColor(score: MapScore | null | undefined, metric: Metric): string | null {
   if (metric === "community-conditions") {
     return communityGroupColor(score?.community_conditions_group ?? null);
   }
-  const band = scoreBand(metric === "mountain" ? score?.mountain_score ?? null : score?.risk_score ?? null);
-  return band ? (metric === "mountain" ? MOUNTAIN_COLORS : MAP_COLORS)[band] : null;
+  return metric === "mountain"
+    ? mountainColor(score?.mountain_score ?? null)
+    : scoreColor(score?.risk_score ?? null);
 }
 
 export function scoreMap(rows: MapScore[]): Map<string, MapScore> {

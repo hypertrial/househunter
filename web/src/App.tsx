@@ -1,6 +1,6 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import RiskMap, { type FocusTarget, type MapPreview } from "./RiskMap";
-import { COMMUNITY_GROUP_COLORS, MAP_COLORS, MOUNTAIN_COLORS, readHash, scoreBand, STATE_ABBREVIATIONS, STATE_FIPS, type CameraState, type ScoreBand } from "./map";
+import { METRIC_COLOR_SCALES, readHash, scoreBand, scoreColor, STATE_ABBREVIATIONS, STATE_FIPS, type CameraState, type ScoreBand } from "./map";
 import type { AddressConfirmation, AddressLookup, Geography, HazardPercentile, JobStatus, LookupResult, MapScore, MapScores, Meta, Metric, PlaceDetail, PlaceSummary } from "./types";
 
 export { scoreBand } from "./map";
@@ -13,12 +13,6 @@ const COMMUNITY_EXPLANATION = "National CHR&R Community Conditions Health Group.
 const MOUNTAIN_EXPLANATION = "Mountain Score measures nearby relief, rugged terrain, public mountain land, and mapped hiking access. It does not measure property-specific views, trail quality, drive time, or guaranteed access.";
 
 export { STATE_ABBREVIATIONS } from "./map";
-
-export const SCORE_BANDS = [
-  { id: "low", label: "0–20" }, { id: "below", label: "20–40" },
-  { id: "typical", label: "40–60" }, { id: "high", label: "60–80" },
-  { id: "highest", label: "80–100" },
-] as const satisfies ReadonlyArray<{ id: ScoreBand; label: string }>;
 
 export const SCORE_BAND_LABELS: Record<ScoreBand, string> = {
   low: "low among peers", below: "below typical", typical: "typical",
@@ -60,11 +54,6 @@ function percentileLabel(value: number | null): string {
 
 function metricLabel(place: PlaceSummary, metric: Metric): string {
   return metric === "fema" ? scoreLabel(place) : metric === "mountain" ? mountainLabel(place) : communityLabel(place);
-}
-
-export function scoreToneClass(value: number | null): string {
-  const band = scoreBand(value);
-  return band ? `score-${band}` : "missing";
 }
 
 export function scorePillLabel(place: PlaceSummary): string | undefined {
@@ -124,6 +113,34 @@ function Setup({ token, onReady }: { token: string; onReady: () => void }) {
   </section>;
 }
 
+function MetricLegend({ metric }: { metric: Metric }) {
+  const { minimum, maximum, ticks, gradient } = METRIC_COLOR_SCALES[metric];
+  const missing = metric === "fema" ? "Unranked" : metric === "mountain" ? "Unavailable" : "Not grouped";
+  const label = metric === "fema"
+    ? "Continuous score color scale, lower is better"
+    : metric === "mountain"
+      ? "Continuous Mountain Score color scale, higher means more mountain characteristics"
+      : "Continuous Community Conditions color scale, Group 1 is healthiest";
+  const rampLabel = metric === "fema"
+    ? "FEMA Risk continuous color ramp from 0 to 100"
+    : metric === "mountain"
+      ? "Mountain Score continuous color ramp from 0 to 100"
+      : "Community Conditions color ramp from Group 1 to Group 10";
+  return <div className="legend" role="group" aria-label={label}>
+    <div className="legend-keys">
+      <div className="continuous-key">
+        <i className="legend-gradient" style={{ backgroundImage: gradient }} role="img" aria-label={rampLabel} />
+        <div className="legend-ticks">{ticks.map((tick) => <span
+          key={tick}
+          style={{ left: `${(tick - minimum) * 100 / (maximum - minimum)}%` }}
+        >{tick}</span>)}</div>
+      </div>
+      <span className="missing-key"><i className="hatched" aria-hidden="true" />{missing}</span>
+    </div>
+    <p>{metric === "fema" ? <><strong>FEMA ALR_NPCTL</strong> · lower is better · national percentile · not property-level risk</> : metric === "mountain" ? <><strong>Mountain Score</strong> · higher means more nearby mountain/access characteristics · not property-specific</> : <><strong>CHR&amp;R Community Conditions</strong> · 1 healthiest · 10 least healthy · county-level clusters, not percentiles</>}</p>
+  </div>;
+}
+
 function DetailDrawer({ detail, loading, error, level, metric, onClose, onRetry, onViewTracts, onViewCounty }: {
   detail: PlaceDetail | null; loading: boolean; error: string; level: Geography; metric: Metric;
   onClose: () => void; onRetry: () => void;
@@ -136,7 +153,7 @@ function DetailDrawer({ detail, loading, error, level, metric, onClose, onRetry,
     {detail && <><p className="eyebrow">{detail.summary.place_type} · {detail.summary.place_id}</p>
       <h2>{detail.summary.name}, {detail.summary.state}</h2>
       <div className="metric-cards">
-        <section className={`metric-card ${metric === "fema" ? "active" : ""}`} aria-label="FEMA risk"><strong>Natural Hazard Risk</strong><span className={scoreToneClass(detail.summary.risk_score)}>{scoreLabel(detail.summary)}</span><small>FEMA {level === "county" ? "county " : ""}ALR_NPCTL<br />Lower is better</small></section>
+        <section className={`metric-card ${metric === "fema" ? "active" : ""}`} aria-label="FEMA risk"><strong>Natural Hazard Risk</strong><span style={{ color: scoreColor(detail.summary.risk_score) ?? undefined }}>{scoreLabel(detail.summary)}</span><small>FEMA {level === "county" ? "county " : ""}ALR_NPCTL<br />Lower is better</small></section>
         <section className={`metric-card ${metric === "community-conditions" ? "active" : ""}`} aria-label="Community Conditions"><strong>Community Conditions</strong><span>{communityLabel(detail.summary)}</span><small>CHR&R Community Conditions<br />Better conditions ↑ · County-level <button className="metric-help" title={COMMUNITY_EXPLANATION} aria-label={COMMUNITY_EXPLANATION}>ⓘ</button></small></section>
         <section className={`metric-card ${metric === "mountain" ? "active" : ""}`} aria-label="Mountain Score"><strong>Mountain Score</strong><span>{mountainLabel(detail.summary)}</span><small>National residential exposure<br />More mountain characteristics ↑ <button className="metric-help" title={MOUNTAIN_EXPLANATION} aria-label={MOUNTAIN_EXPLANATION}>ⓘ</button></small></section>
       </div>
@@ -144,7 +161,7 @@ function DetailDrawer({ detail, loading, error, level, metric, onClose, onRetry,
       <dl className="facts"><div><dt>{level === "county" ? "County" : "Tract"} FIPS</dt><dd>{detail.summary.place_id}</dd></div><div><dt>State</dt><dd>{detail.summary.state}</dd></div>{level === "tract" && <div><dt>County</dt><dd>{detail.summary.county_name}</dd></div>}<div><dt>FEMA vintage</dt><dd>{detail.summary.fema_vintage}</dd></div></dl>
       {level === "county" && <button className="secondary" onClick={() => onViewTracts(detail.summary.place_id, detail.summary.state)}>View {number.format(detail.member_tract_count ?? 0)} tracts</button>}
       {level === "tract" && /^\d{5}$/.test(detail.summary.county_fips) && <button className="secondary" onClick={() => onViewCounty(detail.summary.county_fips)}>View {detail.summary.county_name} county</button>}
-      <h3>Published hazard percentiles</h3><div className="contributions">{sortedHazardPercentiles(detail.hazard_percentiles).map((hazard) => <div key={hazard.code} className="contribution"><div><span>{hazard.label}</span><span>{hazard.percentile === null ? "No rating" : hazard.percentile.toFixed(1)}</span></div><div className={`bar ${scoreToneClass(hazard.percentile)}`}><i style={{ width: hazard.percentile === null ? "0%" : `${hazard.percentile}%` }} /></div></div>)}</div>
+      <h3>Published hazard percentiles</h3><div className="contributions">{sortedHazardPercentiles(detail.hazard_percentiles).map((hazard) => <div key={hazard.code} className="contribution"><div><span>{hazard.label}</span><span>{hazard.percentile === null ? "No rating" : hazard.percentile.toFixed(1)}</span></div><div className="bar"><i style={{ width: hazard.percentile === null ? "0%" : `${hazard.percentile}%`, backgroundColor: scoreColor(hazard.percentile) ?? undefined }} /></div></div>)}</div>
       <p className="notice">{detail.methodology_notice}</p></>}
   </aside>;
 }
@@ -166,6 +183,8 @@ function Workspace({ meta }: { meta: Meta }) {
     ? initial.place : "";
   const [level, setLevel] = useState<Geography>(initial.level);
   const [metric, setMetric] = useState<Metric>(initial.metric);
+  const [renderedMetric, setRenderedMetric] = useState<Metric>(initial.metric);
+  const [interactiveMetric, setInteractiveMetric] = useState<Metric | null>(null);
   const [state, setState] = useState(initialState);
   const [county, setCounty] = useState(builtState && initial.state !== builtState ? "" : initial.county);
   const [showUnranked, setShowUnranked] = useState(initial.unranked);
@@ -211,6 +230,7 @@ function Workspace({ meta }: { meta: Meta }) {
   const scopeHashNormalized = useRef(false);
   const restoringHistory = useRef(false);
   const overlayTrigger = useRef<HTMLElement | null>(null);
+  const overlayEntry = useRef<HTMLElement | null>(null);
   const restoreOverlayFocus = useRef(true);
   const previousOverlay = useRef<Overlay>(null);
   const detailTrigger = useRef<HTMLElement | null>(null);
@@ -218,6 +238,14 @@ function Workspace({ meta }: { meta: Meta }) {
   const scoreGeneration = useRef(0);
   const countyGeneration = useRef(0);
   const addressGeneration = useRef(0);
+  const selectedMetric = useRef(metric);
+  selectedMetric.current = metric;
+  const mapVisibleCommit = useCallback((committedMetric: Metric) => {
+    if (committedMetric === selectedMetric.current) setRenderedMetric(committedMetric);
+  }, []);
+  const mapInteractiveCommit = useCallback((committedMetric: Metric) => {
+    if (committedMetric === selectedMetric.current) setInteractiveMetric(committedMetric);
+  }, []);
 
   function invalidateAddressLookup() {
     addressGeneration.current += 1;
@@ -233,7 +261,9 @@ function Workspace({ meta }: { meta: Meta }) {
   }
 
   useEffect(() => {
-    if (previousOverlay.current && !overlay && restoreOverlayFocus.current) {
+    if (previousOverlay.current === "more" && (overlay === "exports" || overlay === "info")) {
+      window.requestAnimationFrame(() => overlayEntry.current?.focus());
+    } else if (previousOverlay.current && !overlay && restoreOverlayFocus.current) {
       window.requestAnimationFrame(() => overlayTrigger.current?.focus());
     }
     previousOverlay.current = overlay;
@@ -462,22 +492,27 @@ function Workspace({ meta }: { meta: Meta }) {
   const tooltipScore = metric === "mountain" ? preview?.score?.mountain_score : preview?.score?.risk_score;
   const tooltipBand = scoreBand(tooltipScore ?? null);
   const tooltipClass = preview ? mapTooltipClass(preview.x, preview.y, window.innerWidth, window.innerHeight) : "";
-  const activeFilter = state || county || mountainMin !== null;
+  const activeFilter = Boolean(state || county || mountainMin !== null || (metric !== "community-conditions" && showUnranked));
+  const moreOpen = overlay === "more" || overlay === "exports" || overlay === "info";
+  const moreControls = overlay === "exports" ? "exports-panel" : overlay === "info" ? "info-panel" : "more-panel";
+  const metricName = metric === "fema" ? "FEMA Risk" : metric === "mountain" ? "Mountain Score" : "Community Conditions";
+  const mapUpdating = !scoreError && (renderedMetric !== metric || interactiveMetric !== metric);
   const lowestGroup = lowest[0]?.community_conditions_group ?? null;
   const highestGroup = highest[0]?.community_conditions_group ?? null;
   const noCommunityGroups = metric === "community-conditions" && lowestGroup === null && highestGroup === null;
   return <main className="map-shell">
-    <RiskMap manifestUrl={meta.map_assets.manifest_url} level={level} metric={metric} rows={mapRows} selected={selected} state={state} county={county} showUnranked={showUnranked} neutralOnly={Boolean(scoreError)} focusTarget={focusTarget} cameraTarget={cameraTarget} initialCamera={initial.camera} onSelect={selectFromMap} onPreview={setPreview} onCamera={cameraChanged} onStatus={setStatus} />
-    <header className={`top-dock${overlay ? " overlay-open" : ""}`}><div className="brand"><strong>HouseHunter</strong><span>{metric === "fema" ? "FEMA ALR_NPCTL" : metric === "mountain" ? "Mountain Score" : "Community Conditions"}</span></div><div className="level-toggle" aria-label="Geography level"><button aria-pressed={level === "tract"} onClick={() => switchLevel("tract")}>Tracts</button><button aria-pressed={level === "county"} onClick={() => switchLevel("county")}>Counties</button></div><div className="metric-toggle" aria-label="Map metric"><button aria-pressed={metric === "fema"} onClick={() => switchMetric("fema")}>FEMA Risk</button><button aria-pressed={metric === "community-conditions"} onClick={() => switchMetric("community-conditions")}>Community Conditions</button><button aria-pressed={metric === "mountain"} onClick={() => switchMetric("mountain")}>Mountain Score</button></div><div className="dock-actions"><button aria-expanded={overlay === "search"} aria-controls="search-panel" onClick={(event) => toggleOverlay("search", event.currentTarget)}>Search</button><button aria-expanded={overlay === "extremes"} aria-controls="extremes-panel" onClick={(event) => void openExtremes(event.currentTarget)}>{metric === "community-conditions" ? "Best / Worst" : "Lowest / Highest"}</button><button aria-expanded={overlay === "filters"} aria-controls="filters-panel" className={activeFilter ? "active" : ""} onClick={(event) => toggleOverlay("filters", event.currentTarget)}>Filters{activeFilter ? " · On" : ""}</button><button className="desktop-dock-action" aria-expanded={overlay === "exports"} aria-controls="exports-panel" onClick={(event) => toggleOverlay("exports", event.currentTarget)}>Exports</button><button className="desktop-dock-action" aria-expanded={overlay === "info"} aria-controls="info-panel" aria-label="Information" onClick={(event) => toggleOverlay("info", event.currentTarget)}>ⓘ</button><button className={`mobile-more${overlay === "exports" || overlay === "info" ? " active" : ""}`} aria-expanded={overlay === "more"} aria-controls="more-panel" onClick={(event) => toggleOverlay("more", event.currentTarget)}>More</button></div><div className={`build-pill ${scoreError ? "failed" : ""}`} title={meta.build?.build_id}>{scoreError ? "Score error" : status}</div></header>
+    <RiskMap manifestUrl={meta.map_assets.manifest_url} level={level} metric={metric} displayMetric={renderedMetric} busy={mapUpdating} rows={mapRows} selected={selected} state={state} county={county} showUnranked={showUnranked} neutralOnly={Boolean(scoreError)} focusTarget={focusTarget} cameraTarget={cameraTarget} initialCamera={initial.camera} onSelect={selectFromMap} onPreview={setPreview} onCamera={cameraChanged} onStatus={setStatus} onVisibleCommit={mapVisibleCommit} onInteractiveCommit={mapInteractiveCommit} />
+    <header className={`top-dock${overlay ? " overlay-open" : ""}`}><div className="brand"><strong>HouseHunter</strong><span>{metric === "fema" ? "FEMA ALR_NPCTL" : metric === "mountain" ? "Mountain Score" : "Community Conditions"}</span></div><div className="level-toggle" aria-label="Geography level"><button aria-pressed={level === "tract"} onClick={() => switchLevel("tract")}>Tracts</button><button aria-pressed={level === "county"} onClick={() => switchLevel("county")}>Counties</button></div><div className="metric-toggle" aria-label="Map metric"><button aria-pressed={metric === "fema"} onClick={() => switchMetric("fema")}>FEMA Risk</button><button aria-pressed={metric === "community-conditions"} onClick={() => switchMetric("community-conditions")}>Community Conditions</button><button aria-pressed={metric === "mountain"} onClick={() => switchMetric("mountain")}>Mountain Score</button></div><div className="dock-actions"><button aria-expanded={overlay === "search"} aria-controls="search-panel" onClick={(event) => toggleOverlay("search", event.currentTarget)}>Search</button><button aria-expanded={overlay === "extremes"} aria-controls="extremes-panel" onClick={(event) => void openExtremes(event.currentTarget)}>{metric === "community-conditions" ? "Best / Worst" : "Lowest / Highest"}</button><button aria-expanded={overlay === "filters"} aria-controls="filters-panel" className={activeFilter ? "active" : ""} onClick={(event) => toggleOverlay("filters", event.currentTarget)}>Filters{activeFilter ? " · On" : ""}</button><button className="desktop-dock-action" aria-expanded={overlay === "exports"} aria-controls="exports-panel" onClick={(event) => toggleOverlay("exports", event.currentTarget)}>Exports</button><button className="desktop-dock-action" aria-expanded={overlay === "info"} aria-controls="info-panel" aria-label="Information" onClick={(event) => toggleOverlay("info", event.currentTarget)}>ⓘ</button><button className={`mobile-more${moreOpen ? " active" : ""}`} aria-expanded={moreOpen} aria-controls={moreControls} onClick={(event) => { if (moreOpen) { overlayTrigger.current = event.currentTarget; setOverlay(null); } else toggleOverlay("more", event.currentTarget); }}>More</button></div><div className={`build-pill ${scoreError ? "failed" : ""}`} title={meta.build?.build_id}>{scoreError ? "Score error" : status}</div></header>
     {overlay === "search" && <section id="search-panel" className="floating-panel search-panel" aria-label="Search"><form onSubmit={lookupAddress} aria-busy={searching}><label>Street address<input autoFocus autoComplete="street-address" autoCapitalize="words" enterKeyHint="search" value={query} onChange={(event) => { invalidateAddressLookup(); setSearchError(""); setQuery(event.target.value); }} placeholder="Street, city, state, ZIP" /></label><p className="privacy-note">Find tract contacts the US Census geocoder through this loopback server and may send it to OpenStreetMap only after a valid Census no-match. Addresses are not written to disk. Do not submit confidential addresses. The map shows tract risk, never a property marker or score.</p><button className="primary" disabled={searching || !query.trim()}>{searching ? "Looking…" : "Find tract"}</button>{confirmation && <div className="confirm-card" role="region" aria-label="Approximate street match"><strong>Confirm approximate street match</strong><p>{confirmation.message}</p>{confirmation.candidates.map((candidate) => <button type="button" className="secondary" key={candidate.candidate_id} onClick={() => void confirmAddress(candidate.candidate_id)}>Use approximate street location: {candidate.matched_address}</button>)}<small>{confirmation.attribution}</small></div>}</form>{searchError && <p role="alert" className="error">{searchError}</p>}</section>}
-    {overlay === "filters" && <section id="filters-panel" className="floating-panel filters-panel" aria-label="Map filters"><h2>Filters</h2><label>State<select value={draftState} disabled={Boolean(builtState)} onChange={(event) => { setDraftState(event.target.value); setDraftCounty(""); }}><option value="">All states & territories</option>{STATE_ABBREVIATIONS.map((item) => <option key={item}>{item}</option>)}</select></label>{level === "tract" && <label>County<select value={draftCounty} disabled={!draftState} onChange={(event) => setDraftCounty(event.target.value)}><option value="">All counties</option>{countyOptions.map((item) => <option value={item.place_id} key={item.place_id}>{item.name}</option>)}</select></label>}<label>Minimum Mountain Score<input type="number" min="0" max="100" value={draftMountainMin ?? ""} onChange={(event) => setDraftMountainMin(event.target.value === "" ? null : Math.max(0, Math.min(100, Number(event.target.value))))} placeholder="Any" /></label><label className="check"><input type="checkbox" checked={draftUnranked} onChange={(event) => setDraftUnranked(event.target.checked)} />Show {metric === "mountain" ? "Mountain-unavailable" : "FEMA-unranked"} geographies</label><div className="panel-buttons"><button className="primary" onClick={applyFilters}>Apply</button><button className="secondary" onClick={clearFilters}>Clear</button></div></section>}
+    {overlay === "filters" && <section id="filters-panel" className="floating-panel filters-panel" aria-label="Map filters"><h2>Filters</h2><label>State<select value={draftState} disabled={Boolean(builtState)} onChange={(event) => { setDraftState(event.target.value); setDraftCounty(""); }}><option value="">All states & territories</option>{STATE_ABBREVIATIONS.map((item) => <option key={item}>{item}</option>)}</select></label>{level === "tract" && <label>County<select value={draftCounty} disabled={!draftState} onChange={(event) => setDraftCounty(event.target.value)}><option value="">All counties</option>{countyOptions.map((item) => <option value={item.place_id} key={item.place_id}>{item.name}</option>)}</select></label>}<label>Minimum Mountain Score<input type="number" min="0" max="100" value={draftMountainMin ?? ""} onChange={(event) => setDraftMountainMin(event.target.value === "" ? null : Math.max(0, Math.min(100, Number(event.target.value))))} placeholder="Any" /></label>{metric === "community-conditions" ? <p className="filter-note">Not-grouped geographies always remain visible on this layer.</p> : <label className="check"><input type="checkbox" checked={draftUnranked} onChange={(event) => setDraftUnranked(event.target.checked)} />Show {metric === "mountain" ? "Mountain-unavailable" : "FEMA-unranked"} geographies</label>}<div className="panel-buttons"><button className="primary" onClick={applyFilters}>Apply</button><button className="secondary" onClick={clearFilters}>Clear</button></div></section>}
     {overlay === "extremes" && <section id="extremes-panel" className="floating-panel extremes-panel" aria-label={metric === "fema" ? "Lowest and highest risk" : metric === "mountain" ? "Lowest and highest Mountain Score" : "Best and worst Community Conditions"} aria-busy={extremesLoading}><h2>Explore the range</h2>{browseGroup !== null ? <><button className="secondary" onClick={closeCommunityBrowse}>← Back to groups</button><ResultGroup title={`Group ${browseGroup} · ${number.format(browseTotal)} counties`} items={browseItems} metric={metric} onChoose={choose} /><div className="pager"><button className="secondary" disabled={browseOffset === 0} onClick={() => void browseCommunity(browseGroup, Math.max(0, browseOffset - 50))}>Previous</button><span>{number.format(browseOffset + 1)}–{number.format(Math.min(browseOffset + browseItems.length, browseTotal))} of {number.format(browseTotal)}</span><button className="secondary" disabled={browseOffset + 50 >= browseTotal} onClick={() => void browseCommunity(browseGroup, browseOffset + 50)}>Next</button></div></> : extremesLoading ? <p className="loading-copy" role="status">{metric === "community-conditions" ? "Loading best and worst groups…" : "Loading lowest and highest…"}</p> : noCommunityGroups ? <p>No grouped counties in this scope.</p> : <div><ResultGroup title={metric === "community-conditions" ? `Best present · Group ${lowestGroup} · ${number.format(lowestTotal)} counties` : "Lowest"} items={lowest} metric={metric} onChoose={choose} onBrowse={metric === "community-conditions" && lowestGroup !== null ? () => void browseCommunity(lowestGroup) : undefined} /><ResultGroup title={metric === "community-conditions" ? `Worst present · Group ${highestGroup} · ${number.format(highestTotal)} counties` : "Highest"} items={highest} metric={metric} onChoose={choose} onBrowse={metric === "community-conditions" && highestGroup !== null ? () => void browseCommunity(highestGroup) : undefined} /></div>}{searchError && <p role="alert" className="error">{searchError}</p>}</section>}
     {overlay === "more" && <section id="more-panel" className="floating-panel more-panel" aria-label="More actions"><h2>More</h2><button className="secondary" onClick={() => setOverlay("exports")}>Export snapshot</button><button className="secondary" onClick={() => setOverlay("info")}>About this map</button></section>}
-    {overlay === "exports" && <nav id="exports-panel" className="floating-panel export-panel" aria-label="Exports"><h2>Export snapshot</h2><a href="/api/v1/exports/places.csv" download>Tracts CSV</a><a href="/api/v1/exports/places.parquet" download>Tracts Parquet</a><a href="/api/v1/exports/counties.csv" download>Counties CSV</a><a href="/api/v1/exports/counties.parquet" download>Counties Parquet</a></nav>}
-    {overlay === "info" && <section id="info-panel" className="floating-panel info-panel" aria-label="About this map"><h2>About this map</h2><p>Every geography is drawn from the pinned FEMA National Risk Index December 2025 release. Dense tracts become distinguishable as you zoom; none are aggregated or enlarged.</p><p>Tracts and counties use separate FEMA percentile universes. County values are never tract averages. Hazard percentiles appear only in details.</p><p>{COMMUNITY_EXPLANATION} Tract colors inherit their county group and never imply tract-level resolution.</p><p>{MOUNTAIN_EXPLANATION} Tract and county scores are comparable population-weighted block aggregates.</p><p>HouseHunter is local-only and uses no basemap, telemetry, account, or hosted database.</p></section>}
+    {overlay === "exports" && <nav id="exports-panel" className="floating-panel export-panel" aria-label="Exports"><h2>Export snapshot</h2><a ref={(node) => { overlayEntry.current = node; }} href="/api/v1/exports/places.csv" download>Tracts CSV</a><a href="/api/v1/exports/places.parquet" download>Tracts Parquet</a><a href="/api/v1/exports/counties.csv" download>Counties CSV</a><a href="/api/v1/exports/counties.parquet" download>Counties Parquet</a></nav>}
+    {overlay === "info" && <section id="info-panel" className="floating-panel info-panel" aria-label="About this map"><h2 ref={(node) => { overlayEntry.current = node; }} tabIndex={-1}>About this map</h2><p>Every geography is drawn from the pinned FEMA National Risk Index December 2025 release. Dense tracts become distinguishable as you zoom; none are aggregated or enlarged.</p><p>Tracts and counties use separate FEMA percentile universes. County values are never tract averages. Hazard percentiles appear only in details.</p><p>{COMMUNITY_EXPLANATION} Tract colors inherit their county group and never imply tract-level resolution.</p><p>{MOUNTAIN_EXPLANATION} Tract and county scores are comparable population-weighted block aggregates.</p><p>HouseHunter is local-only and uses no basemap, telemetry, account, or hosted database.</p></section>}
     {preview && <div className={tooltipClass} style={{ left: preview.x, top: preview.y }}><strong>{preview.name}</strong><span>{preview.state} · {preview.placeId}</span><b>{metric === "fema" ? preview.score?.risk_score === null || !preview.score ? "Not ranked / unavailable" : `${preview.score.risk_score.toFixed(1)} · ${tooltipBand ? SCORE_BAND_LABELS[tooltipBand] : ""}` : metric === "mountain" ? preview.score?.mountain_score === null || !preview.score ? "Mountain Score unavailable" : `${preview.score.mountain_score.toFixed(1)} /100` : preview.score?.community_conditions_group === null || !preview.score ? "Not grouped · County-level" : `Group ${preview.score.community_conditions_group} of 10 · County-level`}</b></div>}
     {scoreError && <section className="recovery-card" role="alert"><strong>Scores could not be loaded</strong><span>{scoreError}</span><button className="secondary" onClick={() => void loadScores()}>Retry scores</button></section>}
-    <div className="legend" aria-label={metric === "fema" ? "Score color scale, lower is better" : metric === "mountain" ? "Mountain Score color scale, higher means more mountain characteristics" : "Community Conditions groups, Group 1 is healthiest"}><div>{metric === "community-conditions" ? COMMUNITY_GROUP_COLORS.map((color, index) => <span key={color}><i style={{ background: color }} />{index + 1}</span>) : SCORE_BANDS.map((band) => <span key={band.id}><i style={{ background: (metric === "mountain" ? MOUNTAIN_COLORS : MAP_COLORS)[band.id] }} />{band.label}</span>)}<span><i className="hatched" />{metric === "fema" ? "Unranked" : metric === "mountain" ? "Unavailable" : "Not grouped"}</span></div><p>{metric === "fema" ? <><strong>FEMA ALR_NPCTL</strong> · lower is better · national percentile · not property-level risk</> : metric === "mountain" ? <><strong>Mountain Score</strong> · higher means more nearby mountain/access characteristics · not property-specific</> : <><strong>CHR&R Community Conditions</strong> · 1 healthiest · 10 least healthy · county-level clusters, not percentiles</>}</p></div>
+    {mapUpdating && <div className="map-updating" aria-hidden="true">{renderedMetric !== metric ? `Updating ${metricName} map…` : `Preparing ${metricName} interaction…`}</div>}
+    <MetricLegend metric={renderedMetric} />
     {detailTarget && <DetailDrawer detail={detail} loading={detailLoading} error={detailError} level={detailTarget.level} metric={metric} onClose={closeDetail} onRetry={() => setDetailRetry((value) => value + 1)} onViewTracts={(countyFips, nextState) => { setLevel("tract"); setState(nextState); setDraftState(nextState); setCounty(countyFips); setDraftCounty(countyFips); setSelected(""); setDetailTarget(null); setFocusTarget({ kind: "county", id: countyFips, nonce: Date.now() }); }} onViewCounty={(countyFips) => { setLevel("county"); setCounty(""); setDraftCounty(""); setSelected(countyFips); setDetailTarget({ level: "county", id: countyFips }); setFocusTarget({ kind: "place", id: countyFips, nonce: Date.now() }); }} />}
     <p className="sr-only" aria-live="polite">{status}</p>
   </main>;

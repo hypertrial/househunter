@@ -1,7 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
 const sizes = [
-  { name: "phone", viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true },
+  { name: "phone", viewport: { width: 360, height: 800 }, hasTouch: true, isMobile: true },
   { name: "tablet", viewport: { width: 768, height: 1024 }, hasTouch: true, isMobile: true },
   { name: "desktop", viewport: { width: 1280, height: 720 }, hasTouch: false, isMobile: false },
   { name: "wide", viewport: { width: 1600, height: 900 }, hasTouch: false, isMobile: false },

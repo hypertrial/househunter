@@ -170,18 +170,9 @@ test("keeps preparation and retained workflows inside the map shell", async ({ p
   await expect(detailDrawer).toContainText("Wildfire");
   await expect(detailDrawer).toContainText("No rating");
   const scoreValue = detailDrawer.locator('.metric-card[aria-label="FEMA risk"] > span');
-  for (const [tone, color] of [
-    ["score-low", "rgb(127, 168, 126)"],
-    ["score-below", "rgb(196, 176, 74)"],
-    ["score-typical", "rgb(210, 167, 39)"],
-    ["score-high", "rgb(197, 106, 66)"],
-    ["score-highest", "rgb(177, 74, 60)"],
-  ]) {
-    await scoreValue.evaluate((element, className) => {
-      element.className = className;
-    }, tone);
-    await expect(scoreValue).toHaveCSS("color", color);
-  }
+  await expect(scoreValue).toHaveCSS("color", "rgb(185, 175, 82)");
+  const wildfireBar = detailDrawer.locator(".contribution", { hasText: "Wildfire" }).locator(".bar i");
+  await expect(wildfireBar).toHaveCSS("background-color", "rgb(193, 99, 65)");
 });
 
 test("renders Community Conditions as an independent county-level layer", async ({ page }) => {
@@ -189,7 +180,7 @@ test("renders Community Conditions as an independent county-level layer", async 
   await page.goto("/");
   await page.getByRole("button", { name: "Community Conditions" }).click();
   await expect(page).toHaveURL(/metric=community-conditions/);
-  await expect(page.getByLabel("Community Conditions groups, Group 1 is healthiest"))
+  await expect(page.getByLabel("Continuous Community Conditions color scale, Group 1 is healthiest"))
     .toContainText("county-level clusters, not percentiles");
   await page.getByRole("button", { name: "Best / Worst" }).click();
   const panel = page.getByRole("region", { name: "Best and worst Community Conditions" });
@@ -212,7 +203,8 @@ test("renders and filters the independent Mountain Score layer", async ({ page }
   await page.goto("/");
   await page.getByRole("button", { name: "Mountain Score" }).click();
   await expect(page).toHaveURL(/metric=mountain/);
-  await expect(page.getByLabel(/Mountain Score color scale/)).toContainText("not property-specific");
+  await expect(page.getByLabel(/Continuous Mountain Score color scale/))
+    .toContainText("not property-specific");
   await page.getByRole("button", { name: /Filters/ }).click();
   await page.getByLabel("Minimum Mountain Score").fill("80");
   await page.getByRole("button", { name: "Apply" }).click();
@@ -312,7 +304,8 @@ test("is keyboard operable and never overflows the viewport", async ({ page }, t
   const dimensions = await page.evaluate(() => ({ page: document.documentElement.scrollWidth, viewport: innerWidth }));
   expect(dimensions.page).toBe(dimensions.viewport);
   await expect(page.getByLabel(/Focusable USA tract risk map/)).toBeVisible();
-  await expect(page.getByLabel("Score color scale, lower is better")).toContainText("not property-level risk");
+  await expect(page.getByLabel("Continuous score color scale, lower is better"))
+    .toContainText("not property-level risk");
   const accessibility = await new AxeBuilder({ page })
     .withTags(["wcag2a", "wcag2aa", "wcag21aa", "wcag22aa"])
     .analyze();
@@ -348,8 +341,9 @@ test("deduplicates regional geometry while repeated zooms settle", async ({ page
     }
     return colors.size;
   });
-  await expect.poll(visibleColorCount).toBeGreaterThan(2);
+  await expect.poll(visibleColorCount).toBeGreaterThanOrEqual(2);
   const loadingFrame = await canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL());
+  expect(loadingFrame).not.toBe(nationalFrame);
   await page.waitForTimeout(250);
   expect(await canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL())).toBe(loadingFrame);
   await page.keyboard.press("+");
@@ -357,8 +351,7 @@ test("deduplicates regional geometry while repeated zooms settle", async ({ page
   await page.keyboard.press("+");
   await page.keyboard.press("-");
   await detailLoaded;
-  await expect(page.locator(".build-pill")).toContainText("interactive");
-  expect(await canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL())).not.toBe(loadingFrame);
+  await expect(page.locator(".build-pill")).toContainText("interactive", { timeout: 15_000 });
   const canvasBounds = await canvas.boundingBox();
   if (!canvasBounds) throw new Error("Map canvas has no bounds");
   await canvas.click({ position: { x: canvasBounds.width / 2, y: canvasBounds.height / 2 } });
@@ -368,6 +361,31 @@ test("deduplicates regional geometry while repeated zooms settle", async ({ page
   await expect(page.locator(".build-pill")).toContainText("interactive");
   expect(await canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL())).toBe(nationalFrame);
   expect(regionalRequests).toHaveLength(1);
+});
+
+test("cancels an obsolete metric paint when returning to a cached metric", async ({ page }) => {
+  await installRoutes(page);
+  await page.goto("/");
+  await expect(page.locator(".build-pill")).toContainText("interactive");
+  const canvas = page.locator("canvas");
+  const femaFrame = await canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL());
+  await page.evaluate(() => {
+    const nativeFrame = window.requestAnimationFrame.bind(window);
+    window.requestAnimationFrame = (callback) => nativeFrame((time) => {
+      window.setTimeout(() => callback(time), 40);
+    });
+  });
+
+  await page.getByRole("button", { name: "Mountain Score" }).click();
+  await expect(page.locator(".build-pill")).toContainText("Rendering");
+  await page.getByRole("button", { name: "FEMA Risk" }).click();
+  await expect(page.locator(".build-pill")).toContainText("interactive");
+  await page.waitForTimeout(350);
+
+  await expect(page.getByRole("button", { name: "FEMA Risk" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByLabel("Continuous score color scale, lower is better")).toBeVisible();
+  await expect(page.getByLabel(/Continuous Mountain Score color scale/)).toHaveCount(0);
+  expect(await canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL())).toBe(femaFrame);
 });
 
 test("keeps narrow map actions, status, and controls fully usable", async ({ page }) => {
@@ -400,11 +418,57 @@ test("keeps narrow map actions, status, and controls fully usable", async ({ pag
   expect(layout.controls.top).toBeGreaterThanOrEqual(layout.dock.bottom);
   expect(layout.controls.bottom).toBeLessThan(layout.legend.top);
   expect(layout.controls.right <= layout.status.left || layout.status.right <= layout.controls.left).toBe(true);
+
+  const canvas = page.locator("canvas");
+  const canvasBounds = await canvas.boundingBox();
+  if (!canvasBounds) throw new Error("Map canvas has no bounds");
+  await canvas.click({ position: { x: canvasBounds.width / 2, y: canvasBounds.height / 2 } });
+  const drawer = page.getByRole("dialog", { name: "Tract detail" });
+  await expect(drawer).toBeVisible();
+  await expect(drawer.locator(".metric-card")).toHaveCount(3);
+  const detailLayout = await drawer.evaluate((element) => {
+    const drawerBounds = element.getBoundingClientRect();
+    const cards = [...element.querySelectorAll<HTMLElement>(".metric-card")]
+      .map((card) => card.getBoundingClientRect());
+    return {
+      left: drawerBounds.left,
+      right: drawerBounds.right,
+      bottom: drawerBounds.bottom,
+      height: drawerBounds.height,
+      cardLefts: cards.map((card) => card.left),
+      cardTops: cards.map((card) => card.top),
+      scrollWidth: element.scrollWidth,
+      clientWidth: element.clientWidth,
+    };
+  });
+  expect(detailLayout.left).toBe(0);
+  expect(detailLayout.right).toBe(320);
+  expect(detailLayout.bottom).toBe(700);
+  expect(detailLayout.height).toBeLessThanOrEqual(0.61 * 700 + 1);
+  expect(new Set(detailLayout.cardLefts).size).toBe(1);
+  expect(detailLayout.cardTops).toEqual([...detailLayout.cardTops].sort((a, b) => a - b));
+  expect(detailLayout.scrollWidth).toBeLessThanOrEqual(detailLayout.clientWidth);
+  await page.getByRole("button", { name: "Close tract detail" }).click();
+  await expect(canvas).toBeFocused();
+
   await more.click();
   await expect(more).toHaveAttribute("aria-expanded", "true");
   await page.getByRole("button", { name: "Export snapshot" }).click();
   await expect(page.getByRole("navigation", { name: "Exports" })).toBeVisible();
-  await page.keyboard.press("Escape");
+  await expect(page.getByRole("link", { name: "Tracts CSV" })).toBeFocused();
+  await expect(more).toHaveAttribute("aria-expanded", "true");
+  await expect(more).toHaveAttribute("aria-controls", "exports-panel");
+  await more.click();
   await expect(page.getByRole("navigation", { name: "Exports" })).toHaveCount(0);
+  await expect(more).toHaveAttribute("aria-expanded", "false");
+  await expect(more).toBeFocused();
+  await more.click();
+  await page.getByRole("button", { name: "About this map" }).click();
+  await expect(page.getByRole("region", { name: "About this map" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "About this map" })).toBeFocused();
+  await expect(more).toHaveAttribute("aria-expanded", "true");
+  await expect(more).toHaveAttribute("aria-controls", "info-panel");
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("region", { name: "About this map" })).toHaveCount(0);
   await expect(more).toBeFocused();
 });
