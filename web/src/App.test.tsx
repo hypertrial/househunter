@@ -356,6 +356,13 @@ it("preserves the normalized camera through a responsive resize", async () => {
   act(() => resize());
   await waitFor(() => expect((canvas as HTMLElement & { __zoom?: { x: number, y: number } }).__zoom)
     .toMatchObject({ x: -120, y: -504 }));
+  const cameraMessages = workerMessages.filter(({ worker, value }) => worker === "renderer"
+    && (value.type === "SET_CAMERA" || value.type === "RESIZE"));
+  const resizeIndex = cameraMessages.map(({ value }) => value.type).lastIndexOf("RESIZE");
+  expect(cameraMessages[resizeIndex - 1]?.value.type).toBe("SET_CAMERA");
+  expect(cameraMessages[resizeIndex].value.cameraGeneration).toBeGreaterThan(
+    Number(cameraMessages[resizeIndex - 1].value.cameraGeneration),
+  );
   fireEvent.click(screen.getByRole("button", { name: "Zoom in" }));
   await waitFor(() => expect(onCamera).toHaveBeenLastCalledWith(expect.objectContaining({ cx: 0.37, cy: 0.61, z: 3 })));
 });

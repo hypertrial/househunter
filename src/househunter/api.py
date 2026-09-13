@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from . import __version__
-from .config import RuntimePaths
+from .config import RuntimePaths, sha256_bytes
 from .contracts import (
     AddressConfirmation,
     AddressLookup,
@@ -36,7 +36,6 @@ from .map_assets import (
     MANIFEST_NAME,
     asset_directory,
     load_manifest,
-    manifest_entry,
     map_asset_status,
 )
 from .store import Store, current_build
@@ -136,18 +135,10 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
     app.add_middleware(GZipMiddleware, minimum_size=1000)
     asset_root = asset_directory()
     assets = map_asset_status(asset_root)
-    verified_asset_stats: dict[str, tuple[int, int, int, int]] = {}
-    if assets.ready:
-        verified_manifest = load_manifest(asset_root, verify_files=False)
-        for entry in verified_manifest["files"]:
-            path = asset_root / entry["filename"]
-            stat = path.stat(follow_symlinks=False)
-            verified_asset_stats[entry["filename"]] = (
-                stat.st_dev,
-                stat.st_ino,
-                stat.st_size,
-                stat.st_mtime_ns,
-            )
+    verified_manifest = load_manifest(asset_root, verify_files=False) if assets.ready else None
+    verified_assets = {
+        entry["filename"]: entry for entry in verified_manifest["files"]
+    } if verified_manifest else {}
 
     @app.exception_handler(HouseHunterError)
     async def handle_househunter_error(_: Request, exc: HouseHunterError) -> JSONResponse:
@@ -189,40 +180,35 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
 
     @app.get(f"/map-assets/{MANIFEST_NAME}")
     def map_manifest() -> Response:
-        try:
-            manifest = load_manifest(asset_root, verify_files=False)
-        except ValueError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        if verified_manifest is None:
+            raise HTTPException(
+                status_code=503, detail=assets.error or "Map assets are unavailable"
+            )
         return Response(
-            content=json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
+            content=json.dumps(verified_manifest, sort_keys=True, separators=(",", ":")) + "\n",
             media_type="application/json",
             headers={"Cache-Control": "no-cache"},
         )
 
     @app.get("/map-assets/{filename}")
-    def map_asset(filename: str) -> FileResponse:
+    def map_asset(filename: str) -> Response:
+        if Path(filename).name != filename or filename not in verified_assets:
+            raise HTTPException(status_code=404, detail="Map asset is not listed in the manifest")
+        entry = verified_assets[filename]
+        path = asset_root / filename
         try:
-            # The complete immutable asset set is hash- and content-verified once
-            # when the application is created. Keep request-time checks to the
-            # manifest allowlist and file size instead of reparsing a multi-MB
-            # topology before every local response.
-            path, _ = manifest_entry(filename, asset_root, verify_content=False)
-            stat = path.stat(follow_symlinks=False)
-            if path.is_symlink() or verified_asset_stats.get(filename) != (
-                stat.st_dev,
-                stat.st_ino,
-                stat.st_size,
-                stat.st_mtime_ns,
-            ):
-                raise ValueError("Map asset changed after startup; restart to verify it")
-        except ValueError as exc:
-            missing = str(exc) in {
-                "Invalid map asset path",
-                "Map asset is not listed in the manifest",
-            }
-            raise HTTPException(status_code=404 if missing else 503, detail=str(exc)) from exc
-        return FileResponse(
-            path,
+            if path.is_symlink():
+                raise ValueError("Map asset checksum mismatch")
+            with path.open("rb") as handle:
+                content = handle.read(entry["compressed_size"] + 1)
+            if len(content) != entry["compressed_size"]:
+                raise ValueError("Map asset is missing or has the wrong size")
+            if sha256_bytes(content) != entry["sha256"]:
+                raise ValueError("Map asset checksum mismatch")
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        return Response(
+            content=content,
             media_type="application/topo+json",
             headers={
                 "Content-Encoding": "gzip",

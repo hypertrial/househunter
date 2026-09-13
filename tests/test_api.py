@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 
@@ -214,10 +215,12 @@ def test_map_scores_and_assets_are_complete_ordered_and_safe(
         filename = manifest["files"][0]["filename"]
         path = asset_root / filename
         original = path.read_bytes()
-        path.write_bytes(bytes([original[0] ^ 1]) + original[1:])
+        stat = path.stat()
+        path.write_bytes(original[:9] + bytes([original[9] ^ 1]) + original[10:])
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
         changed = client.get(f"/map-assets/{filename}")
         assert changed.status_code == 503
-        assert "changed after startup" in changed.json()["detail"]
+        assert "checksum mismatch" in changed.json()["detail"]
 
     build_snapshot(paths, state="AL")
     write_assets(asset_root, monkeypatch)

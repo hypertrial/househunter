@@ -53,6 +53,7 @@ fema:
     WFIR_ALR_NPCTL: esriFieldTypeDouble
     WNTW_ALR_NPCTL: esriFieldTypeDouble
   schema_fingerprint: e0b94edbd7b1cde97abc67caa784749673980e538afdb031e3574d5e9482b5cc
+  canonical_sha256: 7b12ca2f292c658a92cc4c9bc39eef5e11b606fa662a8280aa830b1624754bc6
 fema_counties:
   name: FEMA National Risk Index Counties
   item_id: 39485e8035d446a5bff03259508ae355
@@ -91,3 +92,4 @@ fema_counties:
     WFIR_ALR_NPCTL: esriFieldTypeDouble
     WNTW_ALR_NPCTL: esriFieldTypeDouble
   schema_fingerprint: 557599b73577df1deedfb5946323d0760d200634e5f1ab315c58b703fb1f4b99
+  canonical_sha256: 9f9be9b86fe1ae0b0637728f0867432367285dd8dfd7bc7badddb3b2b2c6a23a

@@ -483,8 +483,8 @@ export default function RiskMap({
       dimensionsRef.current = next;
       transformRef.current = nextTransform;
       const viewportGeneration = ++viewportGenerationRef.current;
-      const cameraGeneration = ++cameraGenerationRef.current;
       if (zoomRef.current) select(viewport).call(zoomRef.current.transform, nextTransform);
+      const cameraGeneration = ++cameraGenerationRef.current;
       if (rendererRef.current) post({
         type: "RESIZE",
         datasetGeneration: datasetGenerationRef.current,

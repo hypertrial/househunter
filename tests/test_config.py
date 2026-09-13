@@ -27,3 +27,13 @@ def test_chrr_source_is_fully_pinned() -> None:
     )
     assert source["item_url"].endswith("fed47aeb4d334339a73e20088181e544&sublayer=2")
     assert source["fields"]["CommunityConditions_Group"] == "esriFieldTypeInteger"
+
+
+def test_fema_sources_are_content_pinned() -> None:
+    config = load_config()
+    assert config["fema"]["canonical_sha256"] == (
+        "7b12ca2f292c658a92cc4c9bc39eef5e11b606fa662a8280aa830b1624754bc6"
+    )
+    assert config["fema_counties"]["canonical_sha256"] == (
+        "9f9be9b86fe1ae0b0637728f0867432367285dd8dfd7bc7badddb3b2b2c6a23a"
+    )

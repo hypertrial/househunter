@@ -21,8 +21,10 @@ from househunter.download import (
     download_fema_counties,
     page_cache_dir,
     validate_cached_fema,
+    validate_cached_fema_counties,
 )
 from househunter.errors import SourceContractError
+from househunter.hazards import with_hazard_columns
 
 
 def test_geometry_contract_rejects_non_polygon_layer() -> None:
@@ -639,6 +641,54 @@ def test_cached_fema_rejects_missing_columns(tmp_path: Path) -> None:
     source = {"expected_row_count": 1, "version": "December 2025"}
     with pytest.raises(SourceContractError, match="missing columns"):
         validate_cached_fema(cached, source)
+
+
+@pytest.mark.parametrize(
+    ("validator", "id_column", "ids", "extra_columns"),
+    [
+        (validate_cached_fema, "tract_id", ["01001000100", "01001000200"], {}),
+        (
+            validate_cached_fema_counties,
+            "county_fips",
+            ["01001", "02001"],
+            {
+                "county": ["Autauga", "Aleutians East"],
+                "county_type": ["County", "Borough"],
+                "state": ["AL", "AK"],
+            },
+        ),
+    ],
+)
+def test_cached_fema_rejects_plausible_changes_against_pinned_checksum(
+    tmp_path: Path,
+    validator,  # type: ignore[no-untyped-def]
+    id_column: str,
+    ids: list[str],
+    extra_columns: dict[str, list[str]],
+) -> None:
+    cached = tmp_path / "fema.parquet"
+    original = with_hazard_columns(
+        pl.DataFrame(
+            {
+                id_column: ids,
+                "alr_npctl": [10.0, 20.0],
+                "nri_version": ["December 2025"] * 2,
+                **extra_columns,
+            }
+        )
+    )
+    source = {"expected_row_count": 2, "version": "December 2025"}
+    original.write_parquet(cached)
+    source["canonical_sha256"] = validator(cached, source)[1]
+    original.with_columns(
+        pl.when(pl.col(id_column) == ids[0])
+        .then(99.0)
+        .otherwise(pl.col("alr_npctl"))
+        .alias("alr_npctl")
+    ).write_parquet(cached)
+
+    with pytest.raises(SourceContractError, match="checksum mismatch"):
+        validator(cached, source)
 
 
 def test_page_cache_dir_changes_with_schema_fingerprint(tmp_path: Path) -> None:

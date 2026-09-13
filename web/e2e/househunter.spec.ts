@@ -375,6 +375,56 @@ test("is keyboard operable and never overflows the viewport", async ({ page }, t
   expect(accessibility.violations).toEqual([]);
 });
 
+test("commits a correctly sized frame after a live resize", async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.endsWith("-wide"), "Resize projection runs once per browser engine");
+  await installRoutes(page);
+  await page.goto("/#level=tract&cx=0.5&cy=0.5&z=1");
+  const canvas = page.locator(".map-presentation");
+  await expect(canvas).toHaveAttribute("data-snapshot-id", /\d+/);
+  const before = await canvas.evaluate((node) => ({
+    snapshot: node.dataset.snapshotId,
+    width: parseFloat(node.style.width),
+  }));
+
+  await page.setViewportSize({ width: 900, height: 700 });
+
+  await expect.poll(() => canvas.getAttribute("data-snapshot-id")).not.toBe(before.snapshot);
+  expect(parseFloat(await canvas.evaluate((node) => node.style.width))).toBeLessThan(before.width);
+});
+
+test("retains detail whose projection is cancelled by resize", async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.endsWith("-wide"), "Detail cancellation runs once per browser engine");
+  await installRoutes(page);
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let requests = 0;
+  const ids = Array.from({ length: 12000 }, (_, index) => `08013${String(index).padStart(6, "0")}`);
+  const manyDetails = {
+    type: "Topology",
+    objects: { geography: { type: "GeometryCollection", geometries: ids.map((id) => ({
+      type: "Polygon", id, properties: { place_id: id, state: "CO", county_fips: "08013", name: id }, arcs: [[0]],
+    })) } },
+    arcs: detailPolygon.arcs,
+  };
+  await page.route("**/map-assets/tracts-co.topojson.gz", async (route) => {
+    requests += 1;
+    await gate;
+    await route.fulfill({ json: manyDetails });
+  });
+  await page.goto("/?profile-map#level=tract&cx=0.5&cy=0.5&z=5");
+  await expect.poll(() => requests).toBe(1);
+  release();
+  await expect.poll(() => page.evaluate(() => (window.__HOUSEHUNTER_MAP_PROFILE__ || [])
+    .some((entry) => entry.name === "detail-loaded"))).toBe(true);
+  for (let index = 0; index < 12; index += 1) {
+    await page.setViewportSize({ width: 1200 + index % 2, height: 700 + index % 2 });
+  }
+
+  await expect.poll(() => page.evaluate(() => (window.__HOUSEHUNTER_MAP_PROFILE__ || [])
+    .some((entry) => entry.name === "detail-ready")), { timeout: 10000 }).toBe(true);
+  expect(requests).toBe(1);
+});
+
 test("deduplicates regional geometry while repeated zooms settle", async ({ page }, testInfo) => {
   const regionalRequests: string[] = [];
   page.on("request", (request) => {

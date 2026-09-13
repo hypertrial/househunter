@@ -865,12 +865,16 @@ async function receiveDetail(state: string, features: MapFeature[], generation: 
   const epoch = buildEpoch;
   const meta = stateMetadata.find((item) => item.code === state);
   if (!meta) return;
+  rawDetails.set(state, features);
   try {
     const partition = await buildPartition(
       state, features, true, meta.projection, features.map((_, index) => index), semantics, epoch,
     );
-    if (generation !== datasetGeneration || epoch !== buildEpoch) return;
-    rawDetails.set(state, features);
+    if (generation !== datasetGeneration) return;
+    if (epoch !== buildEpoch) {
+      detailBuildQueue.push({ state, features, generation });
+      return;
+    }
     detailPartitions.set(state, partition);
     viewportPlans.clear();
     failedDetails.delete(state);
@@ -880,7 +884,10 @@ async function receiveDetail(state: string, features: MapFeature[], generation: 
     });
     evictDetails();
   } catch (caught) {
-    if (!(caught instanceof Cancelled)) {
+    if (caught instanceof Cancelled) {
+      if (generation === datasetGeneration) detailBuildQueue.push({ state, features, generation });
+    } else {
+      rawDetails.delete(state);
       failedDetails.add(state);
       post({
         type: "ERROR", datasetGeneration, kind: "detail",
