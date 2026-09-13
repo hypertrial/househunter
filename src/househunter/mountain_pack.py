@@ -250,6 +250,90 @@ def _save_array(path: Path, array: np.ndarray) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _materialize_pad_tile(task: dict[str, Any]) -> dict[str, object]:
+    entry = task["entry"]
+    region = task["region"]
+    workspace = Path(str(task["workspace"]))
+    bounds = tuple(float(value) for value in entry["bounds"])
+    shape = tuple(int(value) for value in entry["shape"])
+    transform = rasterio.Affine(*entry["transform"])
+    array = read_tile_pad(region, bounds, shape=shape, transform=transform)
+    key = str(entry["key"])
+    path = workspace / "tiles" / key / "pad.npy"
+    _save_array(path, array.astype(np.uint8, copy=False))
+    return {"key": key, "metadata": _file_metadata(path)}
+
+
+def _materialize_pad_tiles(
+    regions: tuple[RegionSources, ...],
+    entries: list[dict[str, object]],
+    workspace: Path,
+    *,
+    maximum_bytes: int,
+    workers: int = 4,
+) -> dict[str, dict[str, object]]:
+    if not 1 <= workers <= 4:
+        raise HouseHunterError("Mountain PAD preparation requires one to four workers")
+    by_region = {region.name: region for region in regions}
+
+    def task(entry: dict[str, object]) -> dict[str, Any]:
+        return {
+            "entry": entry,
+            "region": by_region[str(entry["region"])],
+            "workspace": str(workspace),
+        }
+
+    files: dict[str, dict[str, object]] = {}
+
+    def accept(result: dict[str, object], expected_key: str) -> None:
+        if result.get("key") != expected_key or not isinstance(result.get("metadata"), dict):
+            raise HouseHunterError("Mountain PAD worker returned invalid metadata")
+        path = workspace / "tiles" / expected_key / "pad.npy"
+        metadata = _file_metadata(path)
+        if metadata != result["metadata"]:
+            raise HouseHunterError("Mountain PAD worker output changed before validation")
+        files[expected_key] = metadata
+        if allocated_size(workspace) > maximum_bytes:
+            raise HouseHunterError(
+                f"Mountain prepared pack exceeds its {maximum_bytes:,}-byte budget"
+            )
+
+    if workers == 1:
+        for entry in entries:
+            key = str(entry["key"])
+            accept(_materialize_pad_tile(task(entry)), key)
+        return files
+    iterator = iter(entries)
+    executor = ProcessPoolExecutor(
+        max_workers=workers, mp_context=multiprocessing.get_context("spawn")
+    )
+    futures: dict[Any, str] = {}
+    try:
+        while len(futures) < workers * 2:
+            entry = next(iterator, None)
+            if entry is None:
+                break
+            key = str(entry["key"])
+            futures[executor.submit(_materialize_pad_tile, task(entry))] = key
+        while futures:
+            done, _ = wait(futures, return_when=FIRST_COMPLETED)
+            for future in done:
+                key = futures.pop(future)
+                accept(future.result(), key)
+                entry = next(iterator, None)
+                if entry is not None:
+                    next_key = str(entry["key"])
+                    futures[executor.submit(_materialize_pad_tile, task(entry))] = next_key
+    except BaseException:
+        for future in futures:
+            future.cancel()
+        executor.shutdown(wait=True, cancel_futures=True)
+        raise
+    else:
+        executor.shutdown(wait=True)
+    return files
+
+
 def _phase_path(workspace: Path, name: str) -> Path:
     return workspace / "checkpoints" / f"{name}.json"
 
@@ -765,6 +849,7 @@ def _materialize_elevation_batch(
                     tuple(float(value) for value in entry["bounds"]),
                     cell_size_m=cell_size_m,
                     indexed=indexes[region.name],
+                    allow_empty=int(entry.get("population", -1)) == 0,
                 )
             else:
                 array = np.full(shape, np.nan, dtype=np.float32)
@@ -1844,7 +1929,14 @@ def _materialize_v2_tiles(
                 source_root=source_root,
             )
             _clear_phase_files(workspace, filename)
-            files = {}
+            files: dict[str, dict[str, object]] = {}
+            if phase == "pad":
+                files = _materialize_pad_tiles(
+                    regions,
+                    entries,
+                    workspace,
+                    maximum_bytes=maximum_bytes,
+                )
             indexes = (
                 {
                     region.name: _elevation_index(region.elevation, region.target_crs)
@@ -1853,7 +1945,7 @@ def _materialize_v2_tiles(
                 if phase == "elevation"
                 else {}
             )
-            for entry in entries:
+            for entry in (() if phase == "pad" else entries):
                 region = by_region[str(entry["region"])]
                 bounds = tuple(float(value) for value in entry["bounds"])
                 transform = rasterio.Affine(*entry["transform"])
@@ -1864,9 +1956,8 @@ def _materialize_v2_tiles(
                         bounds,
                         cell_size_m=cell_size_m,
                         indexed=indexes[region.name],
+                        allow_empty=int(entry.get("population", -1)) == 0,
                     )
-                elif phase == "pad":
-                    array = read_tile_pad(region, bounds, shape=shape, transform=transform)
                 else:
                     array = read_tile_trails(region, bounds, shape=shape, transform=transform)
                 path = tile_root / str(entry["key"]) / filename

@@ -29,7 +29,7 @@ from househunter.cli import app
 from househunter.config import RuntimePaths, canonical_json, sha256_bytes, sha256_file
 from househunter.errors import HouseHunterError
 from househunter.geography import STATE_BY_FIPS
-from househunter.mountain import IN_SCOPE_STATES
+from househunter.mountain import IN_SCOPE_STATES, RAW_PRECISION
 from househunter.mountain_gis import (
     HAWAII_WKT2_2019,
     RegionSources,
@@ -45,8 +45,10 @@ from househunter.mountain_gis import (
     delete_managed_source_family,
     download_sources,
     extract_locked_archive,
+    iter_region_tiles,
     load_regions,
     qualify_national_inventory,
+    read_tile_elevation,
     read_tile_pad,
     read_tile_trails,
     source_provenance_item,
@@ -62,6 +64,7 @@ from househunter.mountain_pack import (
     _initialize_trails_progress,
     _materialize_elevation_batch,
     _materialize_fragment_trails,
+    _materialize_pad_tiles,
     _materialize_trails_batch,
     _query_trail_fragment_wkbs,
     _source_family_digest,
@@ -1416,6 +1419,177 @@ def test_corrupt_phase_artifact_invalidates_checkpoint(tmp_path: Path) -> None:
 
     artifact.write_bytes(b"corrupt")
     assert _valid_phase(workspace, "elevation", dependency_sha256="b" * 64) is None
+
+
+def test_empty_elevation_tile_is_allowed_only_when_explicitly_requested(tmp_path: Path) -> None:
+    region = RegionSources(
+        name="hawaii",
+        target_crs=HAWAII_WKT2_2019,
+        blocks=tmp_path / "blocks.fgb",
+        elevation=(tmp_path / "dem.tif",),
+        pad_us=tmp_path / "pad.fgb",
+        trails=tmp_path / "trails.fgb",
+    )
+    bounds = (-2_300_000.0, 1_600_000.0, -2_000_000.0, 1_900_000.0)
+    index = ((), shapely.STRtree([]))
+
+    with pytest.raises(HouseHunterError, match="does not cover"):
+        read_tile_elevation(region, bounds, indexed=index)
+
+    elevation, transform = read_tile_elevation(
+        region,
+        bounds,
+        indexed=index,
+        allow_empty=True,
+    )
+
+    assert elevation.shape == (1_200, 1_200)
+    assert elevation.dtype == np.float32
+    assert np.isnan(elevation).all()
+    assert transform == from_origin(-2_300_000.0, 1_900_000.0, 250, 250)
+
+
+def test_empty_elevation_raw_metrics_are_null_only_for_zero_population() -> None:
+    def samples(population: int) -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                "block_geoid": ["150010001001001"],
+                "tract_geoid": ["15001000100"],
+                "county_fips": ["15001"],
+                "state": ["HI"],
+                "pop20": [population],
+                "row": pl.Series([0], dtype=pl.Int32),
+                "column": pl.Series([0], dtype=pl.Int32),
+            }
+        )
+
+    elevation = np.full((2, 2), np.nan, dtype=np.float32)
+    pad = np.zeros((2, 2), dtype=np.uint8)
+    trails = np.zeros((2, 2), dtype=np.float32)
+
+    raw = _raw_metrics_from_tile(samples(0), elevation, pad, trails, cell_size_m=250)
+    assert raw.select(*RAW_PRECISION).null_count().row(0) == (1,) * len(RAW_PRECISION)
+
+    with pytest.raises(HouseHunterError, match="contains no valid cells"):
+        _raw_metrics_from_tile(samples(1), elevation, pad, trails, cell_size_m=250)
+
+
+def test_direct_tiles_allow_missing_elevation_only_for_zero_population(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    region = RegionSources(
+        name="hawaii",
+        target_crs=HAWAII_WKT2_2019,
+        blocks=tmp_path / "blocks.fgb",
+        elevation=(tmp_path / "dem.tif",),
+        pad_us=tmp_path / "pad.fgb",
+        trails=tmp_path / "trails.fgb",
+    )
+
+    def samples(population: int) -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                "block_geoid": ["150010001001001"],
+                "tract_geoid": ["15001000100"],
+                "county_fips": ["15001"],
+                "state": ["HI"],
+                "pop20": [population],
+                "row": pl.Series([0], dtype=pl.Int32),
+                "column": pl.Series([0], dtype=pl.Int32),
+            }
+        )
+
+    monkeypatch.setattr("househunter.mountain_gis._elevation_index", lambda *args: ((), object()))
+    monkeypatch.setattr(
+        "househunter.mountain_gis.read_tile_elevation",
+        lambda *args, allow_empty=False, **kwargs: (
+            (np.full((2, 2), np.nan, dtype=np.float32), from_origin(0, 2, 1, 1))
+            if allow_empty
+            else (_ for _ in ()).throw(HouseHunterError("does not cover"))
+        ),
+    )
+    monkeypatch.setattr(
+        "househunter.mountain_gis.read_tile_pad",
+        lambda *args, **kwargs: np.zeros((2, 2), dtype=np.uint8),
+    )
+    monkeypatch.setattr(
+        "househunter.mountain_gis.read_tile_trails",
+        lambda *args, **kwargs: np.zeros((2, 2), dtype=np.float32),
+    )
+
+    monkeypatch.setattr(
+        "househunter.mountain_gis.iter_region_block_samples",
+        lambda *args, **kwargs: iter([(samples(0), (0.0, 0.0, 2.0, 2.0))]),
+    )
+    tile = next(iter_region_tiles(region, state_by_fips=STATE_BY_FIPS, cell_size_m=1))
+    raw = _raw_metrics_from_tile(*tile, cell_size_m=1)
+    assert raw.select(*RAW_PRECISION).null_count().row(0) == (1,) * len(RAW_PRECISION)
+
+    monkeypatch.setattr(
+        "househunter.mountain_gis.iter_region_block_samples",
+        lambda *args, **kwargs: iter([(samples(1), (0.0, 0.0, 2.0, 2.0))]),
+    )
+    with pytest.raises(HouseHunterError, match="does not cover"):
+        next(iter_region_tiles(region, state_by_fips=STATE_BY_FIPS, cell_size_m=1))
+
+
+def test_parallel_pad_tiles_match_serial_output(tmp_path: Path) -> None:
+    pad = tmp_path / "pad.geojson"
+    pad.write_text(
+        json.dumps(
+            {
+                "type": "FeatureCollection",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "properties": {"Pub_Access": access},
+                        "geometry": {
+                            "type": "Polygon",
+                            "coordinates": [
+                                [[left, 0], [left + 2, 0], [left + 2, 2], [left, 2], [left, 0]]
+                            ],
+                        },
+                    }
+                    for left, access in ((0, "OA"), (2, "RA"))
+                ],
+            }
+        )
+    )
+    region = RegionSources(
+        name="fixture",
+        target_crs="EPSG:4326",
+        blocks=tmp_path / "blocks.geojson",
+        elevation=(tmp_path / "dem.tif",),
+        pad_us=pad,
+        trails=tmp_path / "trails.geojson",
+    )
+    entries = [
+        {
+            "key": character * 24,
+            "region": "fixture",
+            "bounds": [float(left), 0.0, float(left + 2), 2.0],
+            "shape": [2, 2],
+            "transform": [1.0, 0.0, float(left), 0.0, -1.0, 2.0],
+        }
+        for character, left in (("a", 0), ("b", 2))
+    ]
+    serial = tmp_path / "serial"
+    parallel = tmp_path / "parallel"
+    for workspace in (serial, parallel):
+        for entry in entries:
+            (workspace / "tiles" / str(entry["key"])).mkdir(parents=True)
+
+    serial_files = _materialize_pad_tiles(
+        (region,), entries, serial, maximum_bytes=10_000_000, workers=1
+    )
+    parallel_files = _materialize_pad_tiles(
+        (region,), entries, parallel, maximum_bytes=10_000_000, workers=4
+    )
+
+    assert set(serial_files) == set(parallel_files)
+    assert {
+        key: metadata["sha256"] for key, metadata in serial_files.items()
+    } == {key: metadata["sha256"] for key, metadata in parallel_files.items()}
 
 
 def test_elevation_batch_resumes_after_source_deletion_but_rejects_corrupt_output(
@@ -3237,6 +3411,45 @@ def test_vector_reader_splits_alaska_antimeridian_window(tmp_path: Path) -> None
     assert set(fields["id"]) == {1, 2}
 
 
+def test_vector_reader_compares_numpy_field_schemas_across_split_windows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    polygons = [
+        Polygon([(179.4, 51.4), (179.6, 51.4), (179.6, 51.6), (179.4, 51.4)]),
+        Polygon([(-179.6, 51.4), (-179.4, 51.4), (-179.4, 51.6), (-179.6, 51.4)]),
+    ]
+    responses = iter(
+        (
+            (
+                {"fields": np.array(["id", "access"])},
+                np.array([index]),
+                np.array([shapely.to_wkb(polygon)], dtype=object),
+                [np.array([index]), np.array(["OA"])],
+            )
+            for index, polygon in enumerate(polygons, 1)
+        )
+    )
+    monkeypatch.setattr(
+        "househunter.mountain_gis.pyogrio.read_info",
+        lambda *args, **kwargs: {"crs": "EPSG:4326"},
+    )
+    monkeypatch.setattr(
+        "househunter.mountain_gis.ogr_raw.read",
+        lambda *args, **kwargs: next(responses),
+    )
+
+    geometries, fields = _read_geometries(
+        tmp_path / "pad.fgb",
+        target_bounds=(-2_000_000.0, 400_000.0, -1_700_000.0, 700_000.0),
+        target_crs="EPSG:3338",
+        columns=["id", "access"],
+        expected_type_ids=frozenset({3, 6}),
+    )
+
+    assert len(geometries) == 2
+    assert fields["id"].tolist() == [1, 2]
+
+
 def test_fragment_trails_split_alaska_antimeridian_window() -> None:
     connection = sqlite3.connect(":memory:")
     connection.executescript(
@@ -3697,6 +3910,12 @@ def test_v2_preparation_resumes_family_checkpoints_after_managed_raw_deletion(
     )
     monkeypatch.setattr("househunter.mountain_pack.read_tile_pad", lambda *args, **kwargs: pad)
     monkeypatch.setattr(
+        "househunter.mountain_pack._materialize_pad_tiles",
+        lambda regions, entries, workspace, *, maximum_bytes: _materialize_pad_tiles(
+            regions, entries, workspace, maximum_bytes=maximum_bytes, workers=1
+        ),
+    )
+    monkeypatch.setattr(
         "househunter.mountain_pack.read_tile_trails", lambda *args, **kwargs: trails
     )
     pack, lock = prepare_regions(
@@ -3762,6 +3981,12 @@ def test_prepared_cli_build_promotes_and_rebuilds_queryable_snapshot(
         lambda *args, **kwargs: (elevation, from_origin(-100_000, 200_000, 250, 250)),
     )
     monkeypatch.setattr("househunter.mountain_pack.read_tile_pad", lambda *args, **kwargs: pad)
+    monkeypatch.setattr(
+        "househunter.mountain_pack._materialize_pad_tiles",
+        lambda regions, entries, workspace, *, maximum_bytes: _materialize_pad_tiles(
+            regions, entries, workspace, maximum_bytes=maximum_bytes, workers=1
+        ),
+    )
     monkeypatch.setattr(
         "househunter.mountain_pack.read_tile_trails", lambda *args, **kwargs: trails
     )

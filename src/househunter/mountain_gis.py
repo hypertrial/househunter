@@ -2089,7 +2089,7 @@ def _read_geometries(
                 force_2d=True,
                 return_fids=True,
             )
-            if metadata is not None and current["fields"] != metadata["fields"]:
+            if metadata is not None and tuple(current["fields"]) != tuple(metadata["fields"]):
                 raise HouseHunterError(f"Mountain vector source schema changed: {path}")
             metadata = current
             if geometry is None:
@@ -2419,12 +2419,20 @@ def read_tile_elevation(
     *,
     cell_size_m: float = CELL_SIZE_M,
     indexed: tuple[tuple[Path, ...], STRtree] | None = None,
+    allow_empty: bool = False,
 ) -> tuple[np.ndarray, rasterio.Affine]:
     elevation_paths, elevation_index = indexed or _elevation_index(
         source.elevation, source.target_crs
     )
     matching = elevation_index.query(shapely.box(*bounds))
     if not len(matching):
+        if allow_empty:
+            return _read_elevation(
+                (),
+                bounds=bounds,
+                target_crs=source.target_crs,
+                cell_size_m=cell_size_m,
+            )
         raise HouseHunterError(f"Mountain elevation does not cover region tile {bounds}")
     ordered = tuple(elevation_paths[index] for index in sorted(int(value) for value in matching))
     return _read_elevation(
@@ -2530,7 +2538,11 @@ def iter_region_tiles(
         skip_tiles=skip_tiles,
     ):
         elevation, transform = read_tile_elevation(
-            source, bounds, cell_size_m=cell_size_m, indexed=indexed
+            source,
+            bounds,
+            cell_size_m=cell_size_m,
+            indexed=indexed,
+            allow_empty=int(samples["pop20"].sum()) == 0,
         )
         pad = read_tile_pad(source, bounds, shape=elevation.shape, transform=transform)
         trail_cells = read_tile_trails(source, bounds, shape=elevation.shape, transform=transform)
@@ -2559,6 +2571,14 @@ def _raw_metrics_from_tile(
         or np.any(columns >= elevation.shape[1])
     ):
         raise HouseHunterError("Mountain prepared block sample is outside its tile")
+    if not np.isfinite(elevation).any():
+        if samples["pop20"].sum() != 0:
+            raise HouseHunterError("Mountain elevation grid contains no valid cells")
+        return (
+            samples.select("block_geoid", "tract_geoid", "county_fips", "state", "pop20")
+            .with_columns(*(pl.lit(None).cast(pl.Float64).alias(name) for name in RAW_PRECISION))
+            .sort("block_geoid")
+        )
     terrain = terrain_metrics(elevation, cell_size_m=cell_size_m)
     access = access_metrics(
         terrain["mountain_mask"],
