@@ -8,6 +8,7 @@ import polars as pl
 import pytest
 import yaml
 
+import househunter.download as download_module
 from househunter.config import RuntimePaths
 from househunter.download import (
     _fetch_layer_rows,
@@ -684,3 +685,123 @@ def test_request_json_rejects_a_non_object_response() -> None:
         pytest.raises(SourceContractError, match="non-object"),
     ):
         _request_json(client, "https://example.test", {})
+
+
+def test_request_json_stops_streaming_at_the_arcgis_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chunks_read = 0
+    monkeypatch.setattr(download_module, "MAX_ARCGIS_JSON_BYTES", 16)
+
+    class OversizedStream(httpx.SyncByteStream):
+        def __iter__(self):  # type: ignore[no-untyped-def]
+            nonlocal chunks_read
+            for _ in range(4):
+                chunks_read += 1
+                yield b"x" * 8
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=OversizedStream())
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(SourceContractError, match="size limit"),
+    ):
+        _request_json(client, "https://example.test", {})
+
+    assert chunks_read == 3
+
+
+def test_request_json_accepts_a_valid_response_exactly_at_the_arcgis_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b'{"ok":true}'
+    monkeypatch.setattr(download_module, "MAX_ARCGIS_JSON_BYTES", len(payload))
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=payload)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        assert _request_json(client, "https://example.test", {}) == {"ok": True}
+
+
+def test_request_json_rejects_an_oversized_content_length_before_reading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(download_module, "MAX_ARCGIS_JSON_BYTES", 16)
+
+    class UnreadStream(httpx.SyncByteStream):
+        def __iter__(self):  # type: ignore[no-untyped-def]
+            raise AssertionError("oversized response body was read")
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"Content-Length": "17"},
+            stream=UnreadStream(),
+        )
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(SourceContractError, match="size limit"),
+    ):
+        _request_json(client, "https://example.test", {})
+
+
+def test_request_json_rejects_compressed_content_before_reading() -> None:
+    class UnreadStream(httpx.SyncByteStream):
+        def __iter__(self):  # type: ignore[no-untyped-def]
+            raise AssertionError("compressed response body was read")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["accept-encoding"] == "identity"
+        return httpx.Response(
+            200,
+            headers={"Content-Encoding": "gzip"},
+            stream=UnreadStream(),
+        )
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(SourceContractError, match="unsupported content encoding"),
+    ):
+        _request_json(client, "https://example.test", {})
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        {"fields": None},
+        {"fields": [None]},
+        {"editingInfo": None},
+        {"maxRecordCount": "many"},
+    ],
+)
+def test_fema_layer_rejects_malformed_metadata(invalid: dict[str, object]) -> None:
+    fields = {"TRACTFIPS": "esriFieldTypeString"}
+    source = {
+        "item_id": "fixture",
+        "layer_url": "https://example.test/layer/0",
+        "item_modified_ms": 10,
+        "data_last_edit_ms": 20,
+        "layer_last_edit_ms": 30,
+        "fields": fields,
+        "schema_fingerprint": _schema_fingerprint(fields),
+    }
+    metadata: dict[str, object] = {
+        "editingInfo": {"lastEditDate": 30, "dataLastEditDate": 20},
+        "fields": [{"name": "TRACTFIPS", "type": "esriFieldTypeString"}],
+        "maxRecordCount": 2,
+        **invalid,
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/sharing/" in request.url.path:
+            return httpx.Response(200, json={"modified": 10})
+        return httpx.Response(200, json=metadata)
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(SourceContractError, match="metadata contains invalid"),
+    ):
+        _validate_layer(client, source)

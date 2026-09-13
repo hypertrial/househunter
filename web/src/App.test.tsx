@@ -459,6 +459,30 @@ it("switches to Community Conditions and browses county groups without changing 
   expect(within(drawer).getByText(/Better conditions/)).toBeVisible();
 });
 
+it("shows an empty Community Conditions range for an ungrouped territory", async () => {
+  window.history.replaceState(null, "", "/#metric=community-conditions&state=PR");
+  const baseFetch = mockFetch();
+  vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+    const url = new URL(String(input), "http://127.0.0.1");
+    if (url.pathname === "/api/v1/counties" && url.searchParams.get("sort") === "community_conditions_group") {
+      return Promise.resolve(response({
+        total: 1,
+        items: [{ ...county, place_id: "72001", state: "PR", community_conditions_group: null }],
+      }));
+    }
+    return baseFetch(input);
+  }));
+
+  render(<App />);
+  await screen.findByText("HouseHunter");
+  fireEvent.click(screen.getByRole("button", { name: "Community Conditions" }));
+  fireEvent.click(screen.getByRole("button", { name: "Best / Worst" }));
+  const panel = await screen.findByRole("region", { name: "Best and worst Community Conditions" });
+
+  expect(await within(panel).findByText("No grouped counties in this scope.")).toBeVisible();
+  expect(within(panel).queryByText(/Group null/)).not.toBeInTheDocument();
+});
+
 it("maps and filters Mountain Score with an honest expandable breakdown", async () => {
   vi.stubGlobal("fetch", mockFetch());
   render(<App />);

@@ -98,6 +98,40 @@ def _stable_handler(source: dict[str, object]) -> httpx.MockTransport:
     return httpx.MockTransport(handler)
 
 
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        {"fields": None},
+        {"editingInfo": None},
+        {"maxRecordCount": 0},
+    ],
+)
+def test_chrr_layer_rejects_malformed_metadata(invalid: dict[str, object]) -> None:
+    source = _source()
+    metadata: dict[str, object] = {
+        "maxRecordCount": 2,
+        "editingInfo": {
+            "lastEditDate": 30,
+            "schemaLastEditDate": 20,
+            "dataLastEditDate": 10,
+        },
+        "fields": [
+            {"name": name, "type": kind}
+            for name, kind in source["fields"].items()  # type: ignore[union-attr]
+        ],
+        **invalid,
+    }
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=metadata)
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(SourceContractError, match="metadata contains invalid"),
+    ):
+        chrr_module._validate_layer(client, source)
+
+
 def test_chrr_download_paginates_validates_and_reuses_cache(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

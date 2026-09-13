@@ -30,6 +30,7 @@ from .hazards import (
 
 Progress = Callable[[int, str], None]
 Cancelled = Callable[[], bool]
+MAX_ARCGIS_JSON_BYTES = 16 * 1024 * 1024
 
 
 def _validate_raw_percentiles(rows: list[dict[str, Any]]) -> None:
@@ -48,19 +49,76 @@ def _request_json(client: httpx.Client, url: str, params: dict[str, Any]) -> dic
     last_error: Exception | None = None
     for attempt in range(4):
         try:
-            response = client.get(url, params=params)
-            response.raise_for_status()
-            payload = response.json()
+            with client.stream(
+                "GET", url, params=params, headers={"Accept-Encoding": "identity"}
+            ) as response:
+                response.raise_for_status()
+                length = response.headers.get("content-length")
+                try:
+                    encoding = response.headers.get("content-encoding", "identity").lower()
+                    if encoding != "identity":
+                        raise SourceContractError(
+                            "ArcGIS response uses an unsupported content encoding"
+                        )
+                    if length is not None and int(length) > MAX_ARCGIS_JSON_BYTES:
+                        raise SourceContractError("ArcGIS response exceeds its size limit")
+                except ValueError as exc:
+                    raise SourceContractError("ArcGIS response length is invalid") from exc
+                if response.is_stream_consumed:
+                    content: bytes | bytearray = response.content
+                    if len(content) > MAX_ARCGIS_JSON_BYTES:
+                        raise SourceContractError("ArcGIS response exceeds its size limit")
+                else:
+                    content = bytearray()
+                    for chunk in response.iter_raw():
+                        if len(content) + len(chunk) > MAX_ARCGIS_JSON_BYTES:
+                            raise SourceContractError("ArcGIS response exceeds its size limit")
+                        content.extend(chunk)
+            payload = json.loads(content)
             if not isinstance(payload, dict):
                 raise SourceContractError("ArcGIS returned a non-object JSON response")
             if "error" in payload:
                 raise SourceContractError(f"ArcGIS error: {payload['error']!r}")
             return payload
-        except (httpx.HTTPError, json.JSONDecodeError) as exc:
+        except (httpx.HTTPError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             last_error = exc
             if attempt < 3:
                 time.sleep(0.25 * (2**attempt))
     raise SourceContractError(f"Source request failed after retries: {last_error}")
+
+
+def _layer_fields(metadata: dict[str, Any], label: str) -> dict[str, str]:
+    fields = metadata.get("fields")
+    if not isinstance(fields, list) or any(
+        not isinstance(field, dict)
+        or not isinstance(field.get("name"), str)
+        or not isinstance(field.get("type"), str)
+        for field in fields
+    ):
+        raise SourceContractError(f"{label} layer metadata contains invalid fields")
+    return {field["name"]: field["type"] for field in fields}
+
+
+def _layer_editing_info(metadata: dict[str, Any], label: str) -> dict[str, Any]:
+    editing_info = metadata.get("editingInfo", {})
+    if not isinstance(editing_info, dict):
+        raise SourceContractError(f"{label} layer metadata contains invalid editingInfo")
+    return editing_info
+
+
+def _layer_page_size(metadata: dict[str, Any], label: str) -> int:
+    value = metadata.get("maxRecordCount", 2000)
+    if isinstance(value, bool):
+        raise SourceContractError(f"{label} layer metadata contains invalid maxRecordCount")
+    try:
+        page_size = int(value)
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise SourceContractError(
+            f"{label} layer metadata contains invalid maxRecordCount"
+        ) from exc
+    if page_size <= 0:
+        raise SourceContractError(f"{label} layer metadata contains invalid maxRecordCount")
+    return min(page_size, 2000)
 
 
 def _validate_layer(
@@ -85,14 +143,14 @@ def _validate_layer(
             "FEMA geometry type changed: "
             f"expected {expected_geometry_type}, got {metadata.get('geometryType')}"
         )
-    actual = {field["name"]: field["type"] for field in metadata.get("fields", [])}
+    actual = _layer_fields(metadata, "FEMA")
     required = source["fields"]
     if _schema_fingerprint(required) != source["schema_fingerprint"]:
         raise SourceContractError("Configured FEMA schema fingerprint is inconsistent")
     wrong = {name: actual.get(name) for name, kind in required.items() if actual.get(name) != kind}
     if wrong:
         raise SourceContractError(f"FEMA schema drift: expected {required}, got {wrong}")
-    editing_info = metadata.get("editingInfo", {})
+    editing_info = _layer_editing_info(metadata, "FEMA")
     edit_ms = editing_info.get("lastEditDate")
     if edit_ms != source["layer_last_edit_ms"]:
         raise SourceContractError(
@@ -104,7 +162,7 @@ def _validate_layer(
             "FEMA source data changed: "
             f"expected edit {source['data_last_edit_ms']}, got {data_edit_ms}"
         )
-    return min(int(metadata.get("maxRecordCount", 2000)), 2000)
+    return _layer_page_size(metadata, "FEMA")
 
 
 def _invalid_composite_percentile(frame: pl.DataFrame) -> pl.DataFrame:

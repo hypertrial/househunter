@@ -337,8 +337,7 @@ test("deduplicates regional geometry while repeated zooms settle", async ({ page
   expect(regionalRequests).toHaveLength(0);
   await page.keyboard.press("+");
   await expect.poll(() => regionalRequests.length).toBe(1);
-  const loadingFrame = await canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL());
-  const loadingColors = await canvas.evaluate((element) => {
+  const visibleColorCount = () => canvas.evaluate((element) => {
     const target = element as HTMLCanvasElement;
     const context = target.getContext("2d")!;
     const colors = new Set<string>();
@@ -349,7 +348,8 @@ test("deduplicates regional geometry while repeated zooms settle", async ({ page
     }
     return colors.size;
   });
-  expect(loadingColors).toBeGreaterThan(2);
+  await expect.poll(visibleColorCount).toBeGreaterThan(2);
+  const loadingFrame = await canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL());
   await page.waitForTimeout(250);
   expect(await canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL())).toBe(loadingFrame);
   await page.keyboard.press("+");

@@ -251,12 +251,39 @@ def _with_query(match: AddressMatch, query: str) -> AddressMatch:
     )
 
 
-def _load_json(response: httpx.Response, *, label: str) -> object:
-    if len(response.content) > MAX_GEOCODER_BYTES:
-        raise HouseHunterError(f"{label} returned a malformed response")
+def _http_json(
+    http: httpx.Client,
+    url: str,
+    params: dict[str, str],
+    *,
+    label: str,
+    maximum_bytes: int,
+) -> object:
+    headers = {"User-Agent": USER_AGENT, "Accept-Encoding": "identity"}
+    with http.stream("GET", url, params=params, headers=headers) as response:
+        response.raise_for_status()
+        try:
+            length = response.headers.get("content-length")
+            encoding = response.headers.get("content-encoding", "identity").lower()
+            if encoding != "identity":
+                raise HouseHunterError(f"{label} returned a malformed response")
+            if length is not None and int(length) > maximum_bytes:
+                raise HouseHunterError(f"{label} returned a malformed response")
+        except ValueError as exc:
+            raise HouseHunterError(f"{label} returned a malformed response") from exc
+        if response.is_stream_consumed:
+            content: bytes | bytearray = response.content
+            if len(content) > maximum_bytes:
+                raise HouseHunterError(f"{label} returned a malformed response")
+        else:
+            content = bytearray()
+            for chunk in response.iter_raw():
+                if len(content) + len(chunk) > maximum_bytes:
+                    raise HouseHunterError(f"{label} returned a malformed response")
+                content.extend(chunk)
     try:
-        return response.json()
-    except json.JSONDecodeError as exc:
+        return json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise HouseHunterError(f"{label} returned invalid JSON") from exc
 
 
@@ -271,13 +298,9 @@ def geocode_tract(address: str, *, client: httpx.Client | None = None) -> Addres
             http.close()
 
 
-def _http_get(http: httpx.Client, url: str, params: dict[str, str]) -> httpx.Response:
-    return http.get(url, params=params, headers={"User-Agent": USER_AGENT})
-
-
 def _census_forward(query: str, http: httpx.Client) -> AddressMatch:
     try:
-        response = _http_get(
+        payload = _http_json(
             http,
             GEOCODER_URL,
             {
@@ -286,9 +309,9 @@ def _census_forward(query: str, http: httpx.Client) -> AddressMatch:
                 "vintage": GEOCODER_VINTAGE,
                 "format": "json",
             },
+            label="Census geocoder",
+            maximum_bytes=MAX_GEOCODER_BYTES,
         )
-        response.raise_for_status()
-        payload = _load_json(response, label="Census geocoder")
     except httpx.HTTPError as exc:
         raise HouseHunterError("Census geocoder request failed") from exc
     if not isinstance(payload, dict):
@@ -327,7 +350,7 @@ def _census_forward(query: str, http: httpx.Client) -> AddressMatch:
 
 def _census_tract_at(lat: float, lon: float, http: httpx.Client) -> str:
     try:
-        response = _http_get(
+        payload = _http_json(
             http,
             CENSUS_COORDINATES_URL,
             {
@@ -337,9 +360,9 @@ def _census_tract_at(lat: float, lon: float, http: httpx.Client) -> str:
                 "vintage": GEOCODER_VINTAGE,
                 "format": "json",
             },
+            label="Census geocoder",
+            maximum_bytes=MAX_GEOCODER_BYTES,
         )
-        response.raise_for_status()
-        payload = _load_json(response, label="Census geocoder")
     except httpx.HTTPError as exc:
         raise HouseHunterError("Census geocoder request failed") from exc
     if not isinstance(payload, dict):
@@ -428,7 +451,7 @@ def _search_nominatim(query: str, http: httpx.Client) -> list[NominatimHit]:
         raise CensusNoMatchError(ADDRESS_NOT_FOUND)
     _limiter.wait()
     try:
-        response = _http_get(
+        payload = _http_json(
             http,
             f"{base}/search",
             {
@@ -438,15 +461,11 @@ def _search_nominatim(query: str, http: httpx.Client) -> list[NominatimHit]:
                 "countrycodes": "us",
                 "limit": str(MAX_NOMINATIM_RESULTS),
             },
+            label="Nominatim",
+            maximum_bytes=MAX_NOMINATIM_BYTES,
         )
-        response.raise_for_status()
-        if len(response.content) > MAX_NOMINATIM_BYTES:
-            raise HouseHunterError("Nominatim returned a malformed response")
-        payload = response.json()
     except httpx.HTTPError as exc:
         raise HouseHunterError("Nominatim request failed") from exc
-    except json.JSONDecodeError as exc:
-        raise HouseHunterError("Nominatim returned invalid JSON") from exc
     if not isinstance(payload, list):
         raise HouseHunterError("Nominatim returned a malformed response")
     hits = [

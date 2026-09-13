@@ -54,6 +54,7 @@ from .mountain_paths import (
     OWNERSHIP_MARKER,
     ensure_owned_child,
     ensure_safe_directory,
+    lexical_path,
     remove_owned_child,
     require_owned_child,
 )
@@ -2427,7 +2428,9 @@ def verify_prepared_pack(
     require_source_lock_v2: bool = False,
 ) -> dict[str, Any]:
     """Verify a pack against its separately reviewed lock without recomputing metrics."""
-    pack = ensure_safe_directory(pack)
+    pack = lexical_path(pack)
+    if not pack.is_dir() or any(component.is_symlink() for component in (pack, *pack.parents)):
+        raise HouseHunterError("Mountain prepared pack must be an existing real directory")
     if prepared_lock_path.is_symlink():
         raise HouseHunterError("Mountain prepared-pack lock cannot be a symlink")
     lock = _load_json(prepared_lock_path, "prepared-pack lock")
@@ -2455,6 +2458,52 @@ def verify_prepared_pack(
             or lock.get("source_lock_schema_version") != manifest.get("source_lock_schema_version")
         ):
             raise HouseHunterError("Mountain prepared pack does not match the reviewed source lock")
+        expected_provenance = {
+            "items": [source_provenance_item(item) for item in reviewed["sources"]]
+        }
+        if manifest.get("source_provenance") != expected_provenance:
+            raise HouseHunterError(
+                "Mountain prepared pack provenance differs from the reviewed source lock"
+            )
+        if reviewed.get("schema_version") == 2:
+            tiles = manifest.get("tiles")
+            inventory = reviewed["tile_inventory"]
+            if not isinstance(tiles, list) or any(not isinstance(tile, dict) for tile in tiles):
+                raise HouseHunterError("Mountain prepared pack contains no reviewed tile inventory")
+            actual_inventory = [
+                {
+                    "region": tile.get("region"),
+                    "tile_x": tile.get("tile_x"),
+                    "tile_y": tile.get("tile_y"),
+                    "blocks": tile.get("rows"),
+                    "population": tile.get("population"),
+                    "block_geoid_sha256": tile.get("block_geoid_sha256"),
+                    "block_sample_sha256": tile.get("block_sample_sha256"),
+                }
+                for tile in tiles
+            ]
+            raw_by_tile = {
+                (tile.get("region"), tile.get("tile_x"), tile.get("tile_y")): tile.get(
+                    "raw_metric_sha256"
+                )
+                for tile in tiles
+            }
+            representative_match = all(
+                raw_by_tile.get((item["region"], item["tile_x"], item["tile_y"]))
+                == item["raw_metric_sha256"]
+                for item in reviewed["representative_tiles"]
+            )
+            if (
+                manifest.get("state_expectations") != reviewed["expected_states"]
+                or manifest.get("block_geoid_sha256") != reviewed["block_geoid_sha256"]
+                or manifest.get("block_count") != inventory["block_count"]
+                or len(tiles) != inventory["tile_count"]
+                or actual_inventory != inventory["tiles"]
+                or not representative_match
+            ):
+                raise HouseHunterError(
+                    "Mountain prepared pack inventory differs from the reviewed source lock"
+                )
     elif require_source_lock_v2:
         raise HouseHunterError("National prepared builds require --source-lock")
     grid = manifest.get("grid")

@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import duckdb
 import pytest
 
 
@@ -120,6 +121,58 @@ def _accepted_run(release: Path) -> dict[str, object]:
         "artifact_hashes": {"blocks": "same-hash"},
         "release_path": str(release),
     }
+
+
+def test_runtime_coverage_accepts_only_the_connecticut_county_exception(
+    tmp_path: Path,
+) -> None:
+    benchmark = _load_benchmark()
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    database = snapshot / "househunter.duckdb"
+    columns = """place_id VARCHAR, state VARCHAR, mountain_score DOUBLE,
+                 mountain_coverage_status VARCHAR, mountain_score_version VARCHAR,
+                 mountain_pipeline_version VARCHAR"""
+    with duckdb.connect(str(database)) as connection:
+        connection.execute(f"CREATE TABLE places ({columns})")
+        connection.execute(f"CREATE TABLE counties ({columns})")
+
+        def scored(place_id: str, state: str) -> tuple[object, ...]:
+            return (
+                place_id,
+                state,
+                50.0,
+                "complete",
+                "mountain_score_v1",
+                "mountain_pipeline_v1",
+            )
+
+        connection.executemany(
+            "INSERT INTO places VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                scored(f"{index:011d}", state)
+                for index, state in enumerate(benchmark.IN_SCOPE_STATES)
+            ],
+        )
+        connection.executemany(
+            "INSERT INTO counties VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                scored(f"{index:05d}", state)
+                for index, state in enumerate(benchmark.IN_SCOPE_STATES)
+                if state != "CT"
+            ]
+            + [
+                (place_id, "CT", None, "unavailable", None, None)
+                for place_id in sorted(benchmark.CONNECTICUT_PLANNING_REGIONS)
+            ],
+        )
+
+    assert benchmark.validate_runtime_coverage(snapshot)["counties"]["states"] == 51
+
+    with duckdb.connect(str(database)) as connection:
+        connection.execute("UPDATE counties SET place_id = '09999' WHERE place_id = '09110'")
+    with pytest.raises(RuntimeError, match="Connecticut planning-region exception"):
+        benchmark.validate_runtime_coverage(snapshot)
 
 
 def test_promotion_failure_is_reported_and_shadow_work_is_removed(

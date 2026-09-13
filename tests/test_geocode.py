@@ -9,6 +9,7 @@ from househunter.geocode import (
     GEOCODER_BENCHMARK,
     GEOCODER_URL,
     GEOCODER_VINTAGE,
+    MAX_GEOCODER_BYTES,
     MAX_NOMINATIM_BYTES,
     OSM_ATTRIBUTION,
     USER_AGENT,
@@ -131,6 +132,48 @@ def test_geocode_tract_reports_a_geocoder_http_failure() -> None:
     with (
         httpx.Client(transport=httpx.MockTransport(handler)) as client,
         pytest.raises(HouseHunterError, match="Census geocoder request failed"),
+    ):
+        geocode_tract("1 Main St, Boulder, CO", client=client)
+
+
+def test_geocoder_stops_streaming_when_the_response_exceeds_its_limit() -> None:
+    chunks_read = 0
+
+    class OversizedStream(httpx.SyncByteStream):
+        def __iter__(self):  # type: ignore[no-untyped-def]
+            nonlocal chunks_read
+            for _ in range(4):
+                chunks_read += 1
+                yield b"x" * (MAX_GEOCODER_BYTES // 2)
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=OversizedStream())
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(HouseHunterError, match="malformed"),
+    ):
+        geocode_tract("1 Main St, Boulder, CO", client=client)
+
+    assert chunks_read == 3
+
+
+def test_geocoder_rejects_compressed_content_before_reading() -> None:
+    class UnreadStream(httpx.SyncByteStream):
+        def __iter__(self):  # type: ignore[no-untyped-def]
+            raise AssertionError("compressed response body was read")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["accept-encoding"] == "identity"
+        return httpx.Response(
+            200,
+            headers={"Content-Encoding": "gzip"},
+            stream=UnreadStream(),
+        )
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(HouseHunterError, match="malformed"),
     ):
         geocode_tract("1 Main St, Boulder, CO", client=client)
 

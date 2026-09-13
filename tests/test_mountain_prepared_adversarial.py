@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,7 @@ from rasterio.transform import from_origin
 from typer.testing import CliRunner
 
 from househunter.cli import app
+from househunter.config import canonical_json, sha256_bytes, sha256_file
 from househunter.errors import HouseHunterError
 from househunter.mountain import (
     RAW_PRECISION,
@@ -143,6 +145,26 @@ def _pack(
     )
 
 
+def _rewrite_pack_manifest(
+    pack: Path, lock: Path, mutate: Any
+) -> tuple[Path, Path]:
+    manifest = json.loads((pack / "manifest.json").read_text())
+    mutate(manifest)
+    manifest["pack_id"] = sha256_bytes(
+        canonical_json({key: value for key, value in manifest.items() if key != "pack_id"})
+    )
+    (pack / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    )
+    renamed = pack.with_name(manifest["pack_id"])
+    pack.rename(renamed)
+    prepared_lock = json.loads(lock.read_text())
+    prepared_lock["pack_id"] = manifest["pack_id"]
+    prepared_lock["manifest_sha256"] = sha256_file(renamed / "manifest.json")
+    lock.write_text(json.dumps(prepared_lock, indent=2, sort_keys=True) + "\n")
+    return renamed, lock
+
+
 def test_prepared_pack_external_lock_rejects_same_count_population_geoid_substitution(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -162,6 +184,110 @@ def test_prepared_pack_external_lock_rejects_same_count_population_geoid_substit
     assert original.name != substituted.name
     with pytest.raises(HouseHunterError, match="identity"):
         verify_prepared_pack(substituted, original_lock)
+
+
+def test_prepared_pack_rejects_provenance_forged_beside_reviewed_source_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pack, lock = _pack(
+        tmp_path,
+        monkeypatch,
+        [_tile("080130001001001", -1)],
+    )
+    source_lock = tmp_path / "fixture" / "source-lock.json"
+    pack, lock = _rewrite_pack_manifest(
+        pack,
+        lock,
+        lambda manifest: manifest.update({"source_provenance": {"items": [{"name": "forged"}]}}),
+    )
+
+    with pytest.raises(HouseHunterError, match="provenance"):
+        verify_prepared_pack(pack, lock, reviewed_source_lock_path=source_lock)
+
+
+def test_prepared_pack_rejects_every_forged_v2_inventory_anchor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pack, lock = _pack(tmp_path, monkeypatch, [_tile("080130001001001", -1)])
+    source_lock = tmp_path / "fixture" / "source-lock.json"
+
+    def bind_v2(manifest: dict[str, Any]) -> None:
+        manifest["source_lock_schema_version"] = 2
+        run_path = pack / "run.json"
+        run = json.loads(run_path.read_text())
+        run["source_lock_schema_version"] = 2
+        run_path.write_text(json.dumps(run, indent=2, sort_keys=True) + "\n")
+
+    pack, lock = _rewrite_pack_manifest(pack, lock, bind_v2)
+    prepared_lock = json.loads(lock.read_text())
+    prepared_lock["source_lock_schema_version"] = 2
+    lock.write_text(json.dumps(prepared_lock, indent=2, sort_keys=True) + "\n")
+    manifest = json.loads((pack / "manifest.json").read_text())
+    tile = manifest["tiles"][0]
+    reviewed = {
+        "schema_version": 2,
+        "sources": [],
+        "expected_states": manifest["state_expectations"],
+        "block_geoid_sha256": manifest["block_geoid_sha256"],
+        "tile_inventory": {
+            "block_count": manifest["block_count"],
+            "tile_count": 1,
+            "tiles": [
+                {
+                    "region": tile["region"],
+                    "tile_x": tile["tile_x"],
+                    "tile_y": tile["tile_y"],
+                    "blocks": tile["rows"],
+                    "population": tile["population"],
+                    "block_geoid_sha256": tile["block_geoid_sha256"],
+                    "block_sample_sha256": tile["block_sample_sha256"],
+                }
+            ],
+        },
+        "representative_tiles": [
+            {
+                "region": tile["region"],
+                "tile_x": tile["tile_x"],
+                "tile_y": tile["tile_y"],
+                "raw_metric_sha256": tile["raw_metric_sha256"],
+            }
+        ],
+    }
+    current = reviewed
+    monkeypatch.setattr(
+        "househunter.mountain_pack.load_source_lock_contract",
+        lambda *args, **kwargs: current,
+    )
+    assert verify_prepared_pack(pack, lock, reviewed_source_lock_path=source_lock)[
+        "pack_id"
+    ] == pack.name
+
+    mutations = (
+        lambda value: value.update(block_geoid_sha256="0" * 64),
+        lambda value: value["expected_states"]["CO"].update(blocks=2),
+        lambda value: value["tile_inventory"].update(tile_count=2),
+        lambda value: value["tile_inventory"]["tiles"][0].update(blocks=2),
+        lambda value: value["representative_tiles"][0].update(
+            raw_metric_sha256="0" * 64
+        ),
+    )
+    for mutate in mutations:
+        current = copy.deepcopy(reviewed)
+        mutate(current)
+        with pytest.raises(HouseHunterError, match="inventory"):
+            verify_prepared_pack(pack, lock, reviewed_source_lock_path=source_lock)
+
+
+def test_prepared_pack_verification_does_not_create_a_missing_input_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _pack(tmp_path, monkeypatch, [_tile("080130001001001", -1)])
+    missing = tmp_path / "missing-pack"
+
+    with pytest.raises(HouseHunterError, match="existing real directory"):
+        verify_prepared_pack(missing, tmp_path / "fixture" / "prepared" / "missing-lock.json")
+
+    assert not missing.exists()
 
 
 def test_prepared_pack_rejects_toolchain_change(

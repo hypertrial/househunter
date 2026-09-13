@@ -25,6 +25,17 @@ MAX_RSS_BYTES = 24 * 1024**3
 ENGINEERING_BYTES = 45_000_000_000
 HARD_BYTES = 50_000_000_000
 RUN_RESERVATION_BYTES = 8_500_000_000
+CONNECTICUT_PLANNING_REGIONS = {
+    "09110",
+    "09120",
+    "09130",
+    "09140",
+    "09150",
+    "09160",
+    "09170",
+    "09180",
+    "09190",
+}
 
 
 def allocated_bytes(path: Path) -> int:
@@ -104,15 +115,31 @@ def validate_runtime_coverage(snapshot: Path) -> dict[str, object]:
             by_state = {str(row[0]): row[1:] for row in rows}
             if set(by_state) & expected != expected:
                 raise RuntimeError(f"Published {table} omit an in-scope state or DC")
+            fully_scored_states = expected - ({"CT"} if table == "counties" else set())
             if any(
                 by_state[state][1] <= 0
                 or by_state[state][2] != 0
                 or by_state[state][3] != 0
-                for state in expected
+                for state in fully_scored_states
             ):
                 raise RuntimeError(
                     f"Published {table} lack usable, versioned Mountain scores in every state"
                 )
+            if table == "counties":
+                connecticut = connection.execute(
+                    """SELECT place_id, mountain_score, mountain_coverage_status,
+                              mountain_score_version, mountain_pipeline_version
+                       FROM counties
+                       WHERE state = 'CT'
+                       ORDER BY place_id"""
+                ).fetchall()
+                if connecticut != [
+                    (place_id, None, "unavailable", None, None)
+                    for place_id in sorted(CONNECTICUT_PLANNING_REGIONS)
+                ]:
+                    raise RuntimeError(
+                        "Published counties differ from the Connecticut planning-region exception"
+                    )
             outside = connection.execute(
                 f"""SELECT count(*) FILTER (
                            WHERE mountain_coverage_status != 'outside_scope'

@@ -14,7 +14,13 @@ import polars as pl
 
 from .config import RuntimePaths, canonical_json, load_config, sha256_bytes, sha256_file
 from .contracts import SourceStatus
-from .download import _request_json, _schema_fingerprint
+from .download import (
+    _layer_editing_info,
+    _layer_fields,
+    _layer_page_size,
+    _request_json,
+    _schema_fingerprint,
+)
 from .errors import SourceContractError
 
 Progress = Callable[[int, str], None]
@@ -210,14 +216,14 @@ def logical_checksum(frame: pl.DataFrame) -> str:
 
 def _validate_layer(client: httpx.Client, source: dict[str, Any]) -> int:
     metadata = _request_json(client, source["layer_url"], {"f": "json"})
-    actual = {field["name"]: field["type"] for field in metadata.get("fields", [])}
+    actual = _layer_fields(metadata, "CHR&R")
     required = source["fields"]
     if _schema_fingerprint(required) != source["schema_fingerprint"]:
         raise SourceContractError("Configured CHR&R schema fingerprint is inconsistent")
     wrong = {name: actual.get(name) for name, kind in required.items() if actual.get(name) != kind}
     if wrong:
         raise SourceContractError(f"CHR&R schema drift: expected {required}, got {wrong}")
-    edits = metadata.get("editingInfo", {})
+    edits = _layer_editing_info(metadata, "CHR&R")
     expected_edits = {
         "lastEditDate": source["layer_last_edit_ms"],
         "schemaLastEditDate": source["schema_last_edit_ms"],
@@ -230,7 +236,7 @@ def _validate_layer(client: httpx.Client, source: dict[str, Any]) -> int:
         raise SourceContractError(
             f"CHR&R source changed: expected {expected_edits}, got {mismatches}"
         )
-    return min(int(metadata.get("maxRecordCount", 2000)), 2000)
+    return _layer_page_size(metadata, "CHR&R")
 
 
 def validate_cached_chrr(path: Path, source: dict[str, Any]) -> tuple[pl.DataFrame, str]:
