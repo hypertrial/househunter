@@ -37,7 +37,7 @@ HouseHunter requires Python 3.12+ and [`uv`](https://docs.astral.sh/uv/). The co
 interface is committed, so Node is not required to use the app. No API keys are required.
 
 ```console
-./scripts/run-app
+./scripts/dev
 ```
 
 That installs the small runtime dependency set, downloads the pinned FEMA
@@ -80,7 +80,7 @@ addresses.
 ## Commands
 
 ```text
-./scripts/run-app [--port PORT] [--no-open] [--state CO] [--skip-prepare]
+./scripts/dev [--port PORT] [--no-open] [--state CO] [--skip-prepare]
 househunter sources [--json]
 househunter download [--source fema|fema_counties|chrr|all]
 househunter build [--state CO]

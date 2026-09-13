@@ -137,9 +137,13 @@ def test_parse_args_normalizes_and_rejects_state() -> None:
         parse_args(["--state", "COLO"])
 
 
-def test_run_app_script_syncs_then_execs_module() -> None:
-    script = Path(__file__).resolve().parents[1] / "scripts" / "run-app"
+def test_dev_script_syncs_then_execs_module() -> None:
+    script = Path(__file__).resolve().parents[1] / "scripts" / "dev"
     text = script.read_text()
     assert "uv sync" in text
     assert "python -m househunter.run" in text
     assert script.stat().st_mode & 0o111
+
+    legacy_script = script.with_name("run-app")
+    assert 'exec "$(dirname "$0")/dev" "$@"' in legacy_script.read_text()
+    assert legacy_script.stat().st_mode & 0o111

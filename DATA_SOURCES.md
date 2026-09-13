@@ -86,7 +86,7 @@ qualification report, and
 [`config/mountain/representative-raw-digests-v1.json`](config/mountain/representative-raw-digests-v1.json)
 representative raw-metric anchors.
 
-These large inputs are neither bundled nor fetched by `./scripts/run-app`. A reviewed
+These large inputs are neither bundled nor fetched by `./scripts/dev`. A reviewed
 JSON source lock v2 supplies the exact final HTTPS URL, byte size, SHA-256,
 acquisition date, public release/license, actual CRS/schema/count, and filename for
 every file. It also pins
@@ -279,7 +279,7 @@ subdivisions often need the Nominatim street confirmation.
 ## Census reference assets
 
 Runtime ranking does **not** download or require Census Place/housing assets.
-`./scripts/run-app` uses only the pinned FEMA and CHR&R caches.
+`./scripts/dev` uses only the pinned FEMA and CHR&R caches.
 
 Maintainer-only Place-generation scripts remain in the tree for historical release assets
 and are unused by the local app. Prepare, download, and build never contact census.gov.
