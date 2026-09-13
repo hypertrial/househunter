@@ -136,6 +136,43 @@ def block_sample_sha256(frame: pl.DataFrame) -> str:
     return sha256_bytes(canonical_json([list(row) for row in rows.iter_rows()]))
 
 
+def _matches_reviewed_inventory(
+    manifest: dict[str, Any], source_lock: dict[str, Any]
+) -> bool:
+    tiles = manifest["tiles"]
+    inventory = source_lock["tile_inventory"]
+    actual_inventory = [
+        {
+            "region": tile.get("region"),
+            "tile_x": tile.get("tile_x"),
+            "tile_y": tile.get("tile_y"),
+            "blocks": tile.get("rows"),
+            "population": tile.get("population"),
+            "block_geoid_sha256": tile.get("block_geoid_sha256"),
+            "block_sample_sha256": tile.get("block_sample_sha256"),
+        }
+        for tile in tiles
+    ]
+    raw_by_tile = {
+        (tile.get("region"), tile.get("tile_x"), tile.get("tile_y")): tile.get(
+            "raw_metric_sha256"
+        )
+        for tile in tiles
+    }
+    return (
+        manifest.get("state_expectations") == source_lock["expected_states"]
+        and manifest.get("block_geoid_sha256") == source_lock["block_geoid_sha256"]
+        and manifest.get("block_count") == inventory["block_count"]
+        and len(tiles) == inventory["tile_count"]
+        and actual_inventory == inventory["tiles"]
+        and all(
+            raw_by_tile.get((item["region"], item["tile_x"], item["tile_y"]))
+            == item["raw_metric_sha256"]
+            for item in source_lock["representative_tiles"]
+        )
+    )
+
+
 def raw_metric_sha256(frame: pl.DataFrame) -> str:
     output = io.BytesIO()
     frame.sort("block_geoid").write_parquet(output, compression="uncompressed", statistics=False)
@@ -2336,36 +2373,9 @@ def prepare_regions(
             shutil.rmtree(checkpoints)
         pack_bytes = allocated_size(temporary)
         if source_lock.get("schema_version") == 2:
-            inventory = source_lock["tile_inventory"]
             projection = source_lock["storage_projection"]
-            actual_inventory = [
-                {
-                    "region": entry["region"],
-                    "tile_x": entry["tile_x"],
-                    "tile_y": entry["tile_y"],
-                    "blocks": entry["rows"],
-                    "population": entry["population"],
-                    "block_geoid_sha256": entry["block_geoid_sha256"],
-                    "block_sample_sha256": entry["block_sample_sha256"],
-                }
-                for entry in tile_entries
-            ]
-            raw_by_tile = {
-                (entry["region"], entry["tile_x"], entry["tile_y"]): entry["raw_metric_sha256"]
-                for entry in tile_entries
-            }
-            representative_match = all(
-                raw_by_tile.get((item["region"], item["tile_x"], item["tile_y"]))
-                == item["raw_metric_sha256"]
-                for item in source_lock["representative_tiles"]
-            )
             if (
-                inventory.get("tile_count") != len(tile_entries)
-                or inventory.get("block_count") != blocks.height
-                or inventory.get("tiles") != actual_inventory
-                or not representative_match
-                or source_lock.get("block_geoid_sha256") != manifest["block_geoid_sha256"]
-                or source_lock.get("expected_states") != manifest["state_expectations"]
+                not _matches_reviewed_inventory(manifest, source_lock)
                 or int(projection["prepared_pack_bytes"]) < pack_bytes
             ):
                 raise HouseHunterError(
@@ -2467,40 +2477,9 @@ def verify_prepared_pack(
             )
         if reviewed.get("schema_version") == 2:
             tiles = manifest.get("tiles")
-            inventory = reviewed["tile_inventory"]
             if not isinstance(tiles, list) or any(not isinstance(tile, dict) for tile in tiles):
                 raise HouseHunterError("Mountain prepared pack contains no reviewed tile inventory")
-            actual_inventory = [
-                {
-                    "region": tile.get("region"),
-                    "tile_x": tile.get("tile_x"),
-                    "tile_y": tile.get("tile_y"),
-                    "blocks": tile.get("rows"),
-                    "population": tile.get("population"),
-                    "block_geoid_sha256": tile.get("block_geoid_sha256"),
-                    "block_sample_sha256": tile.get("block_sample_sha256"),
-                }
-                for tile in tiles
-            ]
-            raw_by_tile = {
-                (tile.get("region"), tile.get("tile_x"), tile.get("tile_y")): tile.get(
-                    "raw_metric_sha256"
-                )
-                for tile in tiles
-            }
-            representative_match = all(
-                raw_by_tile.get((item["region"], item["tile_x"], item["tile_y"]))
-                == item["raw_metric_sha256"]
-                for item in reviewed["representative_tiles"]
-            )
-            if (
-                manifest.get("state_expectations") != reviewed["expected_states"]
-                or manifest.get("block_geoid_sha256") != reviewed["block_geoid_sha256"]
-                or manifest.get("block_count") != inventory["block_count"]
-                or len(tiles) != inventory["tile_count"]
-                or actual_inventory != inventory["tiles"]
-                or not representative_match
-            ):
+            if not _matches_reviewed_inventory(manifest, reviewed):
                 raise HouseHunterError(
                     "Mountain prepared pack inventory differs from the reviewed source lock"
                 )
