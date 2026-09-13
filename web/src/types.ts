@@ -105,6 +105,7 @@ export interface JobStatus {
 
 export type Geography = "tract" | "county";
 export type Metric = "fema" | "community-conditions" | "mountain";
+export type MapScope = { kind: "national"; state: null } | { kind: "state"; state: string };
 
 export interface BuildMeta {
   build_id: string;
@@ -113,7 +114,7 @@ export interface BuildMeta {
   county_count?: number;
   ranked_county_count?: number;
   source_vintages: Record<string, string | number>;
-  scope: { kind: string; state: string | null };
+  scope: MapScope;
 }
 
 export interface MapAssetStatus {
@@ -136,18 +137,23 @@ export interface Meta {
 export interface MapScore {
   place_id: string;
   risk_score: number | null;
-  coverage_status: CoverageStatus;
   community_conditions_group: number | null;
   mountain_score: number | null;
-  mountain_coverage_status: PlaceSummary["mountain_coverage_status"];
+}
+
+export interface MapScoreColumns {
+  place_id: string[];
+  risk_score: Array<number | null>;
+  community_conditions_group: Array<number | null>;
+  mountain_score: Array<number | null>;
 }
 
 export interface MapScores {
-  schema_version: 1;
+  schema_version: 2;
   build_id: string;
   level: Geography;
-  scope: { kind: string; state: string | null };
-  rows: MapScore[];
+  scope: MapScope;
+  columns: MapScoreColumns;
 }
 
 export interface MapAssetEntry {

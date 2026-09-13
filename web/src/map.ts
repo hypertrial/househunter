@@ -147,12 +147,26 @@ function scaleColor(
 }
 
 export function metricColor(score: MapScore | null | undefined, metric: Metric): string | null {
+  return metricValueColor(
+    score?.risk_score ?? null,
+    score?.community_conditions_group ?? null,
+    score?.mountain_score ?? null,
+    metric,
+  );
+}
+
+export function metricValueColor(
+  riskScore: number | null,
+  communityGroup: number | null,
+  mountainScore: number | null,
+  metric: Metric,
+): string | null {
   if (metric === "community-conditions") {
-    return communityGroupColor(score?.community_conditions_group ?? null);
+    return communityGroupColor(communityGroup);
   }
   return metric === "mountain"
-    ? mountainColor(score?.mountain_score ?? null)
-    : scoreColor(score?.risk_score ?? null);
+    ? mountainColor(mountainScore)
+    : scoreColor(riskScore);
 }
 
 export function scoreMap(rows: MapScore[]): Map<string, MapScore> {

@@ -151,6 +151,33 @@ npm test
 npm run build
 ```
 
+The map-only `GET /api/v1/map/scores?level=tract|county` contract is schema
+version 2. It returns equal-length, column-oriented `place_id`, `risk_score`,
+`community_conditions_group`, and `mountain_score` arrays in ascending unique
+`place_id` order. Its `build_id`, `level`, and `scope` identify the snapshot.
+Coverage-status fields remain available from place, county, detail, and export
+interfaces; they are intentionally absent from this compact rendering payload.
+
+The real-data interaction benchmark is kept separate from fixture CI because its
+timings are machine-sensitive:
+
+```console
+cd web
+npm run test:perf
+```
+
+It records canonical Chromium and WebKit evidence at 1600×900 and DPR 2 and
+enforces the fixed gesture, settle, pick, detail, startup, long-task, and payload
+ceilings.
+
+At runtime, same-origin loader and renderer workers keep topology parsing,
+projection, exact `Path2D` picking, and DPR-aware rasterization off the main
+thread. A neutral national outline is committed while the full tract dataset is
+prepared; it is explicitly non-interactive until the complete indexed frame is
+ready. Gestures transform the last bitmap through the compositor, and detailed
+tract geometry is prefetched with four bounded requests while retaining the 24
+most-recent non-visible states.
+
 The native GIS stack is maintainer-only and optional:
 
 ```console

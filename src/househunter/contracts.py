@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 CoverageStatus = Literal["complete", "zero_housing", "missing_fema", "unmatched_geography"]
 MountainCoverageStatus = Literal[
@@ -121,21 +121,55 @@ class PlacePage(BaseModel):
     limit: int
 
 
-class MapScore(BaseModel):
-    place_id: str
-    risk_score: float | None
-    coverage_status: CoverageStatus
-    community_conditions_group: int | None
-    mountain_score: float | None
-    mountain_coverage_status: MountainCoverageStatus
+class MapScoreScope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["national", "state"]
+    state: str | None
+
+    @model_validator(mode="after")
+    def validate_scope(self) -> MapScoreScope:
+        if self.kind == "national" and self.state is not None:
+            raise ValueError("National map score scope cannot include a state")
+        if self.kind == "state" and (
+            self.state is None or len(self.state) != 2 or not self.state.isupper()
+        ):
+            raise ValueError("State map score scope requires a two-letter state code")
+        return self
+
+
+class MapScoreColumns(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    place_id: list[str]
+    risk_score: list[float | None]
+    community_conditions_group: list[int | None]
+    mountain_score: list[float | None]
+
+    @model_validator(mode="after")
+    def validate_alignment(self) -> MapScoreColumns:
+        lengths = {
+            len(self.place_id),
+            len(self.risk_score),
+            len(self.community_conditions_group),
+            len(self.mountain_score),
+        }
+        if len(lengths) != 1:
+            raise ValueError("Map score columns must have equal lengths")
+        adjacent_ids = zip(self.place_id, self.place_id[1:], strict=False)
+        if any(left >= right for left, right in adjacent_ids):
+            raise ValueError("Map score place IDs must be ordered and unique")
+        return self
 
 
 class MapScores(BaseModel):
-    schema_version: Literal[1] = 1
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[2] = 2
     build_id: str
     level: Literal["tract", "county"]
-    scope: dict[str, str | None]
-    rows: list[MapScore]
+    scope: MapScoreScope
+    columns: MapScoreColumns
 
 
 class SourceStatus(BaseModel):

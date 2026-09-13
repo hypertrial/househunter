@@ -51,7 +51,7 @@ function mockFetch(
     }
     if (url.pathname.includes("tracts.hash") || url.pathname.includes("tracts-co.hash")) return response(topology(tract.place_id));
     if (url.pathname.includes("counties.hash")) return response(topology(county.place_id));
-    if (url.pathname === "/api/v1/map/scores") return response({ schema_version: 1, build_id: "fixture", level: url.searchParams.get("level"), scope: buildScope, rows: [{ place_id: url.searchParams.get("level") === "county" ? county.place_id : tract.place_id, risk_score: url.searchParams.get("level") === "county" ? county.risk_score : tract.risk_score, coverage_status: "complete", community_conditions_group: 2, mountain_score: 82.5, mountain_coverage_status: "complete" }] });
+    if (url.pathname === "/api/v1/map/scores") return response({ schema_version: 2, build_id: "fixture", level: url.searchParams.get("level"), scope: buildScope, columns: { place_id: [url.searchParams.get("level") === "county" ? county.place_id : tract.place_id], risk_score: [url.searchParams.get("level") === "county" ? county.risk_score : tract.risk_score], community_conditions_group: [2], mountain_score: [82.5] } });
     if (url.pathname === "/api/v1/places" || url.pathname === "/api/v1/counties") return response({ total: 1, items: [url.pathname.includes("counties") ? county : tract] });
     if (url.pathname === `/api/v1/places/${tract.place_id}` || url.pathname === `/api/v1/counties/${county.place_id}`) return response({ summary: url.pathname.includes("counties") ? county : tract, total_weighted_housing: 0, coverage_ratio: 1, methodology_notice: "Published FEMA percentile; not property-level risk.", tract_contributions: [], hazard_percentiles: hazards, member_tract_count: url.pathname.includes("counties") ? 12 : null });
     if (url.pathname === "/api/v1/lookup") return response({ status: "resolved", query: "1 Main", matched_address: "1 MAIN", tract_id: tract.place_id, detail: { summary: tract, total_weighted_housing: 0, coverage_ratio: 1, methodology_notice: "Published FEMA percentile.", tract_contributions: [], hazard_percentiles: hazards, member_tract_count: null }, provider: "census", precision: "house", approximate: false, attribution: null });
@@ -59,24 +59,139 @@ function mockFetch(
   });
 }
 
-const canvasContexts = new Map<HTMLCanvasElement, CanvasRenderingContext2D>();
+const workerMessages: Array<{ worker: string; value: Record<string, unknown> }> = [];
+const bitmapTransfers: unknown[] = [];
+const presentationOrder: string[] = [];
+const mockWorkers: MockWorker[] = [];
+
+class MockWorker {
+  onmessage: ((event: MessageEvent) => void) | null = null;
+  onerror: ((event: ErrorEvent) => void) | null = null;
+  private readonly renderer: boolean;
+  private stopped = false;
+  private ready = false;
+  private frameState: Record<string, unknown> = {};
+  private scoreCount = 0;
+  private readonly snapshotInteractivity = new Map<unknown, boolean>();
+
+  constructor(url: string | URL) {
+    this.renderer = String(url).includes("mapRenderer");
+    mockWorkers.push(this);
+  }
+
+  deliver(data: Record<string, unknown>) {
+    if ((data.type === "FRAME" || data.type === "FRAME_REUSED") && typeof data.interactive === "boolean") {
+      this.snapshotInteractivity.set(data.snapshotId, data.interactive);
+    }
+    this.onmessage?.({ data } as MessageEvent);
+  }
+
+  fail(message: string) {
+    this.onerror?.({ message } as ErrorEvent);
+  }
+
+  private emit(data: Record<string, unknown>) {
+    if ((data.type === "FRAME" || data.type === "FRAME_REUSED") && typeof data.interactive === "boolean") {
+      this.snapshotInteractivity.set(data.snapshotId, data.interactive);
+    }
+    if (!this.stopped) queueMicrotask(() => {
+      if (!this.stopped) this.onmessage?.({ data } as MessageEvent);
+    });
+  }
+
+  private frame() {
+    if (!this.renderer || !this.ready) return;
+    const state = this.frameState as {
+      datasetGeneration: number; viewportGeneration: number; cameraGeneration: number;
+      semanticGeneration: number; camera: { k: number; x: number; y: number };
+      width: number; height: number; ratio: number; metric: string; level: string;
+    };
+    this.emit({
+      type: "FRAME", datasetGeneration: state.datasetGeneration,
+      viewportGeneration: state.viewportGeneration, cameraGeneration: state.cameraGeneration,
+      semanticGeneration: state.semanticGeneration, snapshotId: Date.now() + Math.random(),
+      metric: state.metric, camera: state.camera, originX: -state.width * 0.25,
+      originY: -state.height * 0.25, width: state.width * 1.5, height: state.height * 1.5,
+      ratio: state.ratio, featureCount: this.scoreCount, bitmap: { close: vi.fn() },
+      interactive: true,
+    });
+  }
+
+  postMessage(value: Record<string, unknown>) {
+    workerMessages.push({ worker: this.renderer ? "renderer" : "loader", value });
+    if (value.type === "FRAME_COMMITTED") presentationOrder.push(`ack:${String(value.presented)}`);
+    if (!this.renderer || this.stopped) return;
+    if (value.type === "INIT") {
+      const init = value as typeof value & {
+        datasetGeneration: number; viewportGeneration: number; cameraGeneration: number;
+        semanticGeneration: number; camera: { k: number; x: number; y: number };
+        width: number; height: number; ratio: number; level: string; scoreUrl: string;
+        expectedBuildId: string; semantics: { metric: string; neutralOnly: boolean };
+      };
+      this.frameState = { ...init, metric: init.semantics.metric };
+      const load = async () => {
+        if (!init.semantics.neutralOnly) {
+          try {
+            const result = await fetch(init.scoreUrl);
+            const body = await result.json() as { schema_version?: number; build_id?: string; level?: string; columns?: { place_id?: string[] } };
+            if (!result.ok || body.schema_version !== 2 || body.build_id !== init.expectedBuildId || body.level !== init.level) {
+              throw new Error("Map scores do not match the current build");
+            }
+            this.scoreCount = body.columns?.place_id?.length || 0;
+            this.emit({ type: "SCORES_READY", datasetGeneration: init.datasetGeneration, count: this.scoreCount });
+          } catch (caught) {
+            this.emit({ type: "ERROR", datasetGeneration: init.datasetGeneration, kind: "score", message: caught instanceof Error ? caught.message : "Map score load failed" });
+          }
+        }
+        this.ready = true;
+        this.frame();
+      };
+      void load();
+    } else if (value.type === "SET_SEMANTICS") {
+      this.frameState.semanticGeneration = value.semanticGeneration;
+      this.frameState.metric = (value.semantics as { metric: string }).metric;
+      this.frame();
+    } else if (value.type === "SET_SELECTION") {
+      this.frameState.semanticGeneration = value.semanticGeneration;
+      this.frame();
+    } else if (value.type === "SET_CAMERA") {
+      this.frameState.cameraGeneration = value.cameraGeneration;
+      this.frameState.camera = value.camera;
+      this.frame();
+    } else if (value.type === "RESIZE") {
+      Object.assign(this.frameState, value);
+      this.frame();
+    } else if (value.type === "PICK") {
+      this.emit({ type: "PICK_RESULT", datasetGeneration: value.datasetGeneration, requestId: value.requestId, mode: value.mode, snapshotId: value.snapshotId, preview: null });
+    } else if (value.type === "FOCUS") {
+      this.emit({
+        type: "FOCUS_RESULT", datasetGeneration: value.datasetGeneration,
+        requestId: value.requestId, snapshotId: value.snapshotId,
+        bounds: this.snapshotInteractivity.get(value.snapshotId) === false ? null : [[100, 100], [200, 200]],
+      });
+    } else if (value.type === "DISPOSE") this.stopped = true;
+  }
+
+  terminate() { this.stopped = true; }
+}
 
 beforeEach(() => {
-  canvasContexts.clear();
+  workerMessages.length = 0;
+  bitmapTransfers.length = 0;
+  presentationOrder.length = 0;
+  mockWorkers.length = 0;
   window.history.replaceState(null, "", "/");
-  class Observer { observe() { /* test stub */ } disconnect() { /* test stub */ } }
+  class Observer {
+    constructor(private readonly callback: () => void) {}
+    observe() { this.callback(); }
+    disconnect() { /* test stub */ }
+  }
   vi.stubGlobal("ResizeObserver", Observer);
-  vi.spyOn(HTMLCanvasElement.prototype, "getBoundingClientRect").mockReturnValue({ x: 0, y: 0, top: 0, left: 0, right: 1000, bottom: 700, width: 1000, height: 700, toJSON: () => ({}) });
-  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(function (this: HTMLCanvasElement) {
-    let context = canvasContexts.get(this);
-    if (!context) {
-      context = {
-        setTransform: vi.fn(), clearRect: vi.fn(), fillRect: vi.fn(), drawImage: vi.fn(), beginPath: vi.fn(), moveTo: vi.fn(), lineTo: vi.fn(), closePath: vi.fn(), arc: vi.fn(), fill: vi.fn(), stroke: vi.fn(), fillText: vi.fn(), createPattern: vi.fn(() => "pattern"), getImageData: vi.fn(() => ({ data: new Uint8ClampedArray([0, 0, 0, 0]) })),
-      } as unknown as CanvasRenderingContext2D;
-      canvasContexts.set(this, context);
-    }
-    return context;
-  });
+  vi.stubGlobal("Worker", MockWorker);
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ x: 0, y: 0, top: 0, left: 0, right: 1000, bottom: 700, width: 1000, height: 700, toJSON: () => ({}) });
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(() => ({
+    transferFromImageBitmap: (bitmap: unknown) => { bitmapTransfers.push(bitmap); presentationOrder.push("present"); },
+  }) as unknown as RenderingContext);
 });
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
@@ -168,10 +283,8 @@ describe("score semantics", () => {
     const row: MapScore = {
       place_id: "08013012101",
       risk_score: 21.25,
-      coverage_status: "complete",
       community_conditions_group: 2,
       mountain_score: 82.5,
-      mountain_coverage_status: "complete",
     };
     expect(metricColor(row, "fema")).toBe(scoreColor(21.25));
     expect(metricColor({ ...row, mountain_score: 0 }, "fema")).toBe(scoreColor(21.25));
@@ -204,13 +317,13 @@ it("continues zooming from a camera restored from the URL", async () => {
   vi.stubGlobal("fetch", mockFetch());
   const onCamera = vi.fn();
   render(<RiskMap
-    manifestUrl="/map-assets/manifest.json" level="tract" rows={[]}
+    manifestUrl="/map-assets/manifest.json" scoreUrl="/api/v1/map/scores?level=tract" expectedBuildId="fixture" level="tract"
     selected="" state="" county="" showUnranked={false} focusTarget={null}
     initialCamera={{ cx: 0.5, cy: 0.5, z: 5 }} onSelect={() => undefined}
     onPreview={() => undefined} onCamera={onCamera} onStatus={() => undefined}
   />);
-  const canvas = document.querySelector<HTMLCanvasElement>("canvas.risk-canvas")!;
-  await waitFor(() => expect((canvas as HTMLCanvasElement & { __zoom?: { k: number } }).__zoom?.k).toBe(5));
+  const canvas = document.querySelector<HTMLElement>(".risk-canvas")!;
+  await waitFor(() => expect((canvas as HTMLElement & { __zoom?: { k: number } }).__zoom?.k).toBe(5));
   fireEvent.click(screen.getByRole("button", { name: "Zoom in" }));
   await waitFor(() => expect(onCamera).toHaveBeenLastCalledWith(expect.objectContaining({ z: 7.5 })));
 });
@@ -223,7 +336,7 @@ it("preserves the normalized camera through a responsive resize", async () => {
     observe() { /* test stub */ }
     disconnect() { /* test stub */ }
   });
-  vi.mocked(HTMLCanvasElement.prototype.getBoundingClientRect).mockImplementation(() => ({
+  vi.mocked(HTMLElement.prototype.getBoundingClientRect).mockImplementation(() => ({
     x: 0, y: 0, top: 0, left: 0, right: width, bottom: 700,
     width, height: 700, toJSON: () => ({}),
   }));
@@ -232,16 +345,16 @@ it("preserves the normalized camera through a responsive resize", async () => {
   vi.stubGlobal("fetch", mockFetch());
   const onCamera = vi.fn();
   render(<RiskMap
-    manifestUrl="/map-assets/manifest.json" level="tract" rows={[]}
+    manifestUrl="/map-assets/manifest.json" scoreUrl="/api/v1/map/scores?level=tract" expectedBuildId="fixture" level="tract"
     selected="" state="" county="" showUnranked={false} focusTarget={null}
     initialCamera={{ cx: 0.37, cy: 0.61, z: 2 }} onSelect={() => undefined}
     onPreview={() => undefined} onCamera={onCamera} onStatus={() => undefined}
   />);
-  const canvas = document.querySelector<HTMLCanvasElement>("canvas.risk-canvas")!;
-  await waitFor(() => expect((canvas as HTMLCanvasElement & { __zoom?: { k: number } }).__zoom?.k).toBe(2));
+  const canvas = document.querySelector<HTMLElement>(".risk-canvas")!;
+  await waitFor(() => expect((canvas as HTMLElement & { __zoom?: { k: number } }).__zoom?.k).toBe(2));
   width = 500;
   act(() => resize());
-  await waitFor(() => expect((canvas as HTMLCanvasElement & { __zoom?: { x: number, y: number } }).__zoom)
+  await waitFor(() => expect((canvas as HTMLElement & { __zoom?: { x: number, y: number } }).__zoom)
     .toMatchObject({ x: -120, y: -504 }));
   fireEvent.click(screen.getByRole("button", { name: "Zoom in" }));
   await waitFor(() => expect(onCamera).toHaveBeenLastCalledWith(expect.objectContaining({ cx: 0.37, cy: 0.61, z: 3 })));
@@ -263,9 +376,9 @@ it("ignores a stale score response after changing geography level", async () => 
   render(<App />);
   await screen.findByText("HouseHunter");
   fireEvent.click(screen.getByRole("button", { name: "Counties" }));
-  resolveCounty(response({ schema_version: 1, build_id: "fixture", level: "county", scope: { kind: "national", state: null }, rows: [{ place_id: county.place_id, risk_score: county.risk_score, coverage_status: "complete" }] }));
+  resolveCounty(response({ schema_version: 2, build_id: "fixture", level: "county", scope: { kind: "national", state: null }, columns: { place_id: [county.place_id], risk_score: [county.risk_score], community_conditions_group: [2], mountain_score: [82.5] } }));
   await waitFor(() => expect(screen.getByTitle("fixture")).toHaveTextContent("county"));
-  await act(async () => resolveTract(response({ schema_version: 1, build_id: "fixture", level: "tract", scope: { kind: "national", state: null }, rows: [{ place_id: tract.place_id, risk_score: tract.risk_score, coverage_status: "complete" }] })));
+  await act(async () => resolveTract(response({ schema_version: 2, build_id: "fixture", level: "tract", scope: { kind: "national", state: null }, columns: { place_id: [tract.place_id], risk_score: [tract.risk_score], community_conditions_group: [2], mountain_score: [82.5] } })));
   expect(screen.getByTitle("fixture")).not.toHaveTextContent("tracts ready");
   expect(screen.getByRole("button", { name: "Counties" })).toHaveAttribute("aria-pressed", "true");
 });
@@ -286,11 +399,48 @@ it("ignores a stale score failure after the replacement level succeeds", async (
   render(<App />);
   await screen.findByText("HouseHunter");
   fireEvent.click(screen.getByRole("button", { name: "Counties" }));
-  resolveCounty(response({ schema_version: 1, build_id: "fixture", level: "county", scope: { kind: "national", state: null }, rows: [{ place_id: county.place_id, risk_score: county.risk_score, coverage_status: "complete" }] }));
+  resolveCounty(response({ schema_version: 2, build_id: "fixture", level: "county", scope: { kind: "national", state: null }, columns: { place_id: [county.place_id], risk_score: [county.risk_score], community_conditions_group: [2], mountain_score: [82.5] } }));
   await waitFor(() => expect(screen.getByTitle("fixture")).toHaveTextContent("county"));
   await act(async () => rejectTract(new Error("obsolete tract request failed")));
   expect(screen.queryByText("Scores could not be loaded")).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Counties" })).toHaveAttribute("aria-pressed", "true");
+});
+
+it("loads the replacement level after a score failure and marks it busy until interactive", async () => {
+  let resolveCounty!: (value: Response) => void;
+  const countyResponse = new Promise<Response>((resolve) => { resolveCounty = resolve; });
+  const baseFetch = mockFetch();
+  vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+    const url = new URL(String(input), "http://127.0.0.1");
+    if (url.pathname !== "/api/v1/map/scores") return baseFetch(input);
+    if (url.searchParams.get("level") === "county") return countyResponse;
+    return new Response(JSON.stringify({ detail: "tract scores unavailable" }), {
+      status: 503,
+      headers: { "Content-Type": "application/json" },
+    });
+  }));
+  render(<App />);
+  await screen.findByText("Scores could not be loaded");
+
+  fireEvent.click(screen.getByRole("button", { name: "Counties" }));
+  const map = screen.getByRole("img", { name: /Focusable USA county/ });
+  expect(map).toHaveAttribute("aria-busy", "true");
+  expect(screen.queryByText("Scores could not be loaded")).not.toBeInTheDocument();
+
+  resolveCounty(response({
+    schema_version: 2,
+    build_id: "fixture",
+    level: "county",
+    scope: { kind: "national", state: null },
+    columns: {
+      place_id: [county.place_id],
+      risk_score: [county.risk_score],
+      community_conditions_group: [2],
+      mountain_score: [82.5],
+    },
+  }));
+  await waitFor(() => expect(map).toHaveAttribute("aria-busy", "false"));
+  expect(screen.getByTitle("fixture")).toHaveTextContent("county");
 });
 
 it("ignores county options loaded for a previous draft state", async () => {
@@ -422,33 +572,162 @@ it("does not surface a stale address failure after Search closes", async () => {
   expect(screen.getByRole("button", { name: "Find tract" })).toBeEnabled();
 });
 
-it("rasterizes settled vectors before atomically committing the active zoom frame", async () => {
+it("acknowledges a worker snapshot only after atomically presenting its bitmap", async () => {
   vi.stubGlobal("fetch", mockFetch());
   render(<App />);
   await screen.findByText("HouseHunter");
   await screen.findAllByText("1 tracts interactive", {}, { timeout: 3000 });
-  const zoomIn = screen.getByRole("button", { name: "Zoom in" });
-  for (let index = 0; index < 4; index += 1) fireEvent.click(zoomIn);
   await waitFor(() => {
-    const visibleCanvas = document.querySelector<HTMLCanvasElement>("canvas.risk-canvas");
-    const visibleContext = visibleCanvas ? canvasContexts.get(visibleCanvas) : null;
-    expect(visibleContext).toBeTruthy();
-    const visibleDraws = vi.mocked(visibleContext!.drawImage).mock.calls;
-    const committedIndex = [...visibleDraws.keys()].reverse().find((index) => {
-      const sourceContext = canvasContexts.get(visibleDraws[index][0] as HTMLCanvasElement);
-      return sourceContext && vi.mocked(sourceContext.setTransform).mock.calls.some(([scale]) => Number(scale) > 4);
-    });
-    if (committedIndex === undefined) throw new Error("The settled high-zoom buffer has not committed yet");
-    const committedContext = canvasContexts.get(visibleDraws[committedIndex][0] as HTMLCanvasElement)!;
-    const paintOrders = [
-      ...vi.mocked(committedContext.fill).mock.invocationCallOrder,
-      ...vi.mocked(committedContext.stroke).mock.invocationCallOrder,
-      ...vi.mocked(committedContext.fillText).mock.invocationCallOrder,
-    ];
-    expect(paintOrders.length).toBeGreaterThan(0);
-    expect(vi.mocked(visibleContext!.drawImage).mock.invocationCallOrder[committedIndex])
-      .toBeGreaterThan(Math.max(...paintOrders));
+    expect(bitmapTransfers.length).toBeGreaterThan(0);
+    expect(workerMessages.some(({ value }) => value.type === "FRAME_COMMITTED" && value.presented === true)).toBe(true);
   });
+  expect(presentationOrder.indexOf("present")).toBeLessThan(presentationOrder.indexOf("ack:true"));
+});
+
+it("presents an outline frame without declaring the map visible or accepting picks", () => {
+  vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>(() => undefined)));
+  const onStatus = vi.fn();
+  const onVisibleCommit = vi.fn();
+  const onInteractiveCommit = vi.fn();
+  render(<RiskMap
+    manifestUrl="/map-assets/manifest.json" scoreUrl="/api/v1/map/scores?level=tract"
+    expectedBuildId="fixture" level="tract" selected="" state="" county=""
+    showUnranked={false} focusTarget={null} initialCamera={{ cx: 0.5, cy: 0.5, z: 1 }}
+    onSelect={() => undefined} onPreview={() => undefined} onCamera={() => undefined}
+    onStatus={onStatus} onVisibleCommit={onVisibleCommit} onInteractiveCommit={onInteractiveCommit}
+  />);
+  const init = workerMessages.find(({ value }) => value.type === "INIT")!.value as {
+    datasetGeneration: number; viewportGeneration: number; cameraGeneration: number;
+    semanticGeneration: number; camera: { k: number; x: number; y: number };
+    width: number; height: number; ratio: number;
+  };
+  const current = workerMessages.reduce((value, message) => {
+    if (message.worker !== "renderer") return value;
+    if (["RESIZE", "SET_CAMERA", "SET_SEMANTICS", "SET_SELECTION"].includes(String(message.value.type))) {
+      return { ...value, ...message.value } as typeof init;
+    }
+    return value;
+  }, init);
+  act(() => mockWorkers[0].deliver({
+    type: "FRAME", datasetGeneration: current.datasetGeneration,
+    viewportGeneration: current.viewportGeneration, cameraGeneration: current.cameraGeneration,
+    semanticGeneration: current.semanticGeneration, snapshotId: 44, metric: "fema",
+    camera: current.camera, originX: -48, originY: -48,
+    width: current.width + 96, height: current.height + 96, ratio: current.ratio,
+    featureCount: 0, interactive: false, bitmap: { close: vi.fn() },
+  }));
+  expect(bitmapTransfers).toHaveLength(1);
+  expect(onVisibleCommit).not.toHaveBeenCalled();
+  expect(onInteractiveCommit).not.toHaveBeenCalled();
+  expect(onStatus).not.toHaveBeenCalledWith(expect.stringContaining("interactive"));
+  const viewport = screen.getByRole("img", { name: /Focusable USA tract/ });
+  fireEvent.pointerDown(viewport, { pointerId: 1, clientX: 500, clientY: 350 });
+  fireEvent.pointerUp(viewport, { pointerId: 1, clientX: 500, clientY: 350 });
+  fireEvent.keyDown(viewport, { key: "Enter" });
+  expect(workerMessages.filter(({ value }) => value.type === "PICK")).toEqual([]);
+});
+
+it("retries a place focus after a non-interactive outline cannot resolve it", async () => {
+  vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>(() => undefined)));
+  render(<RiskMap
+    manifestUrl="/map-assets/manifest.json" scoreUrl="/api/v1/map/scores?level=tract"
+    expectedBuildId="fixture" level="tract" selected="" state="" county=""
+    showUnranked={false} focusTarget={{ kind: "place", id: tract.place_id, nonce: 12 }}
+    initialCamera={{ cx: 0.5, cy: 0.5, z: 1 }} onSelect={() => undefined}
+    onPreview={() => undefined} onCamera={() => undefined} onStatus={() => undefined}
+  />);
+  const init = workerMessages.find(({ value }) => value.type === "INIT")!.value as {
+    datasetGeneration: number; viewportGeneration: number; cameraGeneration: number;
+    semanticGeneration: number; camera: { k: number; x: number; y: number };
+    width: number; height: number; ratio: number;
+  };
+  const current = workerMessages.reduce((value, message) => {
+    if (message.worker !== "renderer") return value;
+    if (["RESIZE", "SET_CAMERA", "SET_SEMANTICS", "SET_SELECTION"].includes(String(message.value.type))) {
+      return { ...value, ...message.value } as typeof init;
+    }
+    return value;
+  }, init);
+  const frame = (snapshotId: number, interactive: boolean, featureCount: number) => ({
+    type: "FRAME", datasetGeneration: current.datasetGeneration,
+    viewportGeneration: current.viewportGeneration, cameraGeneration: current.cameraGeneration,
+    semanticGeneration: current.semanticGeneration, snapshotId, metric: "fema",
+    camera: current.camera, originX: -48, originY: -48,
+    width: current.width + 96, height: current.height + 96, ratio: current.ratio,
+    featureCount, interactive, bitmap: { close: vi.fn() },
+  });
+
+  act(() => mockWorkers[0].deliver(frame(50, false, 0)));
+  await waitFor(() => expect(workerMessages.filter(({ value }) => value.type === "FOCUS")).toHaveLength(1));
+  act(() => mockWorkers[0].deliver(frame(51, true, 1)));
+  await waitFor(() => expect(workerMessages.filter(({ value }) => value.type === "FOCUS")).toHaveLength(2));
+});
+
+it("closes and negatively acknowledges a stale bitmap without presenting it", async () => {
+  vi.stubGlobal("fetch", mockFetch());
+  render(<App />);
+  await screen.findAllByText("1 tracts interactive", {}, { timeout: 3000 });
+  const renderer = mockWorkers[0];
+  const init = workerMessages.find(({ value }) => value.type === "INIT")!.value as {
+    datasetGeneration: number; viewportGeneration: number; cameraGeneration: number;
+    semanticGeneration: number; camera: { k: number; x: number; y: number };
+    width: number; height: number; ratio: number;
+  };
+  const bitmap = { close: vi.fn() };
+  const transferCount = bitmapTransfers.length;
+  act(() => renderer.deliver({
+    type: "FRAME",
+    datasetGeneration: init.datasetGeneration,
+    viewportGeneration: init.viewportGeneration + 10_000,
+    cameraGeneration: init.cameraGeneration,
+    semanticGeneration: init.semanticGeneration,
+    snapshotId: 987_654,
+    metric: "fema",
+    camera: init.camera,
+    originX: 0,
+    originY: 0,
+    width: init.width,
+    height: init.height,
+    ratio: init.ratio,
+    featureCount: 1,
+    interactive: true,
+    bitmap,
+  }));
+  await waitFor(() => expect(bitmap.close).toHaveBeenCalledOnce());
+  expect(bitmapTransfers).toHaveLength(transferCount);
+  expect(workerMessages.some(({ value }) => value.type === "FRAME_COMMITTED"
+    && value.snapshotId === 987_654 && value.presented === false)).toBe(true);
+});
+
+it("requests focus once per nonce even when focus itself commits more frames", async () => {
+  vi.stubGlobal("fetch", mockFetch());
+  render(<RiskMap
+    manifestUrl="/map-assets/manifest.json" scoreUrl="/api/v1/map/scores?level=tract"
+    expectedBuildId="fixture" level="tract" selected="" state="" county=""
+    showUnranked={false} focusTarget={{ kind: "state", id: "CO", nonce: 9 }}
+    initialCamera={{ cx: 0.5, cy: 0.5, z: 1 }} onSelect={() => undefined}
+    onPreview={() => undefined} onCamera={() => undefined} onStatus={() => undefined}
+  />);
+  await waitFor(() => expect(workerMessages.filter(({ value }) => value.type === "FOCUS")).toHaveLength(1));
+  await waitFor(() => expect(workerMessages.some(({ value }) => value.type === "SET_CAMERA")).toBe(true));
+  await act(async () => Promise.resolve());
+  expect(workerMessages.filter(({ value }) => value.type === "FOCUS")).toHaveLength(1);
+});
+
+it("preserves the last presented bitmap across a worker crash and creates a fresh worker pair on retry", async () => {
+  vi.stubGlobal("fetch", mockFetch());
+  render(<App />);
+  await screen.findAllByText("1 tracts interactive", {}, { timeout: 3000 });
+  const canvas = document.querySelector<HTMLCanvasElement>(".map-presentation")!;
+  const snapshot = canvas.dataset.snapshotId;
+  const transferCount = bitmapTransfers.length;
+  act(() => mockWorkers[0].fail("renderer crashed"));
+  expect(await screen.findByRole("alert")).toHaveTextContent("renderer crashed");
+  expect(canvas.dataset.snapshotId).toBe(snapshot);
+  expect(bitmapTransfers).toHaveLength(transferCount);
+  fireEvent.click(screen.getByRole("button", { name: "Restart map" }));
+  await waitFor(() => expect(mockWorkers).toHaveLength(4));
+  await waitFor(() => expect(bitmapTransfers.length).toBeGreaterThan(transferCount));
 });
 
 it("renders the map as the only primary UI with all retained controls", async () => {

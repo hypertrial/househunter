@@ -4,12 +4,15 @@ import time
 from pathlib import Path
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from test_map_assets import write_assets
 
 from househunter.api import create_app
 from househunter.build import build_snapshot
 from househunter.config import RuntimePaths
+from househunter.contracts import MapScoreColumns, MapScoreScope
 from househunter.errors import AmbiguousPlaceError, HouseHunterError
 from househunter.geocode import OSM_ATTRIBUTION, AddressMatch, reset_geocode_runtime
 from househunter.mountain import MOUNTAIN_RUNTIME_COLUMNS
@@ -89,10 +92,13 @@ def test_api_filters_details_exports_and_token(
             client.get("/api/v1/counties", params={"community_conditions_group": 11}).status_code
             == 422
         )
-        map_rows = client.get("/api/v1/map/scores", params={"level": "tract"}).json()["rows"]
-        assert map_rows[0]["community_conditions_group"] == 5
-        assert map_rows[0]["mountain_coverage_status"] == "unavailable"
-        assert map_rows[0]["mountain_score"] is None
+        map_columns = client.get("/api/v1/map/scores", params={"level": "tract"}).json()[
+            "columns"
+        ]
+        assert map_columns["community_conditions_group"][0] == 5
+        assert map_columns["mountain_score"][0] is None
+        assert "coverage_status" not in map_columns
+        assert "mountain_coverage_status" not in map_columns
         assert client.get("/api/v1/places", params={"mountain_min": 80}).json()["total"] == 0
         unknown = client.get("/api/v1/places/99999999999")
         assert unknown.status_code == 200
@@ -163,17 +169,23 @@ def test_map_scores_and_assets_are_complete_ordered_and_safe(
         assert tract.status_code == 200
         assert tract.headers["content-encoding"] == "gzip"
         body = tract.json()
-        assert body["schema_version"] == 1
+        assert body["schema_version"] == 2
         assert body["level"] == "tract"
         assert body["scope"] == {"kind": "national", "state": None}
-        assert [row["place_id"] for row in body["rows"]] == sorted(
-            row["place_id"] for row in body["rows"]
-        )
-        assert len(body["rows"]) == 5
-        assert body["rows"][-1]["risk_score"] == 99.0
+        assert set(body["columns"]) == {
+            "place_id",
+            "risk_score",
+            "community_conditions_group",
+            "mountain_score",
+        }
+        assert body["columns"]["place_id"] == sorted(body["columns"]["place_id"])
+        assert len({len(column) for column in body["columns"].values()}) == 1
+        assert len(body["columns"]["place_id"]) == 5
+        assert body["columns"]["risk_score"][-1] == 99.0
+        assert tract.headers["cache-control"] == "no-store"
         county = client.get("/api/v1/map/scores", params={"level": "county"}).json()
-        assert [row["place_id"] for row in county["rows"]] == ["01001", "02001"]
-        assert county["rows"][0]["risk_score"] == 40.0
+        assert county["columns"]["place_id"] == ["01001", "02001"]
+        assert county["columns"]["risk_score"][0] == 40.0
         meta = client.get("/api/v1/meta").json()
         assert meta["map_assets"] == {
             "ready": True,
@@ -196,12 +208,23 @@ def test_map_scores_and_assets_are_complete_ordered_and_safe(
         assert corrupt.status_code == 503
         assert "wrong size" in corrupt.json()["detail"]
 
+    write_assets(asset_root, monkeypatch)
+    with TestClient(create_app(paths, testing=True)) as client:
+        manifest = client.get("/map-assets/manifest.json").json()
+        filename = manifest["files"][0]["filename"]
+        path = asset_root / filename
+        original = path.read_bytes()
+        path.write_bytes(bytes([original[0] ^ 1]) + original[1:])
+        changed = client.get(f"/map-assets/{filename}")
+        assert changed.status_code == 503
+        assert "changed after startup" in changed.json()["detail"]
+
     build_snapshot(paths, state="AL")
     write_assets(asset_root, monkeypatch)
     with TestClient(create_app(paths, testing=True)) as client:
         scoped = client.get("/api/v1/map/scores", params={"level": "tract"}).json()
         assert scoped["scope"] == {"kind": "state", "state": "AL"}
-        assert [row["place_id"] for row in scoped["rows"]] == [
+        assert scoped["columns"]["place_id"] == [
             "01001000100",
             "01001000200",
             "01001000300",
@@ -217,6 +240,42 @@ def test_map_scores_require_a_current_build(
         response = client.get("/api/v1/map/scores")
         assert response.status_code == 404
         assert "No published build" in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"risk_score": [10.0]},
+        {"place_id": ["01001000200", "01001000100"]},
+        {"place_id": ["01001000100", "01001000100"]},
+    ],
+)
+def test_map_score_response_model_rejects_misaligned_or_ambiguous_columns(
+    overrides: dict[str, list[object]],
+) -> None:
+    columns: dict[str, list[object]] = {
+        "place_id": ["01001000100", "01001000200"],
+        "risk_score": [10.0, None],
+        "community_conditions_group": [5, None],
+        "mountain_score": [None, 82.5],
+    }
+    columns.update(overrides)
+    with pytest.raises(ValidationError):
+        MapScoreColumns.model_validate(columns)
+
+
+@pytest.mark.parametrize(
+    "scope",
+    [
+        {"kind": "national", "state": "CO"},
+        {"kind": "state", "state": None},
+        {"kind": "state", "state": "co"},
+        {"kind": "national", "state": None, "extra": True},
+    ],
+)
+def test_map_score_response_model_rejects_invalid_scope(scope: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        MapScoreScope.model_validate(scope)
 
 
 def test_api_rejects_hostile_origin(fixture_environment: tuple[RuntimePaths, object]) -> None:

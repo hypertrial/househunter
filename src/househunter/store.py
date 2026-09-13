@@ -291,26 +291,26 @@ class Store:
         if table is None:
             raise HouseHunterError("Map level must be tract or county")
         rows = self.connection.execute(
-            f"SELECT place_id, risk_score, coverage_status, community_conditions_group, "
-            f"mountain_score, mountain_coverage_status "
+            f"SELECT place_id, risk_score, community_conditions_group, mountain_score "
             f"FROM {table} ORDER BY place_id"
         ).fetchall()
+        columns: dict[str, list[Any]] = {
+            "place_id": [],
+            "risk_score": [],
+            "community_conditions_group": [],
+            "mountain_score": [],
+        }
+        for place_id, risk_score, group, mountain_score in rows:
+            columns["place_id"].append(place_id)
+            columns["risk_score"].append(risk_score)
+            columns["community_conditions_group"].append(group)
+            columns["mountain_score"].append(mountain_score)
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "build_id": self.metadata["build_id"],
             "level": level,
             "scope": self.metadata["scope"],
-            "rows": [
-                {
-                    "place_id": place_id,
-                    "risk_score": risk_score,
-                    "coverage_status": status,
-                    "community_conditions_group": group,
-                    "mountain_score": mountain_score,
-                    "mountain_coverage_status": mountain_status,
-                }
-                for place_id, risk_score, status, group, mountain_score, mountain_status in rows
-            ],
+            "columns": columns,
         }
 
     def resolve_place(self, query: str) -> str:

@@ -136,6 +136,18 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
     app.add_middleware(GZipMiddleware, minimum_size=1000)
     asset_root = asset_directory()
     assets = map_asset_status(asset_root)
+    verified_asset_stats: dict[str, tuple[int, int, int, int]] = {}
+    if assets.ready:
+        verified_manifest = load_manifest(asset_root, verify_files=False)
+        for entry in verified_manifest["files"]:
+            path = asset_root / entry["filename"]
+            stat = path.stat(follow_symlinks=False)
+            verified_asset_stats[entry["filename"]] = (
+                stat.st_dev,
+                stat.st_ino,
+                stat.st_size,
+                stat.st_mtime_ns,
+            )
 
     @app.exception_handler(HouseHunterError)
     async def handle_househunter_error(_: Request, exc: HouseHunterError) -> JSONResponse:
@@ -190,7 +202,19 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
     @app.get("/map-assets/{filename}")
     def map_asset(filename: str) -> FileResponse:
         try:
-            path, _ = manifest_entry(filename, asset_root)
+            # The complete immutable asset set is hash- and content-verified once
+            # when the application is created. Keep request-time checks to the
+            # manifest allowlist and file size instead of reparsing a multi-MB
+            # topology before every local response.
+            path, _ = manifest_entry(filename, asset_root, verify_content=False)
+            stat = path.stat(follow_symlinks=False)
+            if path.is_symlink() or verified_asset_stats.get(filename) != (
+                stat.st_dev,
+                stat.st_ino,
+                stat.st_size,
+                stat.st_mtime_ns,
+            ):
+                raise ValueError("Map asset changed after startup; restart to verify it")
         except ValueError as exc:
             missing = str(exc) in {
                 "Invalid map asset path",

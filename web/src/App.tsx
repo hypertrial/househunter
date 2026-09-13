@@ -1,14 +1,13 @@
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import RiskMap, { type FocusTarget, type MapPreview } from "./RiskMap";
 import { METRIC_COLOR_SCALES, readHash, scoreBand, scoreColor, STATE_ABBREVIATIONS, STATE_FIPS, type CameraState, type ScoreBand } from "./map";
-import type { AddressConfirmation, AddressLookup, Geography, HazardPercentile, JobStatus, LookupResult, MapScore, MapScores, Meta, Metric, PlaceDetail, PlaceSummary } from "./types";
+import type { AddressConfirmation, AddressLookup, Geography, HazardPercentile, JobStatus, LookupResult, Meta, Metric, PlaceDetail, PlaceSummary } from "./types";
 
 export { scoreBand } from "./map";
 export type { ScoreBand } from "./map";
 
 const number = new Intl.NumberFormat("en-US");
 const initial = readHash(window.location.hash);
-const EMPTY_MAP_ROWS: MapScore[] = [];
 const COMMUNITY_EXPLANATION = "National CHR&R Community Conditions Health Group. Group 1 represents the healthiest community conditions and Group 10 the least healthy. Groups are data-driven clusters, not percentiles.";
 const MOUNTAIN_EXPLANATION = "Mountain Score measures nearby relief, rugged terrain, public mountain land, and mapped hiking access. It does not measure property-specific views, trail quality, drive time, or guaranteed access.";
 
@@ -194,8 +193,8 @@ function Workspace({ meta }: { meta: Meta }) {
     initialPlace ? { level: initial.level, id: initialPlace } : null,
   );
   const [detailRetry, setDetailRetry] = useState(0);
-  const [scores, setScores] = useState<MapScores | null>(null);
   const [scoreError, setScoreError] = useState("");
+  const [scoreReloadNonce, setScoreReloadNonce] = useState(0);
   const [status, setStatus] = useState("Loading map");
   const [overlay, setOverlay] = useState<Overlay>(null);
   const [query, setQuery] = useState("");
@@ -235,7 +234,6 @@ function Workspace({ meta }: { meta: Meta }) {
   const previousOverlay = useRef<Overlay>(null);
   const detailTrigger = useRef<HTMLElement | null>(null);
   const extremesGeneration = useRef(0);
-  const scoreGeneration = useRef(0);
   const countyGeneration = useRef(0);
   const addressGeneration = useRef(0);
   const selectedMetric = useRef(metric);
@@ -246,6 +244,20 @@ function Workspace({ meta }: { meta: Meta }) {
   const mapInteractiveCommit = useCallback((committedMetric: Metric) => {
     if (committedMetric === selectedMetric.current) setInteractiveMetric(committedMetric);
   }, []);
+  const mapScoresReady = useCallback((count: number) => {
+    setScoreError("");
+    setStatus(`${number.format(count)} ${level}s ready`);
+  }, [level]);
+  const mapScoreFailed = useCallback((message: string) => {
+    setScoreError(message);
+    setStatus("Map scores failed to load");
+  }, []);
+  const retryScores = useCallback(() => {
+    setScoreError("");
+    setInteractiveMetric(null);
+    setStatus(`Loading ${level} scores`);
+    setScoreReloadNonce((value) => value + 1);
+  }, [level]);
 
   function invalidateAddressLookup() {
     addressGeneration.current += 1;
@@ -274,7 +286,7 @@ function Workspace({ meta }: { meta: Meta }) {
     setSelected("");
     setDetailTarget(null);
     window.requestAnimationFrame(() => {
-      (detailTrigger.current || document.querySelector<HTMLCanvasElement>(".risk-canvas"))?.focus();
+      (detailTrigger.current || document.querySelector<HTMLElement>(".risk-canvas"))?.focus();
     });
   }, []);
 
@@ -328,21 +340,6 @@ function Workspace({ meta }: { meta: Meta }) {
     window.addEventListener("popstate", restore);
     return () => window.removeEventListener("popstate", restore);
   }, [builtState]);
-
-  const loadScores = useCallback(async () => {
-    if (!meta.build) return;
-    const generation = ++scoreGeneration.current;
-    setScoreError(""); setStatus(`Loading ${level} scores`);
-    try {
-      const payload = await json<MapScores>(`/api/v1/map/scores?level=${level}`);
-      if (payload.schema_version !== 1 || payload.build_id !== meta.build.build_id || payload.level !== level) throw new Error("Map scores do not match the current build");
-      if (generation !== scoreGeneration.current) return;
-      setScores(payload); setStatus(`${number.format(payload.rows.length)} ${level}s ready`);
-    } catch (caught) {
-      if (generation === scoreGeneration.current) setScoreError((caught as Error).message);
-    }
-  }, [level, meta.build]);
-  useEffect(() => { void loadScores(); }, [loadScores]);
 
   useEffect(() => {
     setDetail(null); setDetailError("");
@@ -410,7 +407,7 @@ function Workspace({ meta }: { meta: Meta }) {
     }
   }
   function choose(place: PlaceSummary) { detailTrigger.current = overlayTrigger.current; restoreOverlayFocus.current = false; const targetLevel = metric === "community-conditions" ? "county" : level; setSelected(targetLevel === level ? place.place_id : ""); setDetailTarget({ level: targetLevel, id: place.place_id }); setFocusTarget(targetLevel === level ? { kind: "place", id: place.place_id, nonce: Date.now() } : null); setOverlay(null); setQuery(""); }
-  function switchLevel(next: Geography) { invalidateAddressLookup(); setLevel(next); setCounty(""); setDraftCounty(""); setSelected(""); setDetailTarget(null); setDetail(null); setFocusTarget(null); setOverlay(null); setPreview(null); }
+  function switchLevel(next: Geography) { invalidateAddressLookup(); setLevel(next); setCounty(""); setDraftCounty(""); setSelected(""); setDetailTarget(null); setDetail(null); setFocusTarget(null); setOverlay(null); setPreview(null); setScoreError(""); setInteractiveMetric(null); }
   function switchMetric(next: Metric) { setMetric(next); setPreview(null); setOverlay(null); }
 
   async function browseCommunity(group: number, offset = 0) {
@@ -484,11 +481,6 @@ function Workspace({ meta }: { meta: Meta }) {
   }
   function clearFilters() { setDraftState(builtState); setDraftCounty(""); setDraftUnranked(false); setDraftMountainMin(null); setState(builtState); setCounty(""); setShowUnranked(false); setMountainMin(null); setFocusTarget(builtState ? { kind: "state", id: builtState, nonce: Date.now() } : null); setSelected(""); setDetailTarget(null); setOverlay(null); }
 
-  const mapRows = useMemo(() => {
-    if (scores?.level !== level) return EMPTY_MAP_ROWS;
-    if (mountainMin === null) return scores.rows;
-    return scores.rows.filter((row) => row.mountain_score !== null && row.mountain_score >= mountainMin);
-  }, [level, mountainMin, scores]);
   const tooltipScore = metric === "mountain" ? preview?.score?.mountain_score : preview?.score?.risk_score;
   const tooltipBand = scoreBand(tooltipScore ?? null);
   const tooltipClass = preview ? mapTooltipClass(preview.x, preview.y, window.innerWidth, window.innerHeight) : "";
@@ -501,7 +493,7 @@ function Workspace({ meta }: { meta: Meta }) {
   const highestGroup = highest[0]?.community_conditions_group ?? null;
   const noCommunityGroups = metric === "community-conditions" && lowestGroup === null && highestGroup === null;
   return <main className="map-shell">
-    <RiskMap manifestUrl={meta.map_assets.manifest_url} level={level} metric={metric} displayMetric={renderedMetric} busy={mapUpdating} rows={mapRows} selected={selected} state={state} county={county} showUnranked={showUnranked} neutralOnly={Boolean(scoreError)} focusTarget={focusTarget} cameraTarget={cameraTarget} initialCamera={initial.camera} onSelect={selectFromMap} onPreview={setPreview} onCamera={cameraChanged} onStatus={setStatus} onVisibleCommit={mapVisibleCommit} onInteractiveCommit={mapInteractiveCommit} />
+    <RiskMap manifestUrl={meta.map_assets.manifest_url} scoreUrl={`/api/v1/map/scores?level=${level}`} expectedBuildId={meta.build?.build_id || ""} level={level} metric={metric} displayMetric={renderedMetric} busy={mapUpdating} selected={selected} state={state} county={county} showUnranked={showUnranked} mountainMin={mountainMin} neutralOnly={Boolean(scoreError)} retryGeneration={scoreReloadNonce} focusTarget={focusTarget} cameraTarget={cameraTarget} initialCamera={initial.camera} onSelect={selectFromMap} onPreview={setPreview} onCamera={cameraChanged} onStatus={setStatus} onScoresReady={mapScoresReady} onScoreError={mapScoreFailed} onVisibleCommit={mapVisibleCommit} onInteractiveCommit={mapInteractiveCommit} />
     <header className={`top-dock${overlay ? " overlay-open" : ""}`}><div className="brand"><strong>HouseHunter</strong><span>{metric === "fema" ? "FEMA ALR_NPCTL" : metric === "mountain" ? "Mountain Score" : "Community Conditions"}</span></div><div className="level-toggle" aria-label="Geography level"><button aria-pressed={level === "tract"} onClick={() => switchLevel("tract")}>Tracts</button><button aria-pressed={level === "county"} onClick={() => switchLevel("county")}>Counties</button></div><div className="metric-toggle" aria-label="Map metric"><button aria-pressed={metric === "fema"} onClick={() => switchMetric("fema")}>FEMA Risk</button><button aria-pressed={metric === "community-conditions"} onClick={() => switchMetric("community-conditions")}>Community Conditions</button><button aria-pressed={metric === "mountain"} onClick={() => switchMetric("mountain")}>Mountain Score</button></div><div className="dock-actions"><button aria-expanded={overlay === "search"} aria-controls="search-panel" onClick={(event) => toggleOverlay("search", event.currentTarget)}>Search</button><button aria-expanded={overlay === "extremes"} aria-controls="extremes-panel" onClick={(event) => void openExtremes(event.currentTarget)}>{metric === "community-conditions" ? "Best / Worst" : "Lowest / Highest"}</button><button aria-expanded={overlay === "filters"} aria-controls="filters-panel" className={activeFilter ? "active" : ""} onClick={(event) => toggleOverlay("filters", event.currentTarget)}>Filters{activeFilter ? " · On" : ""}</button><button className="desktop-dock-action" aria-expanded={overlay === "exports"} aria-controls="exports-panel" onClick={(event) => toggleOverlay("exports", event.currentTarget)}>Exports</button><button className="desktop-dock-action" aria-expanded={overlay === "info"} aria-controls="info-panel" aria-label="Information" onClick={(event) => toggleOverlay("info", event.currentTarget)}>ⓘ</button><button className={`mobile-more${moreOpen ? " active" : ""}`} aria-expanded={moreOpen} aria-controls={moreControls} onClick={(event) => { if (moreOpen) { overlayTrigger.current = event.currentTarget; setOverlay(null); } else toggleOverlay("more", event.currentTarget); }}>More</button></div><div className={`build-pill ${scoreError ? "failed" : ""}`} title={meta.build?.build_id}>{scoreError ? "Score error" : status}</div></header>
     {overlay === "search" && <section id="search-panel" className="floating-panel search-panel" aria-label="Search"><form onSubmit={lookupAddress} aria-busy={searching}><label>Street address<input autoFocus autoComplete="street-address" autoCapitalize="words" enterKeyHint="search" value={query} onChange={(event) => { invalidateAddressLookup(); setSearchError(""); setQuery(event.target.value); }} placeholder="Street, city, state, ZIP" /></label><p className="privacy-note">Find tract contacts the US Census geocoder through this loopback server and may send it to OpenStreetMap only after a valid Census no-match. Addresses are not written to disk. Do not submit confidential addresses. The map shows tract risk, never a property marker or score.</p><button className="primary" disabled={searching || !query.trim()}>{searching ? "Looking…" : "Find tract"}</button>{confirmation && <div className="confirm-card" role="region" aria-label="Approximate street match"><strong>Confirm approximate street match</strong><p>{confirmation.message}</p>{confirmation.candidates.map((candidate) => <button type="button" className="secondary" key={candidate.candidate_id} onClick={() => void confirmAddress(candidate.candidate_id)}>Use approximate street location: {candidate.matched_address}</button>)}<small>{confirmation.attribution}</small></div>}</form>{searchError && <p role="alert" className="error">{searchError}</p>}</section>}
     {overlay === "filters" && <section id="filters-panel" className="floating-panel filters-panel" aria-label="Map filters"><h2>Filters</h2><label>State<select value={draftState} disabled={Boolean(builtState)} onChange={(event) => { setDraftState(event.target.value); setDraftCounty(""); }}><option value="">All states & territories</option>{STATE_ABBREVIATIONS.map((item) => <option key={item}>{item}</option>)}</select></label>{level === "tract" && <label>County<select value={draftCounty} disabled={!draftState} onChange={(event) => setDraftCounty(event.target.value)}><option value="">All counties</option>{countyOptions.map((item) => <option value={item.place_id} key={item.place_id}>{item.name}</option>)}</select></label>}<label>Minimum Mountain Score<input type="number" min="0" max="100" value={draftMountainMin ?? ""} onChange={(event) => setDraftMountainMin(event.target.value === "" ? null : Math.max(0, Math.min(100, Number(event.target.value))))} placeholder="Any" /></label>{metric === "community-conditions" ? <p className="filter-note">Not-grouped geographies always remain visible on this layer.</p> : <label className="check"><input type="checkbox" checked={draftUnranked} onChange={(event) => setDraftUnranked(event.target.checked)} />Show {metric === "mountain" ? "Mountain-unavailable" : "FEMA-unranked"} geographies</label>}<div className="panel-buttons"><button className="primary" onClick={applyFilters}>Apply</button><button className="secondary" onClick={clearFilters}>Clear</button></div></section>}
@@ -510,7 +502,7 @@ function Workspace({ meta }: { meta: Meta }) {
     {overlay === "exports" && <nav id="exports-panel" className="floating-panel export-panel" aria-label="Exports"><h2>Export snapshot</h2><a ref={(node) => { overlayEntry.current = node; }} href="/api/v1/exports/places.csv" download>Tracts CSV</a><a href="/api/v1/exports/places.parquet" download>Tracts Parquet</a><a href="/api/v1/exports/counties.csv" download>Counties CSV</a><a href="/api/v1/exports/counties.parquet" download>Counties Parquet</a></nav>}
     {overlay === "info" && <section id="info-panel" className="floating-panel info-panel" aria-label="About this map"><h2 ref={(node) => { overlayEntry.current = node; }} tabIndex={-1}>About this map</h2><p>Every geography is drawn from the pinned FEMA National Risk Index December 2025 release. Dense tracts become distinguishable as you zoom; none are aggregated or enlarged.</p><p>Tracts and counties use separate FEMA percentile universes. County values are never tract averages. Hazard percentiles appear only in details.</p><p>{COMMUNITY_EXPLANATION} Tract colors inherit their county group and never imply tract-level resolution.</p><p>{MOUNTAIN_EXPLANATION} Tract and county scores are comparable population-weighted block aggregates.</p><p>HouseHunter is local-only and uses no basemap, telemetry, account, or hosted database.</p></section>}
     {preview && <div className={tooltipClass} style={{ left: preview.x, top: preview.y }}><strong>{preview.name}</strong><span>{preview.state} · {preview.placeId}</span><b>{metric === "fema" ? preview.score?.risk_score === null || !preview.score ? "Not ranked / unavailable" : `${preview.score.risk_score.toFixed(1)} · ${tooltipBand ? SCORE_BAND_LABELS[tooltipBand] : ""}` : metric === "mountain" ? preview.score?.mountain_score === null || !preview.score ? "Mountain Score unavailable" : `${preview.score.mountain_score.toFixed(1)} /100` : preview.score?.community_conditions_group === null || !preview.score ? "Not grouped · County-level" : `Group ${preview.score.community_conditions_group} of 10 · County-level`}</b></div>}
-    {scoreError && <section className="recovery-card" role="alert"><strong>Scores could not be loaded</strong><span>{scoreError}</span><button className="secondary" onClick={() => void loadScores()}>Retry scores</button></section>}
+    {scoreError && <section className="recovery-card" role="alert"><strong>Scores could not be loaded</strong><span>{scoreError}</span><button className="secondary" onClick={retryScores}>Retry scores</button></section>}
     {mapUpdating && <div className="map-updating" aria-hidden="true">{renderedMetric !== metric ? `Updating ${metricName} map…` : `Preparing ${metricName} interaction…`}</div>}
     <MetricLegend metric={renderedMetric} />
     {detailTarget && <DetailDrawer detail={detail} loading={detailLoading} error={detailError} level={detailTarget.level} metric={metric} onClose={closeDetail} onRetry={() => setDetailRetry((value) => value + 1)} onViewTracts={(countyFips, nextState) => { setLevel("tract"); setState(nextState); setDraftState(nextState); setCounty(countyFips); setDraftCounty(countyFips); setSelected(""); setDetailTarget(null); setFocusTarget({ kind: "county", id: countyFips, nonce: Date.now() }); }} onViewCounty={(countyFips) => { setLevel("county"); setCounty(""); setDraftCounty(""); setSelected(countyFips); setDetailTarget({ level: "county", id: countyFips }); setFocusTarget({ kind: "place", id: countyFips, nonce: Date.now() }); }} />}
@@ -524,9 +516,9 @@ function App() {
   useEffect(load, [load]);
   if (!meta) return <main className="map-shell boot"><div className="boot-copy" role={error ? "alert" : "status"}>{error || "Opening HouseHunter map…"}{error && <button onClick={load}>Retry</button>}</div></main>;
   const mapAssets = meta.map_assets || { ready: false, error: "Map asset status is missing", schema_version: null, release: null, manifest_url: "/map-assets/manifest.json" };
-  if (!mapAssets.ready) return <main className="map-shell"><RiskMap manifestUrl={mapAssets.manifest_url} level="tract" rows={[]} selected="" state="" county="" showUnranked={false} neutralOnly focusTarget={null} initialCamera={initial.camera} onSelect={() => undefined} onPreview={() => undefined} onCamera={() => undefined} onStatus={() => undefined} /><div className="asset-repair" role="alert"><h1>Map boundaries need repair</h1><p>{mapAssets.error}</p><p>Run <code>uv run python scripts/generate_map_assets.py</code> from the HouseHunter checkout, then restart the app.</p></div></main>;
+  if (!mapAssets.ready) return <main className="map-shell"><RiskMap manifestUrl={mapAssets.manifest_url} scoreUrl="/api/v1/map/scores?level=tract" expectedBuildId="" level="tract" selected="" state="" county="" showUnranked={false} neutralOnly focusTarget={null} initialCamera={initial.camera} onSelect={() => undefined} onPreview={() => undefined} onCamera={() => undefined} onStatus={() => undefined} /><div className="asset-repair" role="alert"><h1>Map boundaries need repair</h1><p>{mapAssets.error}</p><p>Run <code>uv run python scripts/generate_map_assets.py</code> from the HouseHunter checkout, then restart the app.</p></div></main>;
   const readyMeta = { ...meta, map_assets: mapAssets };
-  if (!meta.build) return <main className="map-shell"><RiskMap manifestUrl={mapAssets.manifest_url} level="tract" rows={[]} selected="" state="" county="" showUnranked={false} neutralOnly focusTarget={null} initialCamera={initial.camera} onSelect={() => undefined} onPreview={() => undefined} onCamera={() => undefined} onStatus={() => undefined} /><header className="top-dock"><div className="brand"><strong>HouseHunter</strong><span>FEMA ALR_NPCTL</span></div><div className="build-pill">Setup required</div></header><Setup token={meta.mutation_token} onReady={load} /><div className="legend"><p><strong>FEMA ALR_NPCTL</strong> · lower is better · not property-level risk</p></div></main>;
+  if (!meta.build) return <main className="map-shell"><RiskMap manifestUrl={mapAssets.manifest_url} scoreUrl="/api/v1/map/scores?level=tract" expectedBuildId="" level="tract" selected="" state="" county="" showUnranked={false} neutralOnly focusTarget={null} initialCamera={initial.camera} onSelect={() => undefined} onPreview={() => undefined} onCamera={() => undefined} onStatus={() => undefined} /><header className="top-dock"><div className="brand"><strong>HouseHunter</strong><span>FEMA ALR_NPCTL</span></div><div className="build-pill">Setup required</div></header><Setup token={meta.mutation_token} onReady={load} /><div className="legend"><p><strong>FEMA ALR_NPCTL</strong> · lower is better · not property-level risk</p></div></main>;
   return <Workspace meta={readyMeta} />;
 }
 

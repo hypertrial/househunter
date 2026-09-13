@@ -11,7 +11,7 @@ html, body, #root { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 body { min-width: 320px; }
 button, input, select { font: inherit; }
 button, a { -webkit-tap-highlight-color: transparent; }
-button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, canvas:focus-visible {
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, .map-viewport:focus-visible {
   outline: 3px solid #f3c94f;
   outline-offset: 3px;
 }
@@ -23,14 +23,22 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .map-shell.boot::after { display: none; }
 .map-shell.boot .boot-copy { color: #b9c6c2; display: flex; gap: 16px; align-items: center; }
 
-.map-stage, .map-stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.map-stage, .map-viewport { position: absolute; inset: 0; width: 100%; height: 100%; }
 .map-stage { z-index: 0; }
-.risk-canvas { touch-action: none; }
+.map-viewport { overflow: hidden; touch-action: none; background: #10191e; }
+.map-presentation { position: absolute; max-width: none; max-height: none; pointer-events: none; transform-origin: 0 0; will-change: transform; }
+.map-keyboard-cursor { position: absolute; z-index: 2; width: 15px; height: 15px; transform: translate(-50%, -50%); pointer-events: none; opacity: 0; }
+.map-viewport:focus-visible .map-keyboard-cursor { opacity: 1; }
+.map-keyboard-cursor::before, .map-keyboard-cursor::after { content: ""; position: absolute; background: rgba(255, 255, 255, .9); box-shadow: 0 0 2px #10191e; }
+.map-keyboard-cursor::before { left: 0; right: 0; top: 7px; height: 1.5px; }
+.map-keyboard-cursor::after { top: 0; bottom: 0; left: 7px; width: 1.5px; }
 .map-zoom { position: absolute; left: 18px; bottom: 112px; display: grid; gap: 7px; z-index: 8; }
 .map-zoom button { width: 44px; height: 44px; border: 1px solid rgba(207, 221, 217, .18); border-radius: 12px; color: #e9efed; background: rgba(23, 34, 40, .92); box-shadow: 0 8px 24px rgba(0, 0, 0, .22); cursor: pointer; font-weight: 800; font-size: 18px; }
 .map-error, .recovery-card { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 15; width: min(420px, calc(100vw - 32px)); padding: 20px; border: 1px solid #8e4d41; border-radius: 16px; background: rgba(37, 25, 25, .96); box-shadow: 0 20px 70px rgba(0, 0, 0, .4); }
 .map-error strong, .map-error span, .recovery-card strong, .recovery-card span { display: block; }
 .map-error span, .recovery-card span { margin: 7px 0 14px; color: #e4beb6; }
+.map-detail-error { position: absolute; z-index: 9; left: 76px; bottom: 112px; max-width: min(420px, calc(100vw - 100px)); display: flex; align-items: center; gap: 10px; padding: 9px 11px; border: 1px solid #8e4d41; border-radius: 12px; color: #e4beb6; background: rgba(37, 25, 25, .94); font-size: 11px; }
+.map-detail-error .secondary { min-height: 34px; padding-block: 5px; }
 
 .top-dock { position: absolute; z-index: 20; top: max(14px, env(safe-area-inset-top)); left: 14px; right: 14px; min-height: 58px; display: flex; align-items: center; gap: 12px; padding: 8px; border: 1px solid rgba(222, 233, 230, .14); border-radius: 18px; background: rgba(17, 27, 32, .90); box-shadow: 0 14px 40px rgba(0, 0, 0, .28); backdrop-filter: blur(16px); }
 .brand { min-width: 162px; padding: 0 8px; line-height: 1; }
