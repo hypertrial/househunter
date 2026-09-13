@@ -140,7 +140,6 @@ def _source_provenance() -> dict[str, object]:
         "items": [
             {
                 "name": "fixture",
-                "url": "https://example.invalid/fixture",
                 "acquired_at": "2026-01-01T00:00:00Z",
                 "crs": "EPSG:5070",
                 "schema": ["fixture"],
@@ -158,6 +157,7 @@ def _reviewed_source_lock(blocks: pl.DataFrame) -> dict[str, object]:
         "schema_version": 2,
         "expected_states": _national_expectations(blocks),
         "block_geoid_sha256": national_block_geoid_sha256(blocks),
+        "sources": _source_provenance()["items"],
     }
 
 
@@ -424,6 +424,33 @@ def test_external_promotion_rejects_mismatched_source_lock(tmp_path) -> None:
             candidate,
             reviewed_source_lock=_reviewed_source_lock(blocks),
             reviewed_source_lock_sha256="2" * 64,
+            expected_raw_blocks=blocks,
+        )
+
+    assert not (paths.data / "mountain" / "current.json").exists()
+
+
+def test_external_promotion_rejects_altered_source_provenance(tmp_path) -> None:
+    from househunter.config import RuntimePaths
+
+    paths = RuntimePaths.from_root(tmp_path)
+    blocks = _national_blocks()
+    sources = _source_provenance()
+    sources["items"][0]["license"] = "altered license"
+    candidate = write_release(
+        blocks,
+        tmp_path / "candidate",
+        data_release="fixture",
+        sources=sources,
+        national_expectations=_national_expectations(blocks),
+    )
+
+    with pytest.raises(HouseHunterError, match="independently reviewed source lock"):
+        promote_release(
+            paths,
+            candidate,
+            reviewed_source_lock=_reviewed_source_lock(blocks),
+            reviewed_source_lock_sha256="1" * 64,
             expected_raw_blocks=blocks,
         )
 

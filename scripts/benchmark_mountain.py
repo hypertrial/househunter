@@ -6,14 +6,25 @@ import hashlib
 import json
 import os
 import platform
+import shutil
 import subprocess
 import time
+import uuid
 from pathlib import Path
+
+import duckdb
+
+from househunter.config import RuntimePaths
+from househunter.locking import exclusive_lock
+from househunter.mountain import IN_SCOPE_STATES
+from househunter.mountain_pack import ensure_storage_budget, remove_owned_work_directory
+from househunter.mountain_paths import ensure_owned_child, ensure_safe_directory
 
 MAX_SECONDS = 55 * 60
 MAX_RSS_BYTES = 24 * 1024**3
 ENGINEERING_BYTES = 45_000_000_000
 HARD_BYTES = 50_000_000_000
+RUN_RESERVATION_BYTES = 8_500_000_000
 
 
 def allocated_bytes(path: Path) -> int:
@@ -70,24 +81,89 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def run_once(command: list[str], mountain_root: Path) -> dict[str, object]:
+def validate_runtime_coverage(snapshot: Path) -> dict[str, object]:
+    database = snapshot / "househunter.duckdb"
+    expected = set(IN_SCOPE_STATES)
+    summary: dict[str, object] = {}
+    with duckdb.connect(str(database), read_only=True) as connection:
+        for table in ("places", "counties"):
+            rows = connection.execute(
+                f"""SELECT state,
+                           count(*) AS rows,
+                           count(mountain_score) AS scored,
+                           count(*) FILTER (
+                               WHERE mountain_coverage_status = 'unavailable'
+                           ) AS unavailable,
+                           count(*) FILTER (
+                               WHERE mountain_score_version != 'mountain_score_v1'
+                                  OR mountain_pipeline_version != 'mountain_pipeline_v1'
+                           ) AS wrong_version
+                    FROM {table}
+                    GROUP BY state"""
+            ).fetchall()
+            by_state = {str(row[0]): row[1:] for row in rows}
+            if set(by_state) & expected != expected:
+                raise RuntimeError(f"Published {table} omit an in-scope state or DC")
+            if any(
+                by_state[state][1] <= 0
+                or by_state[state][2] != 0
+                or by_state[state][3] != 0
+                for state in expected
+            ):
+                raise RuntimeError(
+                    f"Published {table} lack usable, versioned Mountain scores in every state"
+                )
+            outside = connection.execute(
+                f"""SELECT count(*) FILTER (
+                           WHERE mountain_coverage_status != 'outside_scope'
+                        )
+                    FROM {table}
+                    WHERE state NOT IN ({','.join('?' for _ in expected)})""",
+                sorted(expected),
+            ).fetchone()[0]
+            if outside:
+                raise RuntimeError(f"Published {table} mislabel territory Mountain coverage")
+            summary[table] = {
+                "states": len(set(by_state) & expected),
+                "scored_rows": sum(int(by_state[state][1]) for state in expected),
+                "outside_scope_rows": sum(
+                    int(values[0]) for state, values in by_state.items() if state not in expected
+                ),
+            }
+    return summary
+
+
+def run_once(
+    command: list[str],
+    mountain_root: Path,
+    *,
+    meter_root: Path | None = None,
+    environment: dict[str, str] | None = None,
+) -> dict[str, object]:
     started = time.monotonic()
     swap_start = swap_used_bytes()
     peak_rss = 0
-    peak_storage = allocated_bytes(mountain_root)
+    measured_root = meter_root or mountain_root
+    peak_storage = allocated_bytes(measured_root)
     peak_swap = swap_start
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=environment,
+    )
     # Sample before polling so even a command that exits between Popen and the first
     # loop condition contributes an RSS observation.
     peak_rss = process_tree_rss(process.pid)
     while process.poll() is None:
         peak_rss = max(peak_rss, process_tree_rss(process.pid))
-        peak_storage = max(peak_storage, allocated_bytes(mountain_root))
+        peak_storage = max(peak_storage, allocated_bytes(measured_root))
         peak_swap = max(peak_swap, swap_used_bytes())
         time.sleep(0.25)
     stdout, stderr = process.communicate()
     peak_rss = max(peak_rss, process_tree_rss(process.pid))
-    peak_storage = max(peak_storage, allocated_bytes(mountain_root))
+    peak_storage = max(peak_storage, allocated_bytes(measured_root))
     peak_swap = max(peak_swap, swap_used_bytes())
     duration = time.monotonic() - started
     if process.returncode:
@@ -111,9 +187,11 @@ def run_once(command: list[str], mountain_root: Path) -> dict[str, object]:
         capture_output=True,
         text=True,
         check=True,
+        env=environment,
     ).stdout.splitlines()
     if len(ranked) < 2:
         raise RuntimeError("Published snapshot has no queryable Mountain values")
+    runtime_coverage = validate_runtime_coverage(snapshot)
     artifact_hashes = {
         name: sha256_file(release / metadata["filename"])
         for name, metadata in manifest["files"].items()
@@ -127,10 +205,69 @@ def run_once(command: list[str], mountain_root: Path) -> dict[str, object]:
         "release_id": pointer["release_id"],
         "snapshot_id": snapshot_manifest["build_id"],
         "runtime_smoke": ranked[-1],
+        "runtime_coverage": runtime_coverage,
         "compact_fallback_bytes": allocated_bytes(compact),
         "artifact_hashes": artifact_hashes,
         "build_completed": bool(stdout.strip()),
+        "release_path": str(release),
     }
+
+
+def machine_preconditions() -> dict[str, object]:
+    if platform.system() != "Darwin":
+        raise RuntimeError("The official Mountain benchmark requires the target macOS laptop")
+    chip = subprocess.run(
+        ["sysctl", "-n", "machdep.cpu.brand_string"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    memory = int(
+        subprocess.run(
+            ["sysctl", "-n", "hw.memsize"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+    )
+    power = subprocess.run(
+        ["pmset", "-g", "batt"], capture_output=True, text=True, check=True
+    ).stdout.splitlines()[0]
+    if "M4" not in chip or memory < 30 * 1024**3 or "AC Power" not in power:
+        raise RuntimeError("The official Mountain benchmark requires M4, 32 GB, and AC power")
+    return {"chip": chip, "memory_bytes": memory, "power": "AC"}
+
+
+def seed_shadow_data(source: Path, destination: Path) -> None:
+    destination.mkdir()
+    for name in ("cache", "raw", "processed"):
+        current = source / name
+        if current.is_dir():
+            shutil.copytree(current, destination / name, copy_function=os.link)
+    if (source / "source_manifest.parquet").is_file():
+        os.link(source / "source_manifest.parquet", destination / "source_manifest.parquet")
+
+
+def write_report(
+    path: Path,
+    *,
+    machine: dict[str, object],
+    runs: list[dict[str, object]],
+    failures: list[str],
+    promotion: dict[str, object],
+) -> None:
+    report = {
+        "schema_version": 1,
+        "machine": machine,
+        "runs": [
+            {key: value for key, value in run.items() if key != "release_path"}
+            for run in runs
+        ],
+        "failures": failures,
+        "promotion": promotion,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
 
 
 def main() -> int:
@@ -142,29 +279,63 @@ def main() -> int:
     parser.add_argument("--data-dir", type=Path)
     parser.add_argument("--report", type=Path, default=Path("data/mountain/benchmark.json"))
     args = parser.parse_args()
-    if args.data_dir:
-        os.environ["HOUSEHUNTER_DATA_DIR"] = str(args.data_dir.resolve())
-    data = Path(os.environ.get("HOUSEHUNTER_DATA_DIR", "data")).resolve()
-    mountain_root = data / "mountain"
-    command = [
-        "uv",
-        "run",
-        "househunter",
-        "mountain",
-        "build",
-        "--data-release",
-        args.data_release,
-        "--prepared-pack",
-        str(args.prepared_pack.resolve()),
-        "--prepared-lock",
-        str(args.prepared_lock.resolve()),
-        "--source-lock",
-        str(args.source_lock.resolve()),
-        "--workers",
-        "4",
-        "--fresh",
-    ]
-    runs = [run_once(command, mountain_root) for _ in range(2)]
+    machine = machine_preconditions()
+    data = (
+        args.data_dir.resolve()
+        if args.data_dir
+        else RuntimePaths.from_root().data
+    )
+    mountain_root = ensure_safe_directory(data / "mountain")
+    work_root = ensure_safe_directory(mountain_root / "work")
+    runs = []
+    second_release: Path | None = None
+    acceptance: Path | None = None
+    with exclusive_lock(data / ".mutating-job.lock"):
+        acceptance = ensure_owned_child(
+            work_root / uuid.uuid4().hex,
+            work_root,
+            name_pattern=r"[0-9a-f]{32}",
+            marker_value="benchmark-v1\n",
+        )
+        ensure_storage_budget(mountain_root, reserve_bytes=RUN_RESERVATION_BYTES)
+        try:
+            for index in (1, 2):
+                shadow = acceptance / f"run-{index}"
+                seed_shadow_data(data, shadow)
+                environment = {**os.environ, "HOUSEHUNTER_DATA_DIR": str(shadow)}
+                command = [
+                    "uv",
+                    "run",
+                    "househunter",
+                    "mountain",
+                    "build",
+                    "--data-release",
+                    args.data_release,
+                    "--prepared-pack",
+                    str(args.prepared_pack.resolve()),
+                    "--prepared-lock",
+                    str(args.prepared_lock.resolve()),
+                    "--source-lock",
+                    str(args.source_lock.resolve()),
+                    "--workers",
+                    "4",
+                    "--fresh",
+                ]
+                run = run_once(
+                    command,
+                    shadow / "mountain",
+                    meter_root=mountain_root,
+                    environment=environment,
+                )
+                runs.append(run)
+                if index == 1:
+                    shutil.rmtree(shadow)
+                else:
+                    second_release = Path(str(run["release_path"]))
+        except BaseException:
+            remove_owned_work_directory(acceptance, work_root)
+            raise
+    assert acceptance is not None
     failures = []
     for index, run in enumerate(runs, 1):
         if run["duration_seconds"] >= MAX_SECONDS:
@@ -181,12 +352,62 @@ def main() -> int:
         failures.append("fresh runs produced different release identities")
     if runs[0]["artifact_hashes"] != runs[1]["artifact_hashes"]:
         failures.append("fresh runs produced different Parquet hashes")
-    report = {"schema_version": 1, "runs": runs, "failures": failures}
-    args.report.parent.mkdir(parents=True, exist_ok=True)
-    args.report.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
-    print(args.report)
     if failures:
+        write_report(
+            args.report,
+            machine=machine,
+            runs=runs,
+            failures=failures,
+            promotion={"status": "not_attempted"},
+        )
+        remove_owned_work_directory(acceptance, work_root)
         raise RuntimeError("; ".join(failures))
+    assert second_release is not None
+    promote = [
+        "uv",
+        "run",
+        "househunter",
+        "mountain",
+        "validate",
+        str(second_release),
+        "--promote",
+        "--source-lock",
+        str(args.source_lock.resolve()),
+        "--prepared-pack",
+        str(args.prepared_pack.resolve()),
+        "--prepared-lock",
+        str(args.prepared_lock.resolve()),
+        "--workers",
+        "4",
+    ]
+    try:
+        subprocess.run(
+            promote,
+            check=True,
+            env={**os.environ, "HOUSEHUNTER_DATA_DIR": str(data)},
+        )
+        pointer = json.loads((mountain_root / "current.json").read_text())
+        if pointer.get("release_id") != runs[1]["release_id"]:
+            raise RuntimeError("Promoted Mountain release differs from the accepted second run")
+        write_report(
+            args.report,
+            machine=machine,
+            runs=runs,
+            failures=[],
+            promotion={"status": "promoted", "release_id": pointer["release_id"]},
+        )
+        print(args.report)
+    except BaseException as exc:
+        write_report(
+            args.report,
+            machine=machine,
+            runs=runs,
+            failures=["accepted release promotion failed"],
+            promotion={"status": "failed", "error_type": type(exc).__name__},
+        )
+        raise
+    finally:
+        remove_owned_work_directory(acceptance, work_root)
     return 0
 
 

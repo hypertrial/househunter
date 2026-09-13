@@ -107,6 +107,20 @@ def _rebuild_after_mountain_promotion(
 def mountain_download(
     source_lock: Annotated[Path, typer.Option("--source-lock", exists=True, dir_okay=False)],
     destination: Annotated[Path | None, typer.Option("--destination")] = None,
+    family: Annotated[
+        str | None,
+        typer.Option(
+            "--family",
+            help="Download one managed family: blocks, elevation, pad_us, or trails.",
+        ),
+    ] = None,
+    batch: Annotated[
+        str | None,
+        typer.Option(
+            "--batch",
+            help="Download one reviewed elevation or trails preparation batch.",
+        ),
+    ] = None,
 ) -> None:
     """Download the exact files named by a maintainer source lock."""
     from .mountain_gis import download_sources as download_mountain_sources
@@ -132,6 +146,8 @@ def mountain_download(
                 source_lock.expanduser().resolve(),
                 target,
                 managed_root=paths.data / "mountain" if destination is None else None,
+                families={family} if family else None,
+                batch_id=batch,
             )
         typer.echo(str(output))
     except (
@@ -176,6 +192,7 @@ def mountain_build(
         load_regions,
         load_source_lock_contract,
         locked_source_paths,
+        source_provenance_item,
         verify_region_sources_locked,
         verify_source_lock,
     )
@@ -214,9 +231,7 @@ def mountain_build(
             ensure_safe_directory(candidate.parent)
         with exclusive_lock(paths.job_lock):
             if output is None and not prepared_pack:
-                ensure_storage_budget(
-                    paths.data / "mountain", reserve_bytes=FULL_RELEASE_MAX_BYTES
-                )
+                ensure_storage_budget(paths.data / "mountain", reserve_bytes=FULL_RELEASE_MAX_BYTES)
             started = time.monotonic()
             source_metadata: dict[str, object] = {}
             lock: dict[str, object] | None = None
@@ -235,13 +250,15 @@ def mountain_build(
                 source_metadata = {
                     "source_lock_schema_version": lock["schema_version"],
                     "source_lock_sha256": sha256_file(resolved_lock),
-                    "items": [
-                        {key: value for key, value in item.items() if key not in {"path", "url"}}
-                        for item in lock["sources"]
-                    ],
+                    "items": [source_provenance_item(item) for item in lock["sources"]],
                 }
                 if not allow_partial and lock.get("schema_version") != 2:
                     raise HouseHunterError("National Mountain builds require source-lock v2")
+                if regions and lock.get("trail_fragment_mode") == "state_clipped_globalid_v1":
+                    raise HouseHunterError(
+                        "This national source contract requires a prepared pack so cross-state "
+                        "trail fragments are deduplicated"
+                    )
             if prepared_pack:
                 assert prepared_lock is not None
                 assert source_lock is not None
@@ -419,17 +436,37 @@ def mountain_prepare(
     source_root: Annotated[Path, typer.Option("--source-root", exists=True, file_okay=False)],
     destination: Annotated[Path | None, typer.Option("--destination")] = None,
     prepared_lock: Annotated[Path | None, typer.Option("--prepared-lock-output")] = None,
+    through_family: Annotated[
+        str | None,
+        typer.Option(
+            "--through-family",
+            help="Stop successfully after blocks, elevation, or pad_us; trails publishes the pack",
+        ),
+    ] = None,
+    source_batch: Annotated[
+        str | None,
+        typer.Option(
+            "--source-batch",
+            help="Materialize one downloaded elevation or trails batch and checkpoint it.",
+        ),
+    ] = None,
 ) -> None:
     """Build an immutable v1 prepared source pack outside the timed build SLA."""
-    from .mountain_gis import load_regions, verify_region_sources_locked, verify_source_lock
+    from .mountain_gis import (
+        load_regions,
+        load_source_lock_contract,
+        verify_region_sources_locked,
+    )
     from .mountain_pack import (
         prepare_regions,
+        prune_owned_preparation_workspaces,
         prune_owned_prepared_packs,
         remove_owned_staging_directory,
     )
     from .mountain_paths import OWNERSHIP_MARKER, lexical_path
 
     paths = _paths()
+    staging_root = paths.data / "mountain" / "staging"
     try:
         lock_path = source_lock.expanduser().resolve()
         root_input = lexical_path(source_root)
@@ -441,11 +478,13 @@ def mountain_prepare(
             else lexical_path(paths.data / "mountain" / "prepared")
         )
         with exclusive_lock(paths.job_lock):
-            lock = verify_source_lock(lock_path, root=root)
-            if lock.get("schema_version") != 2:
-                raise HouseHunterError("National prepared packs require reviewed source-lock v2")
+            lock = load_source_lock_contract(lock_path, require_v2=True)
             configured = load_regions(region_path, root)
-            verify_region_sources_locked(configured, lock, root=root)
+            verify_region_sources_locked(configured, lock, root=root, verify_block_partition=False)
+            managed_source = (
+                root_input.parent == lexical_path(staging_root)
+                and (root_input / OWNERSHIP_MARKER).is_file()
+            )
             pack, pack_lock = prepare_regions(
                 configured,
                 target,
@@ -454,16 +493,33 @@ def mountain_prepare(
                 region_config_path=region_path,
                 prepared_lock_path=prepared_lock.expanduser().resolve() if prepared_lock else None,
                 managed_root=paths.data / "mountain" if destination is None else None,
+                source_root=root,
+                managed_staging_root=staging_root if managed_source else None,
+                stop_after_family=through_family,
+                source_batch=source_batch,
             )
-            staging_root = paths.data / "mountain" / "staging"
+            if pack is None or pack_lock is None:
+                typer.echo(
+                    json.dumps(
+                        {
+                            "status": "checkpoint_complete",
+                            "family": through_family,
+                            "source_batch": source_batch,
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    )
+                )
+                return
             if (
-                root_input.parent == lexical_path(staging_root)
+                managed_source
                 and (root_input / OWNERSHIP_MARKER).is_file()
                 and not pack.is_relative_to(root)
             ):
                 remove_owned_staging_directory(root_input, staging_root)
             if destination is None:
                 prune_owned_prepared_packs(target, keep=pack)
+                prune_owned_preparation_workspaces(target)
         typer.echo(
             json.dumps(
                 {"pack": str(pack), "prepared_lock": str(pack_lock)},
@@ -479,6 +535,9 @@ def mountain_prepare(
 def mountain_inventory(
     regions: Annotated[Path, typer.Option("--regions", exists=True, dir_okay=False)],
     source_root: Annotated[Path, typer.Option("--source-root", exists=True, file_okay=False)],
+    source_lock: Annotated[
+        Path | None, typer.Option("--source-lock", exists=True, dir_okay=False)
+    ] = None,
     output: Annotated[Path | None, typer.Option("--output", dir_okay=False)] = None,
 ) -> None:
     """Compute the exact national block/tile inventory before large source downloads."""
@@ -488,7 +547,17 @@ def mountain_inventory(
         configured = load_regions(
             regions.expanduser().resolve(), source_root.expanduser().resolve()
         )
-        report = qualify_national_inventory(configured, state_by_fips=STATE_BY_FIPS)
+        sources = None
+        if source_lock is not None:
+            lock_payload = json.loads(source_lock.expanduser().resolve().read_text())
+            if not isinstance(lock_payload, dict) or not isinstance(
+                lock_payload.get("sources"), list
+            ):
+                raise HouseHunterError("Mountain source lock contains an invalid source list")
+            sources = lock_payload["sources"]
+        report = qualify_national_inventory(
+            configured, state_by_fips=STATE_BY_FIPS, sources=sources
+        )
         rendered = json.dumps(report, indent=2, sort_keys=True) + "\n"
         if output:
             destination = output.expanduser().resolve()

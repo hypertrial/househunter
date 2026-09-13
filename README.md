@@ -151,21 +151,52 @@ The native GIS stack is maintainer-only and optional:
 
 ```console
 uv sync --extra mountain
-uv run househunter mountain inventory --regions /path/to/regions.json --source-root /path/to/block-sources --output /path/to/inventory.json
-uv run househunter mountain download --source-lock /path/to/source-lock-v2.json
-uv run househunter mountain prepare --source-lock /path/to/source-lock-v2.json --regions /path/to/regions.json --source-root data/mountain/staging/SOURCE_LOCK_PREFIX
-uv run househunter mountain build --data-release 2026q3 --source-lock /path/to/source-lock-v2.json --prepared-pack /path/to/PACK_ID --prepared-lock /path/to/PACK_ID.lock.json --workers 4 --fresh
-uv run househunter mountain validate data/mountain/releases/RELEASE_ID
+SOURCE_LOCK=config/mountain/source-lock-v2.json
+REGIONS=config/mountain/regions-v1.json
+STAGING=data/mountain/staging/055a8855d12e5062
+PREPARED_LOCK=data/mountain/prepared/national-prepared-lock-v1.json
+uv run househunter mountain download --source-lock $SOURCE_LOCK --family blocks
+uv run househunter mountain prepare --source-lock $SOURCE_LOCK --regions $REGIONS --source-root $STAGING --through-family blocks
+for BATCH in $(uv run python -c 'import json; print(*[x["id"] for x in json.load(open("config/mountain/source-lock-v2.json"))["preparation_batches"] if x["family"] == "elevation"])'); do
+  uv run househunter mountain download --source-lock $SOURCE_LOCK --batch $BATCH
+  uv run househunter mountain prepare --source-lock $SOURCE_LOCK --regions $REGIONS --source-root $STAGING --source-batch $BATCH
+done
+uv run househunter mountain download --source-lock $SOURCE_LOCK --family pad_us
+uv run househunter mountain prepare --source-lock $SOURCE_LOCK --regions $REGIONS --source-root $STAGING --through-family pad_us
+for BATCH in $(uv run python -c 'import json; print(*[x["id"] for x in json.load(open("config/mountain/source-lock-v2.json"))["preparation_batches"] if x["family"] == "trails"])'); do
+  uv run househunter mountain download --source-lock $SOURCE_LOCK --batch $BATCH
+  uv run househunter mountain prepare --source-lock $SOURCE_LOCK --regions $REGIONS --source-root $STAGING --source-batch $BATCH
+done
+uv run househunter mountain prepare --source-lock $SOURCE_LOCK --regions $REGIONS --source-root $STAGING --prepared-lock-output $PREPARED_LOCK
+PACK_ID=$(uv run python -c 'import json; print(json.load(open("data/mountain/prepared/national-prepared-lock-v1.json"))["pack_id"])')
+COMPARISON_ID=$(uv run python -c 'import json; print(json.load(open("data/mountain/prepared/national-prepared-lock-v1.json"))["comparison_id"])')
+uv run python scripts/compare_mountain_builds.py --source-lock $SOURCE_LOCK --regions $REGIONS --reference-shards data/mountain/work/$COMPARISON_ID --prepared-pack data/mountain/prepared/$PACK_ID --prepared-lock $PREPARED_LOCK --data-release 2026q3
+uv run python scripts/benchmark_mountain.py --source-lock $SOURCE_LOCK --prepared-pack data/mountain/prepared/$PACK_ID --prepared-lock $PREPARED_LOCK --data-release 2026q3
+RELEASE_ID=$(uv run python -c 'import json; print(json.load(open("data/mountain/current.json"))["release_id"])')
+uv run househunter mountain validate data/mountain/releases/$RELEASE_ID
 uv run househunter mountain inspect 08013012101
-uv run househunter mountain bundle data/mountain/releases/RELEASE_ID --output /path/to/househunter/assets/mountain
+uv run househunter mountain bundle data/mountain/releases/$RELEASE_ID --output src/househunter/assets/mountain
 ```
 
 Production preparation requires source-lock v2: exact checksums and metadata for every
 consumed input, reviewed HTTPS hosts and redirects, ordered DEM precedence, complete
 region CRS definitions, exact block and population totals for all 50 states plus DC,
 the sorted national GEOID digest, and a qualified tile/storage projection. Preparation
-writes 100 km cores with exact 100 km halos to a content-addressed pack and emits a
-separate prepared-pack lock. Using
+uses the official anonymous USGS PAD-US MapServer snapshot contract; it requires no
+account, token, or interactive login. The snapshot is accepted only when its locked
+service metadata, full `OBJECTID` inventory, page checksums, access totals, and final
+artifact checksum all match.
+Preparation
+downloads and derives blocks and PAD-US one source family at a time, and large
+elevation/trail inputs in reviewed source-to-tile batches, so compressed inputs, extraction,
+`.part` duplication, and the growing pack remain inside the qualified phase peaks.
+Each successful family or batch is checksummed before its managed raw dependencies are
+removed; explicit external sources are never removed. Trail batches ingest clipped
+fragments in canonical source order, then group them by locked `GLOBALID` before one
+national rasterization pass, so cross-state copies are not counted twice and an
+interruption cannot replay a contribution.
+Preparation writes 100 km cores with exact 100 km halos to a content-addressed pack and
+emits a separate prepared-pack lock. Using
 `--allow-partial --no-promote` is available for small development fixtures; partial releases can
 never become the active runtime release.
 
@@ -188,18 +219,24 @@ The national laptop acceptance gate runs two clean four-worker builds and checks
 55-minute runtime, 24 GiB aggregate RSS, swap growth, 45/50 GB storage limits, identical
 release and Parquet identities, and a queryable Mountain-ranked snapshot:
 
-```console
-uv run python scripts/benchmark_mountain.py \
-  --source-lock /path/to/source-lock-v2.json \
-  --prepared-pack /path/to/PACK_ID \
-  --prepared-lock /path/to/PACK_ID.lock.json \
-  --data-release 2026q3
-```
+The exact command appears in the preparation runbook above. It uses the resolved
+`$PACK_ID`, leaves the prior release active if either measured run fails, and promotes
+only the accepted second run.
 
 Before the timed gate, `scripts/compare_mountain_builds.py` proves exact canonical raw
-table and release-hash equality among the legacy serial source build and prepared builds
-using one and four workers. Both scripts emit machine-readable reports beneath
+table and release-hash equality among the lock-anchored source-derived shards and
+prepared builds using one and four workers. Direct national `--regions` builds are
+rejected for the state-clipped trail contract because they cannot safely deduplicate
+cross-state fragments. Both scripts emit machine-readable reports beneath
 `data/mountain/` by default.
+
+Rollback is explicit and fail-closed. Read `rollback_release_id` from
+`data/mountain/current.json`, then run `househunter mountain validate --promote` on that
+retained release with the source lock, prepared pack, and prepared lock that created it;
+promotion is refused if any provenance or raw metric differs. Source licenses and public
+release identifiers are recorded per input in `source-lock-v2.json`. When refreshing a
+lock, re-review the official license page and release timestamp, preserve required notices,
+and never distribute the fetched GIS archives or the full prepared pack in the wheel.
 
 The committed `web/dist/` must match `npm run build`. The Python wheel packages the
 compiled UI and the derived map assets exactly once. Raw third-party files and generated

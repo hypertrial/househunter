@@ -73,18 +73,36 @@ spot checks, and canonical logical checksum; never repoint automatically to “l
 Mountain Score is a separate, derived contextual layer. Its maintainer build accepts:
 
 - USGS 3DEP elevation rasters;
-- PAD-US 4.1 polygons with an access classification field;
+- PAD-US 4.1 polygons from the official anonymous USGS
+  `PAD_US_gaz_combined` MapServer layer, using `Pub_Access`;
 - a national hiking-trail line layer;
 - 2020 Census blocks with 15-digit GEOID, `POP20`, geometry, and one internal point.
 
+The reviewed national contract is committed as
+[`config/mountain/source-lock-v2.json`](config/mountain/source-lock-v2.json), with its
+[`config/mountain/regions-v1.json`](config/mountain/regions-v1.json) region mapping,
+[`config/mountain/qualification-v1.json`](config/mountain/qualification-v1.json)
+qualification report, and
+[`config/mountain/representative-raw-digests-v1.json`](config/mountain/representative-raw-digests-v1.json)
+representative raw-metric anchors.
+
 These large inputs are neither bundled nor fetched by `./scripts/run-app`. A reviewed
-JSON source lock v2 supplies the exact HTTPS URL or local path, byte size, SHA-256,
-acquisition date, actual CRS/schema/count, and filename for every file. It also pins
+JSON source lock v2 supplies the exact final HTTPS URL, byte size, SHA-256,
+acquisition date, public release/license, actual CRS/schema/count, and filename for
+every file. It also pins
 reviewed HTTPS hosts, ordered elevation precedence, the exact sorted national block
-GEOID digest, per-state block/population expectations, a block-driven tile inventory,
-and a storage projection. Production preparation rejects an alias or incomplete region
+GEOID digest, per-state block/population expectations, a block-driven tile inventory
+with per-tile GEOID and canonical sample digests, six representative raw-metric
+digests, and a complete phase storage projection. Production preparation rejects an alias or incomplete region
 CRS: CONUS/DC is EPSG:5070, Alaska is EPSG:3338, and Hawaii is a reviewed fixed
 equal-area WKT. Region configuration names only locked files.
+
+PAD-US acquisition does not require or permit a login. The lock freezes the anonymous
+service metadata and complete `OBJECTID` inventory, explicit ID pages, page-level
+semantic and FlatGeobuf checksums, public-access totals, and the final assembled
+artifact. Acquisition verifies the service and ID inventory both before and after the
+capture and consumes polygons in numeric `OBJECTID` order so ArcGIS or FlatGeobuf
+storage order cannot change replace precedence.
 
 `househunter mountain inventory` reads only the normalized Census block/internal-point
 inputs and emits the exact signed tile coordinates, per-tile counts/population, all-state
@@ -92,10 +110,20 @@ expectations, sorted GEOID digest, and a conservative pack/release/work high-wat
 projection. Review and copy those values into source-lock v2 before acquiring the much
 larger elevation and access inputs.
 
-`househunter mountain download` disables ambient proxies, permits only the lock's
+`househunter mountain download --family FAMILY` acquires a bounded whole family;
+`--batch elevation-NNN` or `--batch trails-NNN` acquires one reviewed source-to-tile
+batch. The downloader disables ambient proxies, permits only the lock's
 reviewed HTTPS hosts, revalidates every redirect, checks declared length while
 streaming, verifies bytes before atomic publication, and maintains the unrelated-disk
-reserve. `househunter mountain prepare` uses 100 km processing cores with exact 100 km
+reserve. Managed acquisition is rejected when it would exceed the qualified batch/family
+staging peak. `househunter mountain prepare` resumes four fixed phases—blocks,
+elevation, PAD-US, then trails—and accepts only checksum-valid completed outputs.
+Elevation batches partition the logical tiles; ordered trail batches may overlap tiles
+but their clipped fragments are grouped by locked `GLOBALID` before rasterization, so a
+cross-state trail is counted once. Each phase or batch verifies its raw inputs
+before work and removes managed inputs only after all dependent derived files validate;
+external source roots are never removed. Preparation
+uses 100 km processing cores with exact 100 km
 halos on the CRS-origin 250 m lattice. Every logical tile stores float32 elevation,
 uint8 PAD codes, float32 additive trail-hit cells, and int32 block sample indexes. The
 pack manifest checksums every file and every tile's canonical raw-metric result; a
@@ -123,7 +151,11 @@ and queryable. It also publishes one content-addressed compact fallback under
 `data/mountain/compact/`. Failure restores the prior full and compact Mountain pointers
 and leaves the prior app snapshot intact.
 
-The prepared pack is capped at 22 GB; work shards and any one full release at 4 GB;
+The source lock records compressed-download totals, largest `.part`, extracted bytes,
+largest reviewed family/batch source-staging peak, preparation workspace and atomic duplication,
+comparison/build shards, candidate/retained releases, bundle, reports, and reserve. The
+validator recomputes acquisition, preparation, timed-build, and overall peaks rather
+than trusting reported totals. The prepared pack is capped at 22 GB; work shards and any one full release at 4 GB;
 active plus rollback releases at 8 GB. The implementation targets 45 GB and hard-stops
 before 50,000,000,000 allocated bytes while retaining at least 10 GB of unrelated free
 space. Cleanup is limited to direct, marked, non-symlink children of managed Mountain
@@ -132,6 +164,14 @@ prepared pack; successful publication retains one compact fallback. The compact
 tract/county fallback must remain below 50 MiB.
 The normal snapshot reads only tract/county Parquet and the manifest, so Rasterio,
 Shapely, PyProj, SciPy, Pyogrio, and NumPy are optional maintainer dependencies.
+
+The complete executable acquisition, batch preparation, final pack publication,
+source-derived equivalence, benchmark, promotion, rollback, and license-review runbook
+is in the Mountain section of [`README.md`](README.md). National source comparison uses
+the prepared lock's managed `comparison_id`; a successful comparison removes those
+temporary source-derived shards. The direct `--regions` national path is rejected for
+the state-clipped trail contract because it cannot perform the required global fragment
+deduplication.
 
 The approximation is explicit:
 

@@ -1,0 +1,124 @@
+{
+  "elevation": {
+    "qualification_report_sha256": "c05d13652647bc25593035f45dc99ef7e4792eea7e7cb81eeeed1d9e0b2f1c4b",
+    "source_bytes": 70045623986,
+    "source_count": 1645
+  },
+  "gates": {
+    "anonymous_acquisition": true,
+    "exact_50_states_plus_dc": true,
+    "hard_50_gb_cap_satisfied": true,
+    "managed_peak_projected_below_45_gb": true,
+    "official_sources_only": true,
+    "prepared_pack_projected_below_22_gb": true,
+    "representative_raw_digests_complete": true
+  },
+  "national_inventory": {
+    "block_geoid_sha256": "2919b6adea1c67708502768579e87ba2a430d55896b6b7473ebb2d988f5c7f42",
+    "blocks": 8132968,
+    "population": 331449281,
+    "states_and_dc": 51,
+    "tile_shape": [
+      1200,
+      1200
+    ],
+    "tiles": 1176
+  },
+  "pad_us": {
+    "access_counts": {
+      "OA": 261630,
+      "RA": 44937,
+      "UK": 114877,
+      "XA": 232447
+    },
+    "artifact_sha256": "9570666b728214b5a069e87e36d3827b86479462047337d3498da05dbad56ec0",
+    "artifact_size": 2322212936,
+    "capture_report_sha256": "4d06233a2f37a93af2ea7815b22d753858060084e0bc215ba95fb22cccda0f20",
+    "features": 653891,
+    "login_required": false,
+    "maximum_response_bytes": 250000000,
+    "maximum_response_bytes_observed": 147094906,
+    "objectid_sha256": "8b3500fca25303eeae011b90e2681b1223520aa75399f592afc511e3ea0b5b3b",
+    "page_count": 13078,
+    "page_size": 50,
+    "service_metadata_sha256": "3eccd36beac72f030e8f625153a2009038c0cb6a1c0ba7070ba570153cd86dd9",
+    "source": "official anonymous USGS PAD-US 4.1 MapServer"
+  },
+  "qualified_at": "2026-09-12T22:47:53Z",
+  "regions_sha256": "8c0f9d94003860c9472c4053602105cecaaf117a698ce42c55920f5aa515d92d",
+  "representative_raw_digests_sha256": "4db37a85114193ede8e65e19dcb14db57663f0263ce08e5fe05e7d57a975c284",
+  "representative_tiles": [
+    {
+      "case": "colorado_rockies",
+      "raw_metric_sha256": "ffe72d9d73b8d0f7940a53655d9ea691417f0f5460c6f6eee0dc413e2aafc763",
+      "region": "conus_dc",
+      "tile_x": -9,
+      "tile_y": 18
+    },
+    {
+      "case": "flat_plains",
+      "raw_metric_sha256": "ee7d931be7f733c76331c412eb50fbdb9a4115d711cca5ebdc75b7358b99f0a0",
+      "region": "conus_dc",
+      "tile_x": -4,
+      "tile_y": 17
+    },
+    {
+      "case": "coastal_nodata",
+      "raw_metric_sha256": "9fc38eed022daab845498926f26e2d3a6b2a751d9941f8bd5861dd8b41c60886",
+      "region": "conus_dc",
+      "tile_x": 18,
+      "tile_y": 15
+    },
+    {
+      "case": "overlap_seam",
+      "raw_metric_sha256": "8c8e752a28d66b8f0374dcadf78657a66f8ff062130211a11a6bb1d56b1d1639",
+      "region": "conus_dc",
+      "tile_x": -8,
+      "tile_y": 19
+    },
+    {
+      "case": "alaska",
+      "raw_metric_sha256": "da452da1b04b45e5648278235fb2a3e11941108d300d6b770a2ce73691874402",
+      "region": "alaska",
+      "tile_x": 1,
+      "tile_y": 14
+    },
+    {
+      "case": "hawaii",
+      "raw_metric_sha256": "37eb7843ff1bcfc626872ef59a64a811765b99737627790f56485e847d4ef280",
+      "region": "hawaii",
+      "tile_x": 0,
+      "tile_y": 8
+    }
+  ],
+  "schema_version": 1,
+  "source_lock_sha256": "055a8855d12e5062a3c66c677dc4e962bfa920291fc0ad05b1efc237605adace",
+  "storage_projection": {
+    "acquisition_peak_bytes": 29092530566,
+    "active_and_rollback_release_bytes": 4879780800,
+    "candidate_release_bytes": 2439890400,
+    "compact_bundle_bytes": 52428800,
+    "comparison_shard_bytes": 1951912320,
+    "compressed_download_bytes": 97541695563,
+    "extracted_source_bytes": 49193178756,
+    "managed_peak_bytes": 33137590048,
+    "maximum_atomic_write_bytes": 5760000,
+    "maximum_part_bytes": 1014154391,
+    "preparation_overlap_bytes": 22639906031,
+    "preparation_peak_bytes": 29645666031,
+    "preparation_workspace_bytes": 16803091968,
+    "prepared_pack_bytes": 16803091968,
+    "report_bytes": 10485760,
+    "retained_baseline_bytes": 0,
+    "safety_reserve_bytes": 7000000000,
+    "source_staging_bytes": 21078376175,
+    "timed_build_peak_bytes": 33137590048,
+    "work_shard_bytes": 1951912320
+  },
+  "trails": {
+    "feature_rows": 546729,
+    "fragment_rows": 592690,
+    "logical_features": 545044,
+    "logical_sha256": "e90f09118eb99edf89baadc5cb466ca2c5b55ed7d1c15f304072f61665271e5e"
+  }
+}

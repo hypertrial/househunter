@@ -10,6 +10,7 @@ import yaml
 
 from househunter.build import (
     BUILD_SCHEMA_VERSION,
+    _attach_mountain_scores,
     _cached_snapshot_artifacts_valid,
     build_snapshot,
 )
@@ -66,11 +67,34 @@ def _promote_mountain_fixture(paths: RuntimePaths, root: Path) -> None:
             )
         )
     raw = pl.concat([raw, *additions])
+    raw = pl.concat(
+        [
+            raw,
+            raw.head(1).with_columns(
+                pl.lit("010010002001001").alias("block_geoid"),
+                pl.lit("01001000200").alias("tract_geoid"),
+            ),
+            raw.head(1).with_columns(
+                pl.lit("010010003001001").alias("block_geoid"),
+                pl.lit("01001000300").alias("tract_geoid"),
+            ),
+        ]
+    )
     expectations = {
         row["state"]: {"blocks": row["blocks"], "population": row["population"]}
         for row in raw.group_by("state")
         .agg(pl.len().alias("blocks"), pl.col("pop20").sum().alias("population"))
         .iter_rows(named=True)
+    }
+    source_item = {
+        "name": "fixture",
+        "acquired_at": "2026-01-01T00:00:00Z",
+        "crs": "EPSG:5070",
+        "schema": ["fixture"],
+        "count": 1,
+        "filename": "fixture.parquet",
+        "size": 1,
+        "sha256": "0" * 64,
     }
     candidate = write_release(
         raw,
@@ -79,19 +103,7 @@ def _promote_mountain_fixture(paths: RuntimePaths, root: Path) -> None:
         sources={
             "source_lock_schema_version": 2,
             "source_lock_sha256": "1" * 64,
-            "items": [
-                {
-                    "name": "fixture",
-                    "url": "https://example.invalid/fixture",
-                    "acquired_at": "2026-01-01T00:00:00Z",
-                    "crs": "EPSG:5070",
-                    "schema": ["fixture"],
-                    "count": 1,
-                    "filename": "fixture.parquet",
-                    "size": 1,
-                    "sha256": "0" * 64,
-                }
-            ],
+            "items": [source_item],
         },
         national_expectations=expectations,
     )
@@ -102,6 +114,7 @@ def _promote_mountain_fixture(paths: RuntimePaths, root: Path) -> None:
             "schema_version": 2,
             "expected_states": expectations,
             "block_geoid_sha256": national_block_geoid_sha256(raw),
+            "sources": [source_item],
         },
         reviewed_source_lock_sha256="1" * 64,
         expected_raw_blocks=raw,
@@ -192,6 +205,42 @@ def test_build_joins_promoted_mountain_release_and_changes_identity(
         assert [row["place_id"] for row in store.list_places(mountain_min=1)["items"]] == [
             "02001000100"
         ]
+
+
+def test_mountain_runtime_rejects_missing_in_scope_rows_and_marks_territories_outside_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = RuntimePaths.from_root(tmp_path)
+    places = pl.DataFrame(
+        {"place_id": ["01001000100", "72001000100"], "state": ["AL", "PR"]}
+    )
+    counties = pl.DataFrame({"place_id": ["01001", "72001"], "state": ["AL", "PR"]})
+    columns = {
+        "mountain_score": pl.Series([], dtype=pl.Float64),
+        "mountain_population_coverage": pl.Series([], dtype=pl.Float64),
+        "mountain_coverage_status": pl.Series([], dtype=pl.String),
+    }
+    empty = pl.DataFrame({"place_id": pl.Series([], dtype=pl.String), **columns})
+    monkeypatch.setattr(
+        "househunter.mountain.current_compact_release",
+        lambda paths: (
+            tmp_path,
+            {"data_release": "fixture", "score_version": "mountain_score_v1"},
+            empty,
+            empty,
+        ),
+    )
+
+    with pytest.raises(HouseHunterError, match="missing 1 in-scope"):
+        _attach_mountain_scores(places, counties, paths)
+
+    monkeypatch.setattr("househunter.mountain.current_compact_release", lambda paths: None)
+    attached, attached_counties, _ = _attach_mountain_scores(places, counties, paths)
+    assert attached["mountain_coverage_status"].to_list() == ["unavailable", "outside_scope"]
+    assert attached_counties["mountain_coverage_status"].to_list() == [
+        "unavailable",
+        "outside_scope",
+    ]
 
 
 def test_state_build_records_scope(fixture_environment: tuple[RuntimePaths, object]) -> None:

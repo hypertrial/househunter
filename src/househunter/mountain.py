@@ -470,6 +470,82 @@ def aggregate_scores(blocks: pl.DataFrame, geography: str) -> pl.DataFrame:
     )
 
 
+def _reconstruct_aggregate_scores(blocks: pl.DataFrame, geography: str) -> pl.DataFrame:
+    """Independent aggregation oracle for persisted tract and county validation."""
+    if geography not in {"tract_geoid", "county_fips"}:
+        raise HouseHunterError("Mountain aggregation geography must be tract_geoid or county_fips")
+    base = (
+        blocks.group_by(geography)
+        .agg(
+            pl.col("state").first(),
+            pl.col("pop20").sum().alias("population_2020"),
+            pl.when(pl.col("mountain_score").is_not_null())
+            .then(pl.col("pop20"))
+            .otherwise(0)
+            .sum()
+            .alias("mountain_covered_population"),
+        )
+        .with_columns(
+            pl.when(pl.col("population_2020") > 0)
+            .then(pl.col("mountain_covered_population") / pl.col("population_2020"))
+            .otherwise(0.0)
+            .round(6)
+            .alias("mountain_population_coverage")
+        )
+        .with_columns(
+            pl.when(~pl.col("state").is_in(IN_SCOPE_STATES))
+            .then(pl.lit("outside_scope"))
+            .when(pl.col("population_2020") == 0)
+            .then(pl.lit("zero_population"))
+            .when(pl.col("mountain_population_coverage") >= 1 - 1e-9)
+            .then(pl.lit("complete"))
+            .when(pl.col("mountain_population_coverage") >= 0.9)
+            .then(pl.lit("partial"))
+            .otherwise(pl.lit("insufficient_coverage"))
+            .alias("mountain_coverage_status")
+        )
+    )
+    for column in AGGREGATE_MEANS:
+        means = (
+            blocks.filter(pl.col(column).is_not_null())
+            .group_by(geography)
+            .agg(
+                (pl.col(column) * pl.col("pop20")).sum().alias("_numerator"),
+                pl.col("pop20").sum().alias("_denominator"),
+            )
+            .with_columns(
+                pl.when(pl.col("_denominator") > 0)
+                .then(pl.col("_numerator") / pl.col("_denominator"))
+                .otherwise(pl.lit(None, dtype=pl.Float64))
+                .alias("_mean")
+            )
+            .select(geography, "_mean")
+        )
+        base = (
+            base.join(means, on=geography, how="left")
+            .with_columns(
+                pl.when(
+                    pl.col("state").is_in(IN_SCOPE_STATES)
+                    & (pl.col("mountain_population_coverage") >= 0.9)
+                    & (pl.col("mountain_covered_population") > 0)
+                )
+                .then(pl.col("_mean"))
+                .otherwise(pl.lit(None, dtype=pl.Float64))
+                .round(2 if column in SCORE_COLUMNS else RAW_PRECISION.get(column, 3))
+                .alias(column)
+            )
+            .drop("_mean")
+        )
+    return (
+        base.with_columns(
+            pl.lit(SCORE_VERSION).alias("mountain_score_version"),
+            pl.lit(PIPELINE_VERSION).alias("mountain_pipeline_version"),
+        )
+        .rename({geography: "place_id"})
+        .sort("place_id")
+    )
+
+
 def national_block_geoid_sha256(blocks: pl.DataFrame) -> str:
     _require_columns(blocks, ["block_geoid"])
     geoids = blocks.select("block_geoid").sort("block_geoid")["block_geoid"].to_list()
@@ -776,7 +852,7 @@ def validate_release(
     elif expectations is not None:
         raise HouseHunterError("Partial Mountain release cannot claim national expectations")
     for name, geography in (("tracts", "tract_geoid"), ("counties", "county_fips")):
-        expected = aggregate_scores(blocks, geography)
+        expected = _reconstruct_aggregate_scores(blocks, geography)
         if frames[name].columns != expected.columns or not frames[name].equals(expected):
             raise HouseHunterError(f"Mountain {name} do not match block aggregation")
     compact_bytes = sum(
@@ -1001,12 +1077,20 @@ def promote_release(
     expected_raw_blocks: pl.DataFrame,
 ) -> Path:
     """Defensively validate and copy an externally supplied candidate before promotion."""
+    from .mountain_gis import source_provenance_item
+
     manifest = validate_release(candidate)
     sources = manifest.get("sources")
+    expected_items = [
+        source_provenance_item(item)
+        for item in reviewed_source_lock.get("sources", [])
+        if isinstance(item, dict)
+    ]
     if (
         not isinstance(sources, dict)
         or sources.get("source_lock_schema_version") != 2
         or sources.get("source_lock_sha256") != reviewed_source_lock_sha256
+        or sources.get("items") != expected_items
     ):
         raise HouseHunterError(
             "Mountain candidate does not match the independently reviewed source lock"

@@ -67,7 +67,15 @@ def _attach_mountain_scores(
     counties: pl.DataFrame,
     paths: RuntimePaths,
 ) -> tuple[pl.DataFrame, pl.DataFrame, dict[str, str]]:
-    from .mountain import AGGREGATE_MEANS, current_compact_release
+    from .mountain import AGGREGATE_MEANS, IN_SCOPE_STATES, current_compact_release
+
+    def unavailable_status() -> pl.Expr:
+        return (
+            pl.when(pl.col("state").is_in(sorted(IN_SCOPE_STATES)))
+            .then(pl.lit("unavailable"))
+            .otherwise(pl.lit("outside_scope"))
+            .alias("mountain_coverage_status")
+        )
 
     current = current_compact_release(paths)
     if current is None:
@@ -77,11 +85,10 @@ def _attach_mountain_scores(
             pl.lit(None, dtype=pl.String).alias("mountain_score_version"),
             pl.lit(None, dtype=pl.String).alias("mountain_pipeline_version"),
             pl.lit(0.0).alias("mountain_population_coverage"),
-            pl.lit("unavailable").alias("mountain_coverage_status"),
         ]
         return (
-            places.with_columns(*missing),
-            counties.with_columns(*missing),
+            places.with_columns(*missing, unavailable_status()),
+            counties.with_columns(*missing, unavailable_status()),
             {
                 "checksum": sha256_bytes(b"unavailable"),
                 "data_release": "unavailable",
@@ -91,6 +98,12 @@ def _attach_mountain_scores(
     release, manifest, mountain_tracts, mountain_counties = current
 
     def attach(frame: pl.DataFrame, mountain: pl.DataFrame) -> pl.DataFrame:
+        expected = frame.filter(pl.col("state").is_in(sorted(IN_SCOPE_STATES))).select("place_id")
+        missing_ids = expected.join(mountain.select("place_id"), on="place_id", how="anti")
+        if missing_ids.height:
+            raise HouseHunterError(
+                f"Mountain compact release is missing {missing_ids.height} in-scope runtime rows"
+            )
         return (
             frame.join(
                 mountain.with_columns(pl.lit(True).alias("_mountain_present")),
@@ -98,7 +111,9 @@ def _attach_mountain_scores(
                 how="left",
             )
             .with_columns(
-                pl.when(pl.col("_mountain_present").is_null())
+                pl.when(~pl.col("state").is_in(sorted(IN_SCOPE_STATES)))
+                .then(pl.lit("outside_scope"))
+                .when(pl.col("_mountain_present").is_null())
                 .then(pl.lit("unavailable"))
                 .otherwise(pl.col("mountain_coverage_status"))
                 .alias("mountain_coverage_status"),
