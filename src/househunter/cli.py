@@ -948,7 +948,9 @@ def run_app(
     if not no_open:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     typer.echo(f"HouseHunter is running at {url}")
-    uvicorn.run(create_app(_paths()), host="127.0.0.1", port=port, log_level="info")
+    uvicorn.run(
+        create_app(_paths()), host="127.0.0.1", port=port, log_level="info", lifespan="off"
+    )
 
 
 if __name__ == "__main__":

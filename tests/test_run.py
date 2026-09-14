@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+import househunter.cli as cli_module
+import househunter.run as run_module
 from househunter.config import RuntimePaths
 from househunter.errors import BuildNotFoundError, HouseHunterError
 from househunter.run import main, parse_args, run
@@ -37,6 +39,27 @@ def test_skip_prepare_starts_server_without_data_work(
         serve=serve,
     )
     assert events == ["serve:9001:False"]
+
+
+def test_server_entry_points_disable_unused_lifespan(
+    fixture_environment: tuple[RuntimePaths, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _ = fixture_environment
+    calls: list[dict[str, object]] = []
+
+    def fake_uvicorn_run(_app: object, **kwargs: object) -> None:
+        calls.append(kwargs)
+
+    monkeypatch.setattr(run_module.uvicorn, "run", fake_uvicorn_run)
+    monkeypatch.setattr(cli_module, "_paths", lambda: paths)
+
+    run_module.serve_app(paths, port=8877, open_browser=False)
+    cli_module.run_app(port=8878, no_open=True)
+
+    assert calls == [
+        {"host": "127.0.0.1", "port": 8877, "log_level": "info", "lifespan": "off"},
+        {"host": "127.0.0.1", "port": 8878, "log_level": "info", "lifespan": "off"},
+    ]
 
 
 def test_prepare_downloads_builds_and_serves_without_census(

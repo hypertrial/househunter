@@ -86,7 +86,9 @@ def serve_app(
     if open_browser:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     print(f"HouseHunter is running at {url}")
-    uvicorn.run(create_app(paths), host="127.0.0.1", port=port, log_level="info")
+    uvicorn.run(
+        create_app(paths), host="127.0.0.1", port=port, log_level="info", lifespan="off"
+    )
 
 
 def run(
