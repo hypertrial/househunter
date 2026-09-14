@@ -1,5 +1,5 @@
 import { zoomIdentity, type ZoomTransform } from "d3-zoom";
-import type { Geography, MapManifest, MapScore, Metric } from "./types";
+import type { Geography, MapScore, Metric } from "./types";
 
 export const MAP_COLORS = {
   low: "#7fa87e",
@@ -167,20 +167,6 @@ export function metricValueColor(
   return metric === "mountain"
     ? mountainColor(mountainScore)
     : scoreColor(riskScore);
-}
-
-export function scoreMap(rows: MapScore[]): Map<string, MapScore> {
-  return new Map(rows.map((row) => [row.place_id, row]));
-}
-
-export function nationalAsset(manifest: MapManifest, level: Geography | "state") {
-  return manifest.files.find((asset) => asset.level === level && asset.lod === "national");
-}
-
-export function detailAsset(manifest: MapManifest, state: string) {
-  return manifest.files.find(
-    (asset) => asset.level === "tract" && asset.lod === "detail" && asset.jurisdiction === state,
-  );
 }
 
 export interface CameraState {
