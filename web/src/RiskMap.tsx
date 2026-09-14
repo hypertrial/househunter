@@ -147,7 +147,8 @@ export default function RiskMap({
   const focusTargetRef = useRef<FocusTarget | null>(focusTarget);
   const focusPendingRef = useRef<{ nonce: number; requestId: number; snapshotId: number } | null>(null);
   const gestureRef = useRef(false);
-  const pointerStartsRef = useRef(new Map<number, [number, number]>());
+  const pointerStartsRef = useRef(new Map<number, [number, number, ZoomTransform, boolean]>());
+  const pointerFallbackRef = useRef<number | null>(null);
   const transformFrameRef = useRef(0);
   const gestureFrameRef = useRef(0);
   const hoverInFlightRef = useRef(false);
@@ -197,6 +198,25 @@ export default function RiskMap({
       }
     });
   }, []);
+
+  const finishGesture = useCallback(() => {
+    gestureRef.current = false;
+    gestureFrameRef.current = 0;
+    const dimensions = dimensionsRef.current;
+    const live = transformRef.current;
+    settleStartedRef.current.set(cameraGenerationRef.current, performance.now());
+    recordProfile({
+      name: "camera-settle-start", start: performance.now(),
+      cameraGeneration: cameraGenerationRef.current,
+    });
+    post({
+      type: "SET_CAMERA",
+      datasetGeneration: datasetGenerationRef.current,
+      cameraGeneration: cameraGenerationRef.current,
+      camera: { k: live.k, x: live.x, y: live.y },
+    });
+    callbackRef.current.onCamera(cameraFromTransform(live, dimensions.width, dimensions.height));
+  }, [post]);
 
   const sendPick = useCallback((mode: "hover" | "activate", pointer: PointerPick) => {
     const frame = presentedRef.current;
@@ -520,24 +540,7 @@ export default function RiskMap({
         cameraGenerationRef.current += 1;
         scheduleTransform();
       })
-      .on("end", () => {
-        gestureRef.current = false;
-        gestureFrameRef.current = 0;
-        const dimensions = dimensionsRef.current;
-        const live = transformRef.current;
-        settleStartedRef.current.set(cameraGenerationRef.current, performance.now());
-        recordProfile({
-          name: "camera-settle-start", start: performance.now(),
-          cameraGeneration: cameraGenerationRef.current,
-        });
-        post({
-          type: "SET_CAMERA",
-          datasetGeneration: datasetGenerationRef.current,
-          cameraGeneration: cameraGenerationRef.current,
-          camera: { k: live.k, x: live.x, y: live.y },
-        });
-        callbackRef.current.onCamera(cameraFromTransform(live, dimensions.width, dimensions.height));
-      });
+      .on("end", finishGesture);
     const initial = transformFromCamera(initialCamera, dimensionsRef.current.width, dimensionsRef.current.height);
     transformRef.current = initial;
     select(viewport).call(behavior.transform, initial);
@@ -545,17 +548,40 @@ export default function RiskMap({
       select(viewport).on(".zoom", null);
       zoomRef.current = null;
     };
-  }, [initialCamera, post, scheduleTransform]);
+  }, [finishGesture, initialCamera, scheduleTransform]);
 
   useEffect(() => {
     const viewport = viewportRef.current;
     if (!viewport) return;
     const down = (event: PointerEvent) => {
-      pointerStartsRef.current.set(event.pointerId, [event.clientX, event.clientY]);
+      pointerStartsRef.current.set(event.pointerId, [
+        event.clientX, event.clientY, transformRef.current,
+        (!Number.isFinite(event.button) || event.button === 0) && !event.ctrlKey,
+      ]);
     };
     const move = (event: PointerEvent) => {
       const start = pointerStartsRef.current.get(event.pointerId);
-      if (event.buttons || start || gestureRef.current) return;
+      if (event.buttons && start) {
+        if (!gestureRef.current && start[3] && (event.isPrimary || !event.pointerType) && (event.buttons & 1) === 1) {
+          pointerFallbackRef.current = event.pointerId;
+          gestureRef.current = true;
+          gestureFrameRef.current = 0;
+          callbackRef.current.onPreview(null);
+          viewport.setPointerCapture?.(event.pointerId);
+        }
+        if (pointerFallbackRef.current === event.pointerId) {
+          transformRef.current = start[2].translate(
+            (event.clientX - start[0]) / start[2].k,
+            (event.clientY - start[1]) / start[2].k,
+          );
+          (viewport as HTMLDivElement & { __zoom?: ZoomTransform }).__zoom = transformRef.current;
+          cameraGenerationRef.current += 1;
+          scheduleTransform();
+          event.preventDefault();
+        }
+        return;
+      }
+      if (start || gestureRef.current) return;
       const bounds = viewport.getBoundingClientRect();
       const pointer = {
         x: event.clientX - bounds.left,
@@ -570,6 +596,11 @@ export default function RiskMap({
     const up = (event: PointerEvent) => {
       const start = pointerStartsRef.current.get(event.pointerId);
       pointerStartsRef.current.delete(event.pointerId);
+      if (pointerFallbackRef.current === event.pointerId) {
+        pointerFallbackRef.current = null;
+        viewport.releasePointerCapture?.(event.pointerId);
+        finishGesture();
+      }
       const moved = !start || Math.hypot(event.clientX - start[0], event.clientY - start[1]) > 5;
       if (!moved) {
         const bounds = viewport.getBoundingClientRect();
@@ -583,6 +614,10 @@ export default function RiskMap({
     };
     const cancel = (event: PointerEvent) => {
       pointerStartsRef.current.delete(event.pointerId);
+      if (pointerFallbackRef.current === event.pointerId) {
+        pointerFallbackRef.current = null;
+        finishGesture();
+      }
     };
     const leave = () => {
       hoverPendingRef.current = null;
@@ -601,7 +636,7 @@ export default function RiskMap({
       viewport.removeEventListener("pointercancel", cancel);
       viewport.removeEventListener("pointerleave", leave);
     };
-  }, [sendPick]);
+  }, [finishGesture, scheduleTransform, sendPick]);
 
   useEffect(() => {
     const frame = presentedRef.current;

@@ -392,6 +392,71 @@ test("commits a correctly sized frame after a live resize", async ({ page }, tes
   expect(parseFloat(await canvas.evaluate((node) => node.style.width))).toBeLessThan(before.width);
 });
 
+test("pans with pointer-only input without duplicating mouse drag", async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.endsWith("-wide"), "Pointer fallback runs once per browser engine");
+  await installRoutes(page);
+  await page.goto("/#level=tract&cx=0.5&cy=0.5&z=2");
+  const map = page.locator(".map-viewport");
+  await expect(page.locator(".map-presentation")).toHaveAttribute("data-snapshot-id", /\d+/);
+  const transform = () => map.evaluate((node) => {
+    const value = (node as HTMLElement & { __zoom: { k: number; x: number; y: number } }).__zoom;
+    return { k: value.k, x: value.x, y: value.y };
+  });
+  const before = await transform();
+
+  await map.evaluate((node) => {
+    const viewport = node as HTMLElement;
+    viewport.setPointerCapture = () => undefined;
+    viewport.releasePointerCapture = () => undefined;
+    const bounds = viewport.getBoundingClientRect();
+    const x = bounds.left + bounds.width / 2;
+    const y = bounds.top + bounds.height / 2;
+    viewport.dispatchEvent(new PointerEvent("pointerdown", {
+      bubbles: true, pointerId: 17, pointerType: "mouse", isPrimary: true,
+      button: 0, buttons: 1, clientX: x, clientY: y,
+    }));
+    viewport.dispatchEvent(new PointerEvent("pointermove", {
+      bubbles: true, pointerId: 17, pointerType: "mouse", isPrimary: true,
+      button: -1, buttons: 1, clientX: x + 100, clientY: y + 40,
+    }));
+    viewport.dispatchEvent(new PointerEvent("pointerup", {
+      bubbles: true, pointerId: 17, pointerType: "mouse", isPrimary: true,
+      button: 0, buttons: 0, clientX: x + 100, clientY: y + 40,
+    }));
+  });
+  await expect.poll(async () => (await transform()).x).toBeCloseTo(before.x + 100, 4);
+
+  const pointerResult = await transform();
+  await map.evaluate((node) => {
+    const viewport = node as HTMLElement;
+    const bounds = viewport.getBoundingClientRect();
+    const x = bounds.left + bounds.width / 2;
+    const y = bounds.top + bounds.height / 2;
+    viewport.dispatchEvent(new PointerEvent("pointerdown", {
+      bubbles: true, pointerId: 18, pointerType: "mouse", isPrimary: true, ctrlKey: true,
+      button: 0, buttons: 1, clientX: x, clientY: y,
+    }));
+    viewport.dispatchEvent(new PointerEvent("pointermove", {
+      bubbles: true, pointerId: 18, pointerType: "mouse", isPrimary: true, ctrlKey: true,
+      button: -1, buttons: 1, clientX: x + 60, clientY: y + 30,
+    }));
+    viewport.dispatchEvent(new PointerEvent("pointerup", {
+      bubbles: true, pointerId: 18, pointerType: "mouse", isPrimary: true, ctrlKey: true,
+      button: 0, buttons: 0, clientX: x + 60, clientY: y + 30,
+    }));
+  });
+  expect((await transform()).x).toBeCloseTo(pointerResult.x, 4);
+
+  const bounds = await map.boundingBox();
+  if (!bounds) throw new Error("Map viewport has no bounds");
+  await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(bounds.x + bounds.width / 2 + 80, bounds.y + bounds.height / 2 + 30);
+  await page.mouse.up();
+  await expect.poll(async () => (await transform()).x).toBeCloseTo(pointerResult.x + 80, 4);
+  await expect(page.getByRole("dialog", { name: "Tract detail" })).toHaveCount(0);
+});
+
 test("retains detail whose projection is cancelled by resize", async ({ page }, testInfo) => {
   test.skip(!testInfo.project.name.endsWith("-wide"), "Detail cancellation runs once per browser engine");
   await installRoutes(page);

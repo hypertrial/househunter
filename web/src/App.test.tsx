@@ -367,6 +367,53 @@ it("preserves the normalized camera through a responsive resize", async () => {
   await waitFor(() => expect(onCamera).toHaveBeenLastCalledWith(expect.objectContaining({ cx: 0.37, cy: 0.61, z: 3 })));
 });
 
+it("pans with pointer-only Chrome input without activating a geography", async () => {
+  vi.stubGlobal("fetch", mockFetch());
+  const onCamera = vi.fn();
+  render(<RiskMap
+    manifestUrl="/map-assets/manifest.json" scoreUrl="/api/v1/map/scores?level=tract"
+    expectedBuildId="fixture" level="tract" selected="" state="" county=""
+    showUnranked={false} focusTarget={null} initialCamera={{ cx: 0.5, cy: 0.5, z: 2 }}
+    onSelect={() => undefined} onPreview={() => undefined} onCamera={onCamera}
+    onStatus={() => undefined}
+  />);
+  const viewport = screen.getByRole("img", { name: /Focusable USA tract/ });
+  await waitFor(() => expect(viewport).toHaveAttribute("aria-busy", "false"));
+  await waitFor(() => expect(onCamera).toHaveBeenCalled());
+  onCamera.mockClear();
+  fireEvent.pointerDown(viewport, {
+    pointerId: 7, pointerType: "mouse", isPrimary: true,
+    button: 0, buttons: 1, clientX: 500, clientY: 350,
+  });
+  fireEvent.pointerMove(viewport, {
+    pointerId: 7, pointerType: "mouse", isPrimary: true,
+    button: -1, buttons: 1, clientX: 600, clientY: 400,
+  });
+  fireEvent.pointerUp(viewport, {
+    pointerId: 7, pointerType: "mouse", isPrimary: true,
+    button: 0, buttons: 0, clientX: 600, clientY: 400,
+  });
+
+  await waitFor(() => expect(onCamera).toHaveBeenCalledTimes(1));
+  expect(onCamera).toHaveBeenLastCalledWith(expect.objectContaining({ cx: 0.45, z: 2 }));
+  expect(workerMessages.filter(({ value }) => value.type === "PICK")).toEqual([]);
+
+  onCamera.mockClear();
+  fireEvent.pointerDown(viewport, {
+    pointerId: 8, pointerType: "mouse", isPrimary: true, ctrlKey: true,
+    button: 0, buttons: 1, clientX: 600, clientY: 400,
+  });
+  fireEvent.pointerMove(viewport, {
+    pointerId: 8, pointerType: "mouse", isPrimary: true, ctrlKey: true,
+    button: -1, buttons: 1, clientX: 700, clientY: 450,
+  });
+  fireEvent.pointerUp(viewport, {
+    pointerId: 8, pointerType: "mouse", isPrimary: true, ctrlKey: true,
+    button: 0, buttons: 0, clientX: 700, clientY: 450,
+  });
+  expect(onCamera).not.toHaveBeenCalled();
+});
+
 it("ignores a stale score response after changing geography level", async () => {
   let resolveTract!: (value: Response) => void;
   let resolveCounty!: (value: Response) => void;
