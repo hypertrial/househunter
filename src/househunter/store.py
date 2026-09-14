@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import shutil
 from pathlib import Path
 from typing import Any
@@ -17,7 +18,7 @@ SUMMARY_COLUMNS = """
 place_id, name, state, place_type, population_2020, housing_units_2020,
 risk_score, coverage_status, fema_vintage, census_vintage, county_fips, county_name,
 community_conditions_group, community_conditions_geography, chrr_release_year,
-mountain_score, mountain_score_version, mountain_pipeline_version,
+mountain_magnitude, mountain_magnitude_version, mountain_pipeline_version,
 relief_5km_m, relief_10km_m, relief_20km_m, relief_40km_m, relief_20km_pct,
 rugged_fraction_20km, rugged_pct, public_mountain_access_raw, public_mountain_access_pct,
 open_mountain_km2_5, open_mountain_km2_15, open_mountain_km2_30,
@@ -41,8 +42,8 @@ SUMMARY_KEYS = [
     "community_conditions_group",
     "community_conditions_geography",
     "chrr_release_year",
-    "mountain_score",
-    "mountain_score_version",
+    "mountain_magnitude",
+    "mountain_magnitude_version",
     "mountain_pipeline_version",
     "relief_5km_m",
     "relief_10km_m",
@@ -131,8 +132,8 @@ class Store:
         min_score: float | None = None,
         max_score: float | None = None,
         community_conditions_group: int | None = None,
-        mountain_min: float | None = None,
-        mountain_max: float | None = None,
+        mountain_magnitude_min: float | None = None,
+        mountain_magnitude_max: float | None = None,
         include_unranked: bool = False,
         sort: str = "risk_score",
         direction: str = "asc",
@@ -146,7 +147,7 @@ class Store:
             "state": "state",
             "population": "population_2020",
             "community_conditions_group": "community_conditions_group",
-            "mountain_score": "mountain_score",
+            "mountain_magnitude": "mountain_magnitude",
         }
         if sort not in sort_columns:
             raise HouseHunterError(f"Unsupported sort column: {sort}")
@@ -160,14 +161,26 @@ class Store:
             raise HouseHunterError("County filter must be a 5-digit FIPS code")
         if community_conditions_group is not None and not 1 <= community_conditions_group <= 10:
             raise HouseHunterError("Community Conditions group must be between 1 and 10")
+        magnitude_bounds = (mountain_magnitude_min, mountain_magnitude_max)
+        if any(
+            value is not None and (not math.isfinite(value) or value < 0)
+            for value in magnitude_bounds
+        ):
+            raise HouseHunterError("Mountain Magnitude bounds must be finite and nonnegative")
+        if (
+            mountain_magnitude_min is not None
+            and mountain_magnitude_max is not None
+            and mountain_magnitude_min > mountain_magnitude_max
+        ):
+            raise HouseHunterError("Mountain Magnitude minimum cannot exceed maximum")
         limit = max(1, min(limit, 500))
         offset = max(0, offset)
         clauses: list[str] = []
         parameters: list[Any] = []
         if not include_unranked:
             clauses.append(
-                "mountain_score IS NOT NULL"
-                if sort == "mountain_score"
+                "mountain_magnitude IS NOT NULL"
+                if sort == "mountain_magnitude"
                 else "coverage_status = 'complete'"
             )
         if search:
@@ -191,8 +204,8 @@ class Store:
             ("population_2020", "<=", max_population),
             ("risk_score", ">=", min_score),
             ("risk_score", "<=", max_score),
-            ("mountain_score", ">=", mountain_min),
-            ("mountain_score", "<=", mountain_max),
+            ("mountain_magnitude", ">=", mountain_magnitude_min),
+            ("mountain_magnitude", "<=", mountain_magnitude_max),
         ):
             if value is not None:
                 clauses.append(f"{column} {operator} ?")
@@ -226,8 +239,8 @@ class Store:
         min_score: float | None = None,
         max_score: float | None = None,
         community_conditions_group: int | None = None,
-        mountain_min: float | None = None,
-        mountain_max: float | None = None,
+        mountain_magnitude_min: float | None = None,
+        mountain_magnitude_max: float | None = None,
         include_unranked: bool = False,
         sort: str = "risk_score",
         direction: str = "asc",
@@ -244,8 +257,8 @@ class Store:
             min_score=min_score,
             max_score=max_score,
             community_conditions_group=community_conditions_group,
-            mountain_min=mountain_min,
-            mountain_max=mountain_max,
+            mountain_magnitude_min=mountain_magnitude_min,
+            mountain_magnitude_max=mountain_magnitude_max,
             include_unranked=include_unranked,
             sort=sort,
             direction=direction,
@@ -262,8 +275,8 @@ class Store:
         min_score: float | None = None,
         max_score: float | None = None,
         community_conditions_group: int | None = None,
-        mountain_min: float | None = None,
-        mountain_max: float | None = None,
+        mountain_magnitude_min: float | None = None,
+        mountain_magnitude_max: float | None = None,
         include_unranked: bool = False,
         sort: str = "risk_score",
         direction: str = "asc",
@@ -277,8 +290,8 @@ class Store:
             min_score=min_score,
             max_score=max_score,
             community_conditions_group=community_conditions_group,
-            mountain_min=mountain_min,
-            mountain_max=mountain_max,
+            mountain_magnitude_min=mountain_magnitude_min,
+            mountain_magnitude_max=mountain_magnitude_max,
             include_unranked=include_unranked,
             sort=sort,
             direction=direction,
@@ -291,22 +304,22 @@ class Store:
         if table is None:
             raise HouseHunterError("Map level must be tract or county")
         rows = self.connection.execute(
-            f"SELECT place_id, risk_score, community_conditions_group, mountain_score "
+            f"SELECT place_id, risk_score, community_conditions_group, mountain_magnitude "
             f"FROM {table} ORDER BY place_id"
         ).fetchall()
         columns: dict[str, list[Any]] = {
             "place_id": [],
             "risk_score": [],
             "community_conditions_group": [],
-            "mountain_score": [],
+            "mountain_magnitude": [],
         }
-        for place_id, risk_score, group, mountain_score in rows:
+        for place_id, risk_score, group, mountain_magnitude in rows:
             columns["place_id"].append(place_id)
             columns["risk_score"].append(risk_score)
             columns["community_conditions_group"].append(group)
-            columns["mountain_score"].append(mountain_score)
+            columns["mountain_magnitude"].append(mountain_magnitude)
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "build_id": self.metadata["build_id"],
             "level": level,
             "scope": self.metadata["scope"],

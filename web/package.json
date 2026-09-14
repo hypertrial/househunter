@@ -1,7 +1,7 @@
 {
   "name": "househunter-web",
   "private": true,
-  "version": "1.0.0",
+  "version": "2.0.0",
   "type": "module",
   "engines": {
     "node": "^20.19.0 || ^22.13.0 || >=24.0.0"
@@ -10,7 +10,8 @@
     "dev": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "test": "vitest run",
+    "test": "vitest run && npm run test:public-contract",
+    "test:public-contract": "node scripts/check-public-contract.mjs",
     "test:e2e": "playwright test",
     "test:perf": "playwright test -c playwright.performance.config.ts"
   },

@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App, { communityLabel, mapFocusTarget, mapTooltipClass, mountainLabel, scoreBand, scoreLabel, scorePillLabel, sortedHazardPercentiles, STATE_ABBREVIATIONS } from "./App";
 import RiskMap from "./RiskMap";
-import { cameraFromTransform, COMMUNITY_COLOR_SCALE, COMMUNITY_GROUP_COLORS, communityGroupColor, FEMA_COLOR_SCALE, MAP_COLORS, METRIC_COLOR_SCALES, metricColor, MOUNTAIN_COLOR_SCALE, MOUNTAIN_COLORS, mountainColor, readHash, relativeTransform, scoreColor, transformFromCamera } from "./map";
+import { cameraFromTransform, COMMUNITY_COLOR_SCALE, COMMUNITY_GROUP_COLORS, communityGroupColor, COUNTY_MOUNTAIN_COLOR_SCALE, FEMA_COLOR_SCALE, MAP_COLORS, METRIC_COLOR_SCALES, metricColor, metricColorScale, MOUNTAIN_COLOR_SCALE, MOUNTAIN_COLORS, mountainColor, readHash, relativeTransform, scoreColor, transformFromCamera } from "./map";
 import type { HazardPercentile, MapScore, PlaceSummary } from "./types";
 
 const tract: PlaceSummary = {
@@ -10,7 +10,7 @@ const tract: PlaceSummary = {
   population_2020: 0, housing_units_2020: 0, risk_score: 21.25, coverage_status: "complete",
   fema_vintage: "December 2025", census_vintage: "n/a", county_fips: "08013", county_name: "Boulder",
   community_conditions_group: 2, community_conditions_geography: "county", chrr_release_year: 2025,
-  mountain_score: 82.5, mountain_score_version: "mountain_score_v1", mountain_pipeline_version: "mountain_pipeline_v1",
+  mountain_magnitude: 2.3213, mountain_magnitude_version: "mountain_magnitude_v2", mountain_pipeline_version: "mountain_pipeline_v1",
   relief_5km_m: 450, relief_10km_m: 700, relief_20km_m: 1200, relief_40km_m: 1800, relief_20km_pct: 88,
   rugged_fraction_20km: 0.65, rugged_pct: 85, public_mountain_access_raw: 25, public_mountain_access_pct: 75,
   open_mountain_km2_5: 2, open_mountain_km2_15: 7, open_mountain_km2_30: 16,
@@ -43,7 +43,7 @@ function mockFetch(
 ) {
   return vi.fn(async (input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://127.0.0.1");
-    if (url.pathname === "/api/v1/meta") return response({ app_version: "1", mutation_token: "token", reference_assets_ready: true, reference_assets_error: null, map_assets: { ready: true, error: null, schema_version: 1, release: "v1.20", manifest_url: "/map-assets/manifest.json" }, build: build ? { build_id: "fixture", place_count: 1, ranked_place_count: 1, county_count: 1, ranked_county_count: 1, source_vintages: { fema: "December 2025" }, scope: buildScope } : null });
+    if (url.pathname === "/api/v2/meta") return response({ app_version: "2.0.0", mutation_token: "token", reference_assets_ready: true, reference_assets_error: null, map_assets: { ready: true, error: null, schema_version: 1, release: "v1.20", manifest_url: "/map-assets/manifest.json" }, build: build ? { build_id: "fixture", place_count: 1, ranked_place_count: 1, county_count: 1, ranked_county_count: 1, source_vintages: { fema: "December 2025" }, scope: buildScope } : null });
     if (url.pathname === "/map-assets/manifest.json") return response(manifest);
     if (url.pathname.includes("states.hash")) {
       const state = buildScope.state || "CO";
@@ -51,10 +51,10 @@ function mockFetch(
     }
     if (url.pathname.includes("tracts.hash") || url.pathname.includes("tracts-co.hash")) return response(topology(tract.place_id));
     if (url.pathname.includes("counties.hash")) return response(topology(county.place_id));
-    if (url.pathname === "/api/v1/map/scores") return response({ schema_version: 2, build_id: "fixture", level: url.searchParams.get("level"), scope: buildScope, columns: { place_id: [url.searchParams.get("level") === "county" ? county.place_id : tract.place_id], risk_score: [url.searchParams.get("level") === "county" ? county.risk_score : tract.risk_score], community_conditions_group: [2], mountain_score: [82.5] } });
-    if (url.pathname === "/api/v1/places" || url.pathname === "/api/v1/counties") return response({ total: 1, items: [url.pathname.includes("counties") ? county : tract] });
-    if (url.pathname === `/api/v1/places/${tract.place_id}` || url.pathname === `/api/v1/counties/${county.place_id}`) return response({ summary: url.pathname.includes("counties") ? county : tract, total_weighted_housing: 0, coverage_ratio: 1, methodology_notice: "Published FEMA percentile; not property-level risk.", tract_contributions: [], hazard_percentiles: hazards, member_tract_count: url.pathname.includes("counties") ? 12 : null });
-    if (url.pathname === "/api/v1/lookup") return response({ status: "resolved", query: "1 Main", matched_address: "1 MAIN", tract_id: tract.place_id, detail: { summary: tract, total_weighted_housing: 0, coverage_ratio: 1, methodology_notice: "Published FEMA percentile.", tract_contributions: [], hazard_percentiles: hazards, member_tract_count: null }, provider: "census", precision: "house", approximate: false, attribution: null });
+    if (url.pathname === "/api/v2/map/scores") return response({ schema_version: 3, build_id: "fixture", level: url.searchParams.get("level"), scope: buildScope, columns: { place_id: [url.searchParams.get("level") === "county" ? county.place_id : tract.place_id], risk_score: [url.searchParams.get("level") === "county" ? county.risk_score : tract.risk_score], community_conditions_group: [2], mountain_magnitude: [2.3213] } });
+    if (url.pathname === "/api/v2/places" || url.pathname === "/api/v2/counties") return response({ total: 1, items: [url.pathname.includes("counties") ? county : tract] });
+    if (url.pathname === `/api/v2/places/${tract.place_id}` || url.pathname === `/api/v2/counties/${county.place_id}`) return response({ summary: url.pathname.includes("counties") ? county : tract, total_weighted_housing: 0, coverage_ratio: 1, methodology_notice: "Published FEMA percentile; not property-level risk.", tract_contributions: [], hazard_percentiles: hazards, member_tract_count: url.pathname.includes("counties") ? 12 : null });
+    if (url.pathname === "/api/v2/lookup") return response({ status: "resolved", query: "1 Main", matched_address: "1 MAIN", tract_id: tract.place_id, detail: { summary: tract, total_weighted_housing: 0, coverage_ratio: 1, methodology_notice: "Published FEMA percentile.", tract_contributions: [], hazard_percentiles: hazards, member_tract_count: null }, provider: "census", precision: "house", approximate: false, attribution: null });
     return response({});
   });
 }
@@ -134,7 +134,7 @@ class MockWorker {
           try {
             const result = await fetch(init.scoreUrl);
             const body = await result.json() as { schema_version?: number; build_id?: string; level?: string; columns?: { place_id?: string[] } };
-            if (!result.ok || body.schema_version !== 2 || body.build_id !== init.expectedBuildId || body.level !== init.level) {
+            if (!result.ok || body.schema_version !== 3 || body.build_id !== init.expectedBuildId || body.level !== init.level) {
               throw new Error("Map scores do not match the current build");
             }
             this.scoreCount = body.columns?.place_id?.length || 0;
@@ -210,22 +210,32 @@ describe("score semantics", () => {
     expect(sortedHazardPercentiles(values).map((item) => item.code)).toEqual(["WFIR", "AVLN", "TSUN"]);
   });
   it("validates and clamps URL map state", () => {
-    expect(readHash("#level=county&state=co&county=123&place=08013&cx=4&cy=-2&z=99")).toEqual({ level: "county", metric: "fema", state: "", county: "", place: "08013", unranked: false, mountainMin: null, camera: { cx: 1, cy: 0, z: 12 } });
+    expect(readHash("#level=county&state=co&county=123&place=08013&cx=4&cy=-2&z=99")).toEqual({ level: "county", metric: "fema", state: "", county: "", place: "08013", unranked: false, mountainMagnitudeMin: null, camera: { cx: 1, cy: 0, z: 12 } });
     expect(readHash("#level=tract&state=ZZ&county=08013&place=08013012101")).toMatchObject({ state: "", county: "", place: "08013012101" });
     expect(readHash("#level=tract&state=CO&county=01001&place=01001000100")).toMatchObject({ state: "CO", county: "", place: "" });
     expect(readHash("#metric=community-conditions").metric).toBe("community-conditions");
-    expect(readHash("#metric=mountain&mountain_min=80")).toMatchObject({ metric: "mountain", mountainMin: 80 });
+    expect(readHash("#metric=mountain&mountain_magnitude_min=2.3")).toMatchObject({ metric: "mountain", mountainMagnitudeMin: 2.3 });
+    expect(readHash("#metric=mountain&mountain_magnitude_min=100").mountainMagnitudeMin).toBe(100);
+    expect(readHash("#metric=mountain&mountain_magnitude_min=-1").mountainMagnitudeMin).toBeNull();
+    expect(readHash("#metric=mountain&mountain_magnitude_min=Infinity").mountainMagnitudeMin).toBeNull();
     expect(readHash("#metric=quality").metric).toBe("fema");
   });
   it("uses bounded fixed-domain continuous color scales and honest null labels", () => {
     expect(FEMA_COLOR_SCALE).toHaveLength(256);
     expect(MOUNTAIN_COLOR_SCALE).toHaveLength(256);
+    expect(COUNTY_MOUNTAIN_COLOR_SCALE).toHaveLength(256);
     expect(COMMUNITY_COLOR_SCALE).toHaveLength(256);
     expect(METRIC_COLOR_SCALES.fema).toMatchObject({
       minimum: 0, maximum: 100, ticks: [0, 20, 40, 60, 80, 100],
     });
     expect(METRIC_COLOR_SCALES["community-conditions"]).toMatchObject({
       minimum: 1, maximum: 10, ticks: [1, 3, 5, 7, 10],
+    });
+    expect(METRIC_COLOR_SCALES.mountain).toMatchObject({
+      minimum: 0, maximum: 5, ticks: [0, 1, 2, 3, 4, 5],
+    });
+    expect(metricColorScale("mountain", "county")).toMatchObject({
+      minimum: 0, maximum: 4, ticks: [0, 1, 2, 3, 4],
     });
     expect(METRIC_COLOR_SCALES.fema.gradient.match(/#[\da-f]{6}/g)).toHaveLength(256);
     expect(METRIC_COLOR_SCALES["community-conditions"].gradient.match(/#[\da-f]{6}/g))
@@ -242,37 +252,47 @@ describe("score semantics", () => {
     expect(scoreColor(-0.1)).toBeNull();
     expect(scoreColor(100.1)).toBeNull();
     expect(mountainColor(0)).toBe(MOUNTAIN_COLORS.low);
-    expect(mountainColor(25)).toBe(MOUNTAIN_COLORS.below);
-    expect(mountainColor(50)).toBe(MOUNTAIN_COLORS.typical);
-    expect(mountainColor(75)).toBe(MOUNTAIN_COLORS.high);
-    expect(mountainColor(100)).toBe(MOUNTAIN_COLORS.highest);
+    expect(mountainColor(1)).toBe(MOUNTAIN_COLORS.below);
+    expect(mountainColor(2)).toBe(MOUNTAIN_COLORS.typical);
+    expect(mountainColor(3)).toBe(MOUNTAIN_COLORS.high);
+    expect(mountainColor(4)).toBe(MOUNTAIN_COLORS.highest);
+    expect(mountainColor(5)).toBe(MOUNTAIN_COLORS.summit);
+    expect(mountainColor(100)).toBe(MOUNTAIN_COLORS.summit);
+    expect(mountainColor(100, "county")).toBe(MOUNTAIN_COLORS.highest);
+    for (const magnitude of [0, 0.5, 1, 2.3213, 3.9, 4]) {
+      expect(mountainColor(magnitude, "tract")).toBe(mountainColor(magnitude, "county"));
+    }
     expect(COMMUNITY_GROUP_COLORS).toHaveLength(10);
     expect(communityGroupColor(1)).toBe("#7fa87e");
     expect(communityGroupColor(10)).toBe("#b14a3c");
     expect(communityGroupColor(1.5)).toBeNull();
     expect(communityGroupColor(null)).toBeNull();
     expect(communityLabel({ ...county, community_conditions_group: null })).toBe("Not grouped");
-    expect(mountainLabel(tract)).toBe("82.5 /100");
+    expect(mountainLabel(tract)).toBe("M2.32");
   });
   it("interpolates between anchors without recreating former score bands", () => {
     expect(scoreColor(12.5)).toBe("#a2ac64");
     expect(scoreColor(37.5)).toBe("#cbac39");
     for (const boundary of [20, 40, 60, 80]) {
       expect(scoreColor(boundary - 0.1)).not.toBe(scoreColor(boundary + 0.1));
+    }
+    for (const boundary of [1, 2, 3, 4]) {
       expect(mountainColor(boundary - 0.1)).not.toBe(mountainColor(boundary + 0.1));
     }
     const femaColors = new Set(Array.from({ length: 10_001 }, (_, index) => scoreColor(index / 100)));
-    const mountainColors = new Set(Array.from({ length: 10_001 }, (_, index) => mountainColor(index / 100)));
+    const mountainColors = new Set(Array.from({ length: 501 }, (_, index) => mountainColor(index / 100)));
     expect(femaColors.size).toBeGreaterThan(5);
     expect(femaColors.size).toBeLessThanOrEqual(256);
     expect(mountainColors.size).toBeGreaterThan(5);
-    expect(mountainColors.size).toBeLessThanOrEqual(256);
+    expect(mountainColors.size).toBeLessThanOrEqual(501);
   });
   it("rejects every invalid scale value and keeps Community groups on official integer anchors", () => {
-    for (const invalid of [Number.NEGATIVE_INFINITY, Number.POSITIVE_INFINITY, Number.NaN, -0.1, 100.1]) {
+    for (const invalid of [Number.NEGATIVE_INFINITY, Number.POSITIVE_INFINITY, Number.NaN, -0.1]) {
       expect(scoreColor(invalid)).toBeNull();
       expect(mountainColor(invalid)).toBeNull();
     }
+    expect(scoreColor(100.1)).toBeNull();
+    expect(mountainColor(100.1)).toBe(MOUNTAIN_COLORS.summit);
     expect(Array.from({ length: 10 }, (_, index) => communityGroupColor(index + 1)))
       .toEqual(COMMUNITY_GROUP_COLORS);
     for (const invalid of [Number.NEGATIVE_INFINITY, Number.POSITIVE_INFINITY, Number.NaN, 0, 1.5, 11]) {
@@ -284,12 +304,12 @@ describe("score semantics", () => {
       place_id: "08013012101",
       risk_score: 21.25,
       community_conditions_group: 2,
-      mountain_score: 82.5,
+      mountain_magnitude: 2.3213,
     };
     expect(metricColor(row, "fema")).toBe(scoreColor(21.25));
-    expect(metricColor({ ...row, mountain_score: 0 }, "fema")).toBe(scoreColor(21.25));
-    expect(metricColor(row, "mountain")).toBe(mountainColor(82.5));
-    expect(metricColor({ ...row, risk_score: 100 }, "mountain")).toBe(mountainColor(82.5));
+    expect(metricColor({ ...row, mountain_magnitude: 0 }, "fema")).toBe(scoreColor(21.25));
+    expect(metricColor(row, "mountain")).toBe(mountainColor(2.3213));
+    expect(metricColor({ ...row, risk_score: 100 }, "mountain")).toBe(mountainColor(2.3213));
     expect(metricColor(row, "community-conditions")).toBe(communityGroupColor(2));
     expect(metricColor(null, "fema")).toBeNull();
   });
@@ -317,7 +337,7 @@ it("continues zooming from a camera restored from the URL", async () => {
   vi.stubGlobal("fetch", mockFetch());
   const onCamera = vi.fn();
   render(<RiskMap
-    manifestUrl="/map-assets/manifest.json" scoreUrl="/api/v1/map/scores?level=tract" expectedBuildId="fixture" level="tract"
+    manifestUrl="/map-assets/manifest.json" scoreUrl="/api/v2/map/scores?level=tract" expectedBuildId="fixture" level="tract"
     selected="" state="" county="" showUnranked={false} focusTarget={null}
     initialCamera={{ cx: 0.5, cy: 0.5, z: 5 }} onSelect={() => undefined}
     onPreview={() => undefined} onCamera={onCamera} onStatus={() => undefined}
@@ -345,7 +365,7 @@ it("preserves the normalized camera through a responsive resize", async () => {
   vi.stubGlobal("fetch", mockFetch());
   const onCamera = vi.fn();
   render(<RiskMap
-    manifestUrl="/map-assets/manifest.json" scoreUrl="/api/v1/map/scores?level=tract" expectedBuildId="fixture" level="tract"
+    manifestUrl="/map-assets/manifest.json" scoreUrl="/api/v2/map/scores?level=tract" expectedBuildId="fixture" level="tract"
     selected="" state="" county="" showUnranked={false} focusTarget={null}
     initialCamera={{ cx: 0.37, cy: 0.61, z: 2 }} onSelect={() => undefined}
     onPreview={() => undefined} onCamera={onCamera} onStatus={() => undefined}
@@ -371,7 +391,7 @@ it("pans with pointer-only Chrome input without activating a geography", async (
   vi.stubGlobal("fetch", mockFetch());
   const onCamera = vi.fn();
   render(<RiskMap
-    manifestUrl="/map-assets/manifest.json" scoreUrl="/api/v1/map/scores?level=tract"
+    manifestUrl="/map-assets/manifest.json" scoreUrl="/api/v2/map/scores?level=tract"
     expectedBuildId="fixture" level="tract" selected="" state="" county=""
     showUnranked={false} focusTarget={null} initialCamera={{ cx: 0.5, cy: 0.5, z: 2 }}
     onSelect={() => undefined} onPreview={() => undefined} onCamera={onCamera}
@@ -422,7 +442,7 @@ it("ignores a stale score response after changing geography level", async () => 
   const baseFetch = mockFetch();
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://127.0.0.1");
-    if (url.pathname === "/api/v1/map/scores") {
+    if (url.pathname === "/api/v2/map/scores") {
       return url.searchParams.get("level") === "county" ? countyResponse : tractResponse;
     }
     return baseFetch(input);
@@ -430,9 +450,9 @@ it("ignores a stale score response after changing geography level", async () => 
   render(<App />);
   await screen.findByText("HouseHunter");
   fireEvent.click(screen.getByRole("button", { name: "Counties" }));
-  resolveCounty(response({ schema_version: 2, build_id: "fixture", level: "county", scope: { kind: "national", state: null }, columns: { place_id: [county.place_id], risk_score: [county.risk_score], community_conditions_group: [2], mountain_score: [82.5] } }));
-  await waitFor(() => expect(screen.getByTitle("fixture")).toHaveTextContent("county"));
-  await act(async () => resolveTract(response({ schema_version: 2, build_id: "fixture", level: "tract", scope: { kind: "national", state: null }, columns: { place_id: [tract.place_id], risk_score: [tract.risk_score], community_conditions_group: [2], mountain_score: [82.5] } })));
+  resolveCounty(response({ schema_version: 3, build_id: "fixture", level: "county", scope: { kind: "national", state: null }, columns: { place_id: [county.place_id], risk_score: [county.risk_score], community_conditions_group: [2], mountain_magnitude: [2.3213] } }));
+  await waitFor(() => expect(screen.getByTitle("fixture")).toHaveTextContent("counties"));
+  await act(async () => resolveTract(response({ schema_version: 3, build_id: "fixture", level: "tract", scope: { kind: "national", state: null }, columns: { place_id: [tract.place_id], risk_score: [tract.risk_score], community_conditions_group: [2], mountain_magnitude: [2.3213] } })));
   expect(screen.getByTitle("fixture")).not.toHaveTextContent("tracts ready");
   expect(screen.getByRole("button", { name: "Counties" })).toHaveAttribute("aria-pressed", "true");
 });
@@ -445,7 +465,7 @@ it("ignores a stale score failure after the replacement level succeeds", async (
   const baseFetch = mockFetch();
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://127.0.0.1");
-    if (url.pathname === "/api/v1/map/scores") {
+    if (url.pathname === "/api/v2/map/scores") {
       return url.searchParams.get("level") === "county" ? countyResponse : tractResponse;
     }
     return baseFetch(input);
@@ -453,8 +473,8 @@ it("ignores a stale score failure after the replacement level succeeds", async (
   render(<App />);
   await screen.findByText("HouseHunter");
   fireEvent.click(screen.getByRole("button", { name: "Counties" }));
-  resolveCounty(response({ schema_version: 2, build_id: "fixture", level: "county", scope: { kind: "national", state: null }, columns: { place_id: [county.place_id], risk_score: [county.risk_score], community_conditions_group: [2], mountain_score: [82.5] } }));
-  await waitFor(() => expect(screen.getByTitle("fixture")).toHaveTextContent("county"));
+  resolveCounty(response({ schema_version: 3, build_id: "fixture", level: "county", scope: { kind: "national", state: null }, columns: { place_id: [county.place_id], risk_score: [county.risk_score], community_conditions_group: [2], mountain_magnitude: [2.3213] } }));
+  await waitFor(() => expect(screen.getByTitle("fixture")).toHaveTextContent("counties"));
   await act(async () => rejectTract(new Error("obsolete tract request failed")));
   expect(screen.queryByText("Scores could not be loaded")).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Counties" })).toHaveAttribute("aria-pressed", "true");
@@ -466,7 +486,7 @@ it("loads the replacement level after a score failure and marks it busy until in
   const baseFetch = mockFetch();
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://127.0.0.1");
-    if (url.pathname !== "/api/v1/map/scores") return baseFetch(input);
+    if (url.pathname !== "/api/v2/map/scores") return baseFetch(input);
     if (url.searchParams.get("level") === "county") return countyResponse;
     return new Response(JSON.stringify({ detail: "tract scores unavailable" }), {
       status: 503,
@@ -482,7 +502,7 @@ it("loads the replacement level after a score failure and marks it busy until in
   expect(screen.queryByText("Scores could not be loaded")).not.toBeInTheDocument();
 
   resolveCounty(response({
-    schema_version: 2,
+    schema_version: 3,
     build_id: "fixture",
     level: "county",
     scope: { kind: "national", state: null },
@@ -490,11 +510,11 @@ it("loads the replacement level after a score failure and marks it busy until in
       place_id: [county.place_id],
       risk_score: [county.risk_score],
       community_conditions_group: [2],
-      mountain_score: [82.5],
+      mountain_magnitude: [2.3213],
     },
   }));
   await waitFor(() => expect(map).toHaveAttribute("aria-busy", "false"));
-  expect(screen.getByTitle("fixture")).toHaveTextContent("county");
+  expect(screen.getByTitle("fixture")).toHaveTextContent("counties");
 });
 
 it("ignores county options loaded for a previous draft state", async () => {
@@ -505,7 +525,7 @@ it("ignores county options loaded for a previous draft state", async () => {
   const baseFetch = mockFetch();
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://127.0.0.1");
-    if (url.pathname === "/api/v1/counties" && url.searchParams.has("state")) {
+    if (url.pathname === "/api/v2/counties" && url.searchParams.has("state")) {
       return url.searchParams.get("state") === "CO" ? coResponse : alResponse;
     }
     return baseFetch(input);
@@ -531,7 +551,7 @@ it("does not clear current county options when an older state request fails", as
   const baseFetch = mockFetch();
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://127.0.0.1");
-    if (url.pathname === "/api/v1/counties" && url.searchParams.has("state")) {
+    if (url.pathname === "/api/v2/counties" && url.searchParams.has("state")) {
       return url.searchParams.get("state") === "CO" ? coResponse : alResponse;
     }
     return baseFetch(input);
@@ -554,7 +574,7 @@ it("discards address confirmations after the query changes", async () => {
   const baseFetch = mockFetch();
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://127.0.0.1");
-    return url.pathname === "/api/v1/lookup" ? lookup : baseFetch(input);
+    return url.pathname === "/api/v2/lookup" ? lookup : baseFetch(input);
   }));
   render(<App />);
   await screen.findByText("HouseHunter");
@@ -573,7 +593,7 @@ it("discards a resolved address after Search closes", async () => {
   const baseFetch = mockFetch();
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://127.0.0.1");
-    return url.pathname === "/api/v1/lookup" ? lookup : baseFetch(input);
+    return url.pathname === "/api/v2/lookup" ? lookup : baseFetch(input);
   }));
   render(<App />);
   await screen.findByText("HouseHunter");
@@ -592,7 +612,7 @@ it("discards a resolved address after browser history closes Search", async () =
   const baseFetch = mockFetch();
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://127.0.0.1");
-    return url.pathname === "/api/v1/lookup" ? lookup : baseFetch(input);
+    return url.pathname === "/api/v2/lookup" ? lookup : baseFetch(input);
   }));
   render(<App />);
   await screen.findByText("HouseHunter");
@@ -611,7 +631,7 @@ it("does not surface a stale address failure after Search closes", async () => {
   const baseFetch = mockFetch();
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://127.0.0.1");
-    return url.pathname === "/api/v1/lookup" ? lookup : baseFetch(input);
+    return url.pathname === "/api/v2/lookup" ? lookup : baseFetch(input);
   }));
   render(<App />);
   await screen.findByText("HouseHunter");
@@ -644,7 +664,7 @@ it("presents an outline frame without declaring the map visible or accepting pic
   const onVisibleCommit = vi.fn();
   const onInteractiveCommit = vi.fn();
   render(<RiskMap
-    manifestUrl="/map-assets/manifest.json" scoreUrl="/api/v1/map/scores?level=tract"
+    manifestUrl="/map-assets/manifest.json" scoreUrl="/api/v2/map/scores?level=tract"
     expectedBuildId="fixture" level="tract" selected="" state="" county=""
     showUnranked={false} focusTarget={null} initialCamera={{ cx: 0.5, cy: 0.5, z: 1 }}
     onSelect={() => undefined} onPreview={() => undefined} onCamera={() => undefined}
@@ -684,7 +704,7 @@ it("presents an outline frame without declaring the map visible or accepting pic
 it("retries a place focus after a non-interactive outline cannot resolve it", async () => {
   vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>(() => undefined)));
   render(<RiskMap
-    manifestUrl="/map-assets/manifest.json" scoreUrl="/api/v1/map/scores?level=tract"
+    manifestUrl="/map-assets/manifest.json" scoreUrl="/api/v2/map/scores?level=tract"
     expectedBuildId="fixture" level="tract" selected="" state="" county=""
     showUnranked={false} focusTarget={{ kind: "place", id: tract.place_id, nonce: 12 }}
     initialCamera={{ cx: 0.5, cy: 0.5, z: 1 }} onSelect={() => undefined}
@@ -756,7 +776,7 @@ it("closes and negatively acknowledges a stale bitmap without presenting it", as
 it("requests focus once per nonce even when focus itself commits more frames", async () => {
   vi.stubGlobal("fetch", mockFetch());
   render(<RiskMap
-    manifestUrl="/map-assets/manifest.json" scoreUrl="/api/v1/map/scores?level=tract"
+    manifestUrl="/map-assets/manifest.json" scoreUrl="/api/v2/map/scores?level=tract"
     expectedBuildId="fixture" level="tract" selected="" state="" county=""
     showUnranked={false} focusTarget={{ kind: "state", id: "CO", nonce: 9 }}
     initialCamera={{ cx: 0.5, cy: 0.5, z: 1 }} onSelect={() => undefined}
@@ -800,10 +820,10 @@ it("renders the map as the only primary UI with all retained controls", async ()
   const exports = screen.getByRole("navigation", { name: "Exports" });
   expect(screen.getByRole("button", { name: "More" })).toHaveAttribute("aria-expanded", "true");
   expect(screen.getByRole("button", { name: "More" })).toHaveAttribute("aria-controls", "exports-panel");
-  expect(within(exports).getByRole("link", { name: "Tracts CSV" })).toHaveAttribute("href", "/api/v1/exports/places.csv");
-  expect(within(exports).getByRole("link", { name: "Tracts Parquet" })).toHaveAttribute("href", "/api/v1/exports/places.parquet");
-  expect(within(exports).getByRole("link", { name: "Counties CSV" })).toHaveAttribute("href", "/api/v1/exports/counties.csv");
-  expect(within(exports).getByRole("link", { name: "Counties Parquet" })).toHaveAttribute("href", "/api/v1/exports/counties.parquet");
+  expect(within(exports).getByRole("link", { name: "Tracts CSV" })).toHaveAttribute("href", "/api/v2/exports/places.csv");
+  expect(within(exports).getByRole("link", { name: "Tracts Parquet" })).toHaveAttribute("href", "/api/v2/exports/places.parquet");
+  expect(within(exports).getByRole("link", { name: "Counties CSV" })).toHaveAttribute("href", "/api/v2/exports/counties.csv");
+  expect(within(exports).getByRole("link", { name: "Counties Parquet" })).toHaveAttribute("href", "/api/v2/exports/counties.parquet");
   const legend = screen.getByLabelText("Continuous score color scale, lower is better");
   expect(legend).toHaveTextContent("not property-level risk");
   expect(legend.querySelector(".legend-gradient")).toHaveStyle({
@@ -828,19 +848,19 @@ it("keeps the committed legend and accessible map description aligned during met
   await screen.findAllByText("1 tracts interactive", {}, { timeout: 3000 });
   const canvas = screen.getByRole("img", { name: /focusable USA tract risk map/i });
 
-  fireEvent.click(screen.getByRole("button", { name: "Mountain Score" }));
+  fireEvent.click(screen.getByRole("button", { name: "Mountain Magnitude" }));
 
-  expect(screen.getByText("Updating Mountain Score map…")).toBeVisible();
+  expect(screen.getByText("Updating Mountain Magnitude map…")).toBeVisible();
   expect(canvas).toHaveAttribute("aria-busy", "true");
   expect(canvas).toHaveAccessibleName(/tract risk map/i);
   expect(screen.getByLabelText("Continuous score color scale, lower is better")).toBeVisible();
-  expect(screen.queryByLabelText(/Continuous Mountain Score color scale/)).not.toBeInTheDocument();
+  expect(screen.queryByLabelText(/Continuous Mountain Magnitude color scale/)).not.toBeInTheDocument();
 
   expect(await screen.findByLabelText(
-    "Continuous Mountain Score color scale, higher means more mountain characteristics",
+    "Continuous Mountain Magnitude color scale for U.S. tracts, higher means fewer equal-or-higher peers",
   )).toBeVisible();
   await waitFor(() => expect(canvas).toHaveAttribute("aria-busy", "false"));
-  expect(canvas).toHaveAccessibleName(/tract Mountain Score map/i);
+  expect(canvas).toHaveAccessibleName(/tract Mountain Magnitude map/i);
   expect(document.querySelector(".map-updating")).not.toBeInTheDocument();
 });
 
@@ -850,7 +870,7 @@ it("commits only the final metric after rapid successive map changes", async () 
   await screen.findAllByText("1 tracts interactive", {}, { timeout: 3000 });
   const canvas = screen.getByRole("img", { name: /focusable USA tract risk map/i });
 
-  fireEvent.click(screen.getByRole("button", { name: "Mountain Score" }));
+  fireEvent.click(screen.getByRole("button", { name: "Mountain Magnitude" }));
   fireEvent.click(screen.getByRole("button", { name: "Community Conditions" }));
 
   expect(canvas).toHaveAttribute("aria-busy", "true");
@@ -861,7 +881,7 @@ it("commits only the final metric after rapid successive map changes", async () 
   expect(finalLegend).toBeVisible();
   await waitFor(() => expect(canvas).toHaveAttribute("aria-busy", "false"));
   expect(canvas).toHaveAccessibleName(/tract Community Conditions map/i);
-  expect(screen.queryByLabelText(/Continuous Mountain Score color scale/)).not.toBeInTheDocument();
+  expect(screen.queryByLabelText(/Continuous Mountain Magnitude color scale/)).not.toBeInTheDocument();
   expect(screen.queryByText(/Updating .* map…/)).not.toBeInTheDocument();
 });
 
@@ -871,13 +891,13 @@ it("finishes a metric transition when active filters leave no interactive geogra
   await screen.findAllByText("1 tracts interactive", {}, { timeout: 3000 });
 
   fireEvent.click(screen.getByRole("button", { name: "Filters" }));
-  fireEvent.change(screen.getByLabelText("Minimum Mountain Score"), { target: { value: "100" } });
+  fireEvent.change(screen.getByLabelText("Minimum Mountain Magnitude"), { target: { value: "100" } });
   fireEvent.click(screen.getByRole("button", { name: "Apply" }));
-  fireEvent.click(screen.getByRole("button", { name: "Mountain Score" }));
+  fireEvent.click(screen.getByRole("button", { name: "Mountain Magnitude" }));
 
   const canvas = screen.getByRole("img", { name: /focusable USA tract/i });
   expect(await screen.findByLabelText(
-    "Continuous Mountain Score color scale, higher means more mountain characteristics",
+    "Continuous Mountain Magnitude color scale for U.S. tracts, higher means fewer equal-or-higher peers",
   )).toBeVisible();
   await waitFor(() => expect(canvas).toHaveAttribute("aria-busy", "false"));
   expect(document.querySelector(".map-updating")).not.toBeInTheDocument();
@@ -900,7 +920,7 @@ it("reports effective filters and does not expose an ineffective Community check
   expect(screen.getByText("Not-grouped geographies always remain visible on this layer.")).toBeVisible();
   fireEvent.click(screen.getByRole("button", { name: "Filters" }));
 
-  fireEvent.click(screen.getByRole("button", { name: "Mountain Score" }));
+  fireEvent.click(screen.getByRole("button", { name: "Mountain Magnitude" }));
   expect(screen.getByRole("button", { name: "Filters · On" })).toBeVisible();
   fireEvent.click(screen.getByRole("button", { name: "Filters · On" }));
   expect(screen.getByRole("checkbox", { name: "Show Mountain-unavailable geographies" }))
@@ -913,7 +933,7 @@ it("shows fresh loading feedback and does not refetch when closing extremes", as
   const extremeStates: Array<string | null> = [];
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://127.0.0.1");
-    if (url.pathname === "/api/v1/places" && url.searchParams.get("sort") === "risk_score") {
+    if (url.pathname === "/api/v2/places" && url.searchParams.get("sort") === "risk_score") {
       extremeRequests += 1;
       extremeStates.push(url.searchParams.get("state"));
       return new Promise<Response>(() => undefined);
@@ -974,7 +994,7 @@ it("shows an empty Community Conditions range for an ungrouped territory", async
   const baseFetch = mockFetch();
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://127.0.0.1");
-    if (url.pathname === "/api/v1/counties" && url.searchParams.get("sort") === "community_conditions_group") {
+    if (url.pathname === "/api/v2/counties" && url.searchParams.get("sort") === "community_conditions_group") {
       return Promise.resolve(response({
         total: 1,
         items: [{ ...county, place_id: "72001", state: "PR", community_conditions_group: null }],
@@ -993,42 +1013,67 @@ it("shows an empty Community Conditions range for an ungrouped territory", async
   expect(within(panel).queryByText(/Group null/)).not.toBeInTheDocument();
 });
 
-it("maps and filters Mountain Score with an honest expandable breakdown", async () => {
+it("maps and filters Mountain Magnitude with an honest expandable breakdown", async () => {
   vi.stubGlobal("fetch", mockFetch());
   render(<App />);
   await screen.findByText("HouseHunter");
 
-  fireEvent.click(screen.getByRole("button", { name: "Mountain Score" }));
+  fireEvent.click(screen.getByRole("button", { name: "Mountain Magnitude" }));
   const legend = await screen.findByLabelText(
-    "Continuous Mountain Score color scale, higher means more mountain characteristics",
+    "Continuous Mountain Magnitude color scale for U.S. tracts, higher means fewer equal-or-higher peers",
   );
   expect(legend).toBeVisible();
   expect(within(legend).getByRole("img", {
-    name: "Mountain Score continuous color ramp from 0 to 100",
+    name: "Mountain Magnitude continuous color ramp from M0 to M5 for U.S. tracts",
   })).toBeVisible();
-  for (const tick of ["0", "20", "40", "60", "80", "100"]) {
+  for (const tick of ["0", "1", "2", "3", "4", "5"]) {
     expect(within(legend).getByText(tick)).toBeVisible();
   }
   expect(within(legend).getByText("Unavailable")).toBeVisible();
   expect(legend.querySelector(".missing-key .hatched")).toHaveAttribute("aria-hidden", "true");
   fireEvent.click(screen.getByRole("button", { name: /^Filters/ }));
-  fireEvent.change(screen.getByLabelText("Minimum Mountain Score"), { target: { value: "80" } });
+  fireEvent.change(screen.getByLabelText("Minimum Mountain Magnitude"), { target: { value: "2.3" } });
   fireEvent.click(screen.getByRole("button", { name: "Apply" }));
-  await waitFor(() => expect(window.location.hash).toContain("mountain_min=80"));
+  await waitFor(() => expect(window.location.hash).toContain("mountain_magnitude_min=2.3"));
 
   fireEvent.click(screen.getByRole("button", { name: "Search" }));
   fireEvent.change(screen.getByLabelText("Street address"), { target: { value: "1 Main St, Boulder, CO" } });
   fireEvent.click(screen.getByRole("button", { name: "Find tract" }));
   const drawer = await screen.findByRole("dialog", { name: "Tract detail" });
-  expect(await within(drawer).findByLabelText("Mountain Score")).toHaveClass("active");
+  expect(await within(drawer).findByLabelText("Mountain Magnitude")).toHaveClass("active");
   expect(within(drawer).getByLabelText("FEMA risk").querySelector(":scope > span"))
     .toHaveStyle({ color: scoreColor(tract.risk_score)! });
   const wildfire = within(drawer).getByText("Wildfire").closest(".contribution");
   expect(wildfire?.querySelector(".bar i"))
     .toHaveStyle({ backgroundColor: scoreColor(hazards[0].percentile)! });
-  fireEvent.click(within(drawer).getByText("Mountain Score breakdown"));
+  fireEvent.click(within(drawer).getByText("Mountain Magnitude breakdown"));
   expect(within(drawer).getByText(/property-specific views/)).toBeVisible();
   expect(within(drawer).getByText(/1,200 m/)).toBeVisible();
+});
+
+it("uses grain-specific magnitude legends without changing shared decade colors", async () => {
+  vi.stubGlobal("fetch", mockFetch());
+  render(<App />);
+  await screen.findByText("HouseHunter");
+
+  fireEvent.click(screen.getByRole("button", { name: "Mountain Magnitude" }));
+  const tractLegend = await screen.findByLabelText(
+    "Continuous Mountain Magnitude color scale for U.S. tracts, higher means fewer equal-or-higher peers",
+  );
+  expect(within(tractLegend).getByRole("img", {
+    name: "Mountain Magnitude continuous color ramp from M0 to M5 for U.S. tracts",
+  })).toBeVisible();
+  expect(within(tractLegend).getByText("5")).toBeVisible();
+
+  fireEvent.click(screen.getByRole("button", { name: "Counties" }));
+  const countyLegend = await screen.findByLabelText(
+    "Continuous Mountain Magnitude color scale for U.S. counties, higher means fewer equal-or-higher peers",
+  );
+  expect(within(countyLegend).getByRole("img", {
+    name: "Mountain Magnitude continuous color ramp from M0 to M4 for U.S. counties",
+  })).toBeVisible();
+  expect(within(countyLegend).queryByText("5")).not.toBeInTheDocument();
+  expect(countyLegend).toHaveTextContent("not comparable across grains");
 });
 
 it("discards a stale Community Conditions page after returning to group summaries", async () => {
@@ -1036,7 +1081,7 @@ it("discards a stale Community Conditions page after returning to group summarie
   let resolveNext: ((response: Response) => void) | undefined;
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://127.0.0.1");
-    if (url.pathname === "/api/v1/counties" && url.searchParams.get("limit") === "50") {
+    if (url.pathname === "/api/v2/counties" && url.searchParams.get("limit") === "50") {
       if (url.searchParams.get("offset") === "50") {
         return new Promise<Response>((resolve) => { resolveNext = resolve; });
       }

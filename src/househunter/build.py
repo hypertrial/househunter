@@ -12,7 +12,13 @@ import duckdb
 import polars as pl
 
 from .chrr import build_processed
-from .config import RuntimePaths, canonical_json, load_config, sha256_bytes, sha256_file
+from .config import (
+    RuntimePaths,
+    atomic_write_json,
+    canonical_json,
+    load_config,
+    sha256_bytes,
+)
 from .contracts import COUNTY_METHODOLOGY_NOTICE, METHODOLOGY_NOTICE
 from .download import validate_cached_fema, validate_cached_fema_counties
 from .errors import HouseHunterError
@@ -28,7 +34,7 @@ from .hazards import HAZARD_COLUMNS, with_hazard_columns
 Progress = Callable[[int, str], None]
 Cancelled = Callable[[], bool]
 
-BUILD_SCHEMA_VERSION = 8
+BUILD_SCHEMA_VERSION = 9
 MOUNTAIN_RUNTIME_GEOGRAPHY_VERSION = "mountain_runtime_geography_v1"
 _CONNECTICUT_UNMATCHED_ZERO_POPULATION_TRACTS = frozenset(
     {"09001990000", "09007990100", "09009990000", "09011990100"}
@@ -41,6 +47,7 @@ _SNAPSHOT_FILES = (
     "chrr_county.parquet",
     "househunter.duckdb",
 )
+_CURRENT_MOUNTAIN = object()
 
 
 def logical_checksum(frame: pl.DataFrame, columns: list[str], sort_by: list[str]) -> str:
@@ -66,12 +73,12 @@ def _county_display_expr() -> pl.Expr:
     )
 
 
-def _attach_mountain_scores(
+def _attach_mountain_release(
     places: pl.DataFrame,
     counties: pl.DataFrame,
-    paths: RuntimePaths,
+    current: tuple[Path, dict[str, object], pl.DataFrame, pl.DataFrame] | None,
 ) -> tuple[pl.DataFrame, pl.DataFrame, dict[str, str]]:
-    from .mountain import AGGREGATE_MEANS, IN_SCOPE_STATES, current_compact_release
+    from .mountain import AGGREGATE_MEANS, IN_SCOPE_STATES
 
     def unavailable_status() -> pl.Expr:
         return (
@@ -81,12 +88,14 @@ def _attach_mountain_scores(
             .alias("mountain_coverage_status")
         )
 
-    current = current_compact_release(paths)
     if current is None:
-        numeric = [pl.lit(None, dtype=pl.Float64).alias(column) for column in AGGREGATE_MEANS]
+        numeric = [
+            pl.lit(None, dtype=pl.Float64).alias(column)
+            for column in [*AGGREGATE_MEANS, "mountain_magnitude"]
+        ]
         missing = [
             *numeric,
-            pl.lit(None, dtype=pl.String).alias("mountain_score_version"),
+            pl.lit(None, dtype=pl.String).alias("mountain_magnitude_version"),
             pl.lit(None, dtype=pl.String).alias("mountain_pipeline_version"),
             pl.lit(0.0).alias("mountain_population_coverage"),
         ]
@@ -96,14 +105,13 @@ def _attach_mountain_scores(
             {
                 "checksum": sha256_bytes(b"unavailable"),
                 "data_release": "unavailable",
-                "score_version": "unavailable",
+                "magnitude_version": "unavailable",
+                "release_id": "unavailable",
             },
         )
     release, manifest, mountain_tracts, mountain_counties = current
 
-    def reconcile_connecticut_tracts(
-        frame: pl.DataFrame, mountain: pl.DataFrame
-    ) -> pl.DataFrame:
+    def reconcile_connecticut_tracts(frame: pl.DataFrame, mountain: pl.DataFrame) -> pl.DataFrame:
         targets = frame.filter(pl.col("state") == "CT").select(
             pl.col("place_id").alias("_target_id"),
             pl.col("place_id").str.slice(-6).alias("_tract_code"),
@@ -128,7 +136,7 @@ def _attach_mountain_scores(
                 | (pl.col("mountain_coverage_status") != "zero_population")
                 | pl.col("mountain_population_coverage").is_null()
                 | (pl.col("mountain_population_coverage") != 0)
-                | pl.col("mountain_score").is_not_null()
+                | pl.col("mountain_magnitude").is_not_null()
             ).height
         ):
             raise HouseHunterError("Mountain Connecticut tract exceptions differ")
@@ -180,11 +188,22 @@ def _attach_mountain_scores(
         attach(places, mountain_tracts, reconcile_ct=True),
         attach(counties, mountain_counties, allow_missing_states=frozenset({"CT"})),
         {
-            "checksum": sha256_file(release / "manifest.json"),
+            "checksum": sha256_bytes(str(manifest["release_id"]).encode()),
             "data_release": str(manifest["data_release"]),
-            "score_version": str(manifest["score_version"]),
+            "magnitude_version": str(manifest["magnitude_version"]),
+            "release_id": str(manifest["release_id"]),
         },
     )
+
+
+def _attach_current_mountain(
+    places: pl.DataFrame,
+    counties: pl.DataFrame,
+    paths: RuntimePaths,
+) -> tuple[pl.DataFrame, pl.DataFrame, dict[str, str]]:
+    from .mountain import current_compact_release
+
+    return _attach_mountain_release(places, counties, current_compact_release(paths))
 
 
 def compute_scores(
@@ -393,6 +412,18 @@ def _validate_snapshot_artifacts(target: Path) -> bool:
         return False
     if metadata.get("schema_version") != BUILD_SCHEMA_VERSION:
         return False
+    if not isinstance(metadata.get("mountain_release_id"), str) or not isinstance(
+        metadata.get("mountain_magnitude_version"), str
+    ):
+        return False
+    for frame in (places, counties):
+        if (
+            "mountain_magnitude" not in frame.columns
+            or "mountain_magnitude_version" not in frame.columns
+            or "mountain_score" in frame.columns
+            or "mountain_score_version" in frame.columns
+        ):
+            return False
     if metadata.get("place_count") != places.height:
         return False
     if metadata.get("county_count") != counties.height:
@@ -429,9 +460,12 @@ def _validate_snapshot_artifacts(target: Path) -> bool:
                 ("chrr_county", "chrr_county.parquet"),
             ):
                 parquet = str(target / filename)
-                if connection.execute(f"DESCRIBE {table}").fetchall() != connection.execute(
-                    "DESCRIBE SELECT * FROM read_parquet(?)", [parquet]
-                ).fetchall():
+                if (
+                    connection.execute(f"DESCRIBE {table}").fetchall()
+                    != connection.execute(
+                        "DESCRIBE SELECT * FROM read_parquet(?)", [parquet]
+                    ).fetchall()
+                ):
                     return False
                 differs = connection.execute(
                     f"SELECT EXISTS ("
@@ -496,9 +530,15 @@ def build_snapshot(
     state: str | None = None,
     progress: Progress | None = None,
     cancelled: Cancelled | None = None,
+    mountain_release: tuple[Path, dict[str, object], pl.DataFrame, pl.DataFrame]
+    | None
+    | object = _CURRENT_MOUNTAIN,
+    publish: bool = True,
 ) -> Path:
     from .mountain import current_compact_release
 
+    if paths.builds.is_symlink():
+        raise HouseHunterError("Build directory cannot be a symlink")
     paths.ensure()
     state = state.upper() if state else None
     if state and state not in KNOWN_STATES:
@@ -529,23 +569,29 @@ def build_snapshot(
         "chrr_release_year": chrr_source["release_year"],
         "mountain_runtime_geography": MOUNTAIN_RUNTIME_GEOGRAPHY_VERSION,
     }
-    mountain_release = current_compact_release(paths)
+    if mountain_release is _CURRENT_MOUNTAIN:
+        mountain_release = current_compact_release(paths)
+    if mountain_release is not None and not isinstance(mountain_release, tuple):
+        raise HouseHunterError("Explicit Mountain release is invalid")
     if mountain_release is None:
         mountain_identity = {
             "checksum": sha256_bytes(b"unavailable"),
             "data_release": "unavailable",
-            "score_version": "unavailable",
+            "magnitude_version": "unavailable",
+            "release_id": "unavailable",
         }
     else:
         mountain_path, mountain_manifest, _, _ = mountain_release
         mountain_identity = {
-            "checksum": sha256_file(mountain_path / "manifest.json"),
+            "checksum": sha256_bytes(str(mountain_manifest["release_id"]).encode()),
             "data_release": str(mountain_manifest["data_release"]),
-            "score_version": str(mountain_manifest["score_version"]),
+            "magnitude_version": str(mountain_manifest["magnitude_version"]),
+            "release_id": str(mountain_manifest["release_id"]),
         }
     input_hashes["mountain"] = mountain_identity["checksum"]
     source_vintages["mountain"] = mountain_identity["data_release"]
-    source_vintages["mountain_score"] = mountain_identity["score_version"]
+    source_vintages["mountain_magnitude"] = mountain_identity["magnitude_version"]
+    source_vintages["mountain_release_id"] = mountain_identity["release_id"]
     scope = state or "national"
     build_key = sha256_bytes(
         canonical_json(
@@ -564,7 +610,8 @@ def build_snapshot(
             raise HouseHunterError(
                 f"Existing immutable build failed validation: {target}; move it aside and rebuild"
             )
-        _publish_current(paths, target, build_id, scope)
+        if publish:
+            _publish_current(paths, target, build_id, scope)
         if progress:
             progress(100, "Using verified existing build")
         return target
@@ -577,7 +624,9 @@ def build_snapshot(
         fema_vintage=source["version"],
         chrr_release_year=chrr_source["release_year"],
     )
-    scored, county_scored, attached_mountain = _attach_mountain_scores(scored, county_scored, paths)
+    scored, county_scored, attached_mountain = _attach_mountain_release(
+        scored, county_scored, mountain_release
+    )
     if attached_mountain != mountain_identity:
         raise HouseHunterError("Mountain release changed during snapshot build")
     if state:
@@ -627,6 +676,8 @@ def build_snapshot(
         "logical_checksums": checksums,
         "methodology_notice": METHODOLOGY_NOTICE,
         "county_methodology_notice": COUNTY_METHODOLOGY_NOTICE,
+        "mountain_release_id": mountain_identity["release_id"],
+        "mountain_magnitude_version": mountain_identity["magnitude_version"],
     }
     temporary = paths.builds / f".{build_id}.{os.getpid()}.tmp"
     if temporary.exists():
@@ -658,7 +709,8 @@ def build_snapshot(
         if temporary.exists():
             shutil.rmtree(temporary)
         raise
-    _publish_current(paths, target, build_id, scope)
+    if publish:
+        _publish_current(paths, target, build_id, scope)
     if progress:
         progress(100, "Build published")
     return target
@@ -671,6 +723,26 @@ def _publish_current(paths: RuntimePaths, target: Path, build_id: str, scope: st
         "scope": scope,
         "path": str(target),
     }
-    temporary = paths.current.with_suffix(".json.tmp")
-    temporary.write_text(json.dumps(pointer, indent=2, sort_keys=True) + "\n")
-    os.replace(temporary, paths.current)
+    atomic_write_json(paths.current, pointer)
+
+
+def publish_snapshot(paths: RuntimePaths, target: Path) -> None:
+    """Validate and atomically publish an already staged schema-9 snapshot."""
+    if (
+        paths.builds.is_symlink()
+        or target.is_symlink()
+        or not target.resolve().is_relative_to(paths.builds.resolve())
+    ):
+        raise HouseHunterError("Mountain migration snapshot escapes the build directory")
+    if not snapshot_artifacts_are_valid(target):
+        raise HouseHunterError("Mountain migration snapshot failed validation")
+    try:
+        metadata = json.loads((target / "build.json").read_text())
+        build_id = str(metadata["build_id"])
+        scope_payload = metadata["scope"]
+        scope = str(scope_payload["state"] or "national")
+    except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise HouseHunterError(f"Mountain migration snapshot metadata is invalid: {exc}") from exc
+    if metadata.get("schema_version") != BUILD_SCHEMA_VERSION or target.name != build_id:
+        raise HouseHunterError("Mountain migration snapshot identity is invalid")
+    _publish_current(paths, target, build_id, scope)

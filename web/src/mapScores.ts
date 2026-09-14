@@ -10,7 +10,7 @@ export function decodeMapScores(
 ): MapScores {
   if (!value || typeof value !== "object") throw new Error("Map score schema is invalid");
   const payload = value as Partial<MapScores>;
-  if (payload.schema_version !== 2 || !payload.columns) {
+  if (payload.schema_version !== 3 || !payload.columns) {
     throw new Error("Map score schema is unsupported");
   }
   if (payload.build_id !== expectedBuildId) throw new Error("Map score build is stale");
@@ -23,11 +23,11 @@ export function decodeMapScores(
       && /^[A-Z]{2}$/.test(scope.state))
   );
   if (!validScope) throw new Error("Map score scope is invalid");
-  const { place_id, risk_score, community_conditions_group, mountain_score } = payload.columns;
-  if (![place_id, risk_score, community_conditions_group, mountain_score].every(Array.isArray)) {
+  const { place_id, risk_score, community_conditions_group, mountain_magnitude } = payload.columns;
+  if (![place_id, risk_score, community_conditions_group, mountain_magnitude].every(Array.isArray)) {
     throw new Error("Map score columns are invalid");
   }
-  if (new Set([place_id.length, risk_score.length, community_conditions_group.length, mountain_score.length]).size !== 1) {
+  if (new Set([place_id.length, risk_score.length, community_conditions_group.length, mountain_magnitude.length]).size !== 1) {
     throw new Error("Map score column length mismatch");
   }
   for (let index = 0; index < place_id.length; index += 1) {
@@ -37,7 +37,9 @@ export function decodeMapScores(
         ? "Map score place IDs must be unique"
         : "Map score place IDs must be ordered");
     }
-    if (!numberOrNull(risk_score[index]) || !numberOrNull(mountain_score[index])) {
+    const magnitude = mountain_magnitude[index];
+    if (!numberOrNull(risk_score[index]) || !numberOrNull(magnitude)
+      || (magnitude !== null && magnitude < 0)) {
       throw new Error("Map score value is invalid");
     }
     const group = community_conditions_group[index];

@@ -720,18 +720,18 @@ def test_local_population_gate_at_90_percent(
     scored = score_blocks(_raw_blocks(populations), minimum_coverage=0).with_columns(
         pl.when(pl.int_range(pl.len()) == 1)
         .then(pl.lit(None, dtype=pl.Float64))
-        .otherwise(pl.col("mountain_score"))
-        .alias("mountain_score")
+        .otherwise(pl.col("relief_20km_pct"))
+        .alias("relief_20km_pct")
     )
 
     aggregate = aggregate_scores(scored, "tract_geoid").row(0, named=True)
 
     assert aggregate["mountain_population_coverage"] == populations[0] / sum(populations)
     assert aggregate["mountain_coverage_status"] == status
-    assert (aggregate["mountain_score"] is not None) is available
+    assert (aggregate["mountain_magnitude"] is not None) is available
 
 
-def test_zero_population_group_never_publishes_extreme_score() -> None:
+def test_zero_population_group_never_publishes_extreme_magnitude() -> None:
     raw = _raw_blocks([1, 0], component_values=[1.0, 9_999.0]).with_columns(
         pl.when(pl.int_range(pl.len()) == 1)
         .then(pl.lit("010010002001001"))
@@ -752,7 +752,7 @@ def test_zero_population_group_never_publishes_extreme_score() -> None:
 
     assert aggregate["mountain_population_coverage"] == 0
     assert aggregate["mountain_coverage_status"] == "zero_population"
-    assert aggregate["mountain_score"] is None
+    assert aggregate["mountain_magnitude"] is None
 
 
 def test_distance_and_window_threshold_boundaries() -> None:

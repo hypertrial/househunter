@@ -92,6 +92,10 @@ def fixture_environment(
     config_path.write_text(yaml.safe_dump(config))
     monkeypatch.setenv("HOUSEHUNTER_CONFIG", str(config_path))
     monkeypatch.setenv("HOUSEHUNTER_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr(
+        "househunter.mountain.BUNDLED_COMPACT_RELEASE",
+        tmp_path / "no-synthetic-mountain-bundle",
+    )
     paths = RuntimePaths.from_root(tmp_path)
     paths.ensure()
     chrr_raw = paths.raw / "chrr" / "community_conditions_2025.json"

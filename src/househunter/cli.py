@@ -26,7 +26,9 @@ from .store import Store
 
 app = typer.Typer(no_args_is_help=True, pretty_exceptions_show_locals=False)
 mountain_app = typer.Typer(no_args_is_help=True, pretty_exceptions_show_locals=False)
-app.add_typer(mountain_app, name="mountain", help="Build and inspect Mountain Score releases.")
+app.add_typer(
+    mountain_app, name="mountain", help="Build and inspect Mountain Magnitude releases."
+)
 
 
 def _paths() -> RuntimePaths:
@@ -174,9 +176,8 @@ def mountain_build(
     resume: Annotated[bool, typer.Option("--resume/--fresh")] = True,
     output: Annotated[Path | None, typer.Option("--output")] = None,
     promote: Annotated[bool, typer.Option("--promote/--no-promote")] = True,
-    allow_partial: Annotated[bool, typer.Option("--allow-partial")] = False,
 ) -> None:
-    """Build, validate, and optionally promote a Mountain Score release."""
+    """Build, validate, and optionally promote a Mountain Magnitude release."""
     import polars as pl
 
     from .mountain import (
@@ -213,12 +214,8 @@ def mountain_build(
         _abort(HouseHunterError("--prepared-pack and --prepared-lock must be provided together"))
     if prepared_pack and source_lock is None:
         _abort(HouseHunterError("National prepared builds require --source-lock"))
-    if prepared_pack and allow_partial:
-        _abort(HouseHunterError("Prepared Mountain builds must satisfy the national contract"))
     if prepared_pack and promote and output is not None:
         _abort(HouseHunterError("Prepared promoted builds write directly to managed releases"))
-    if allow_partial and promote:
-        _abort(HouseHunterError("Partial Mountain builds cannot be promoted"))
     paths = _paths()
     try:
         release_slug = _release_slug(data_release)
@@ -252,7 +249,7 @@ def mountain_build(
                     "source_lock_sha256": sha256_file(resolved_lock),
                     "items": [source_provenance_item(item) for item in lock["sources"]],
                 }
-                if not allow_partial and lock.get("schema_version") != 2:
+                if lock.get("schema_version") != 2:
                     raise HouseHunterError("National Mountain builds require source-lock v2")
                 if regions and lock.get("trail_fragment_mode") == "state_clipped_globalid_v1":
                     raise HouseHunterError(
@@ -319,7 +316,7 @@ def mountain_build(
                 }
             elif raw_blocks:
                 raw_path = raw_blocks.expanduser().resolve()
-                if not allow_partial and lock is None:
+                if lock is None:
                     raise HouseHunterError("National raw-block builds require --source-lock")
                 if lock is not None and raw_path not in locked_source_paths(
                     lock, root=source_root.expanduser().resolve() if source_root else None
@@ -345,7 +342,7 @@ def mountain_build(
                 blocks = pl.concat(regional)
             if not prepared_pack:
                 expectations: dict[str, object] | None = None
-            if not allow_partial and not prepared_pack:
+            if not prepared_pack:
                 expectations = lock.get("expected_states") if lock else None
                 if not isinstance(expectations, dict):
                     raise HouseHunterError(
@@ -678,6 +675,27 @@ def mountain_bundle(
         _abort(HouseHunterError(str(exc)))
 
 
+@mountain_app.command("rescore-v1")
+def mountain_rescore_v1(
+    source_lock: Annotated[
+        Path,
+        typer.Option("--source-lock", exists=True, dir_okay=False),
+    ] = Path("config/mountain/source-lock-v2.json"),
+) -> None:
+    """Offline migration of the active full v1 release to Mountain Magnitude v2."""
+    from .mountain_migration import rescore_v1_release
+
+    paths = _paths()
+    try:
+        with exclusive_lock(paths.job_lock):
+            report = rescore_v1_release(
+                paths, source_lock.expanduser().resolve(), progress=_progress
+            )
+        typer.echo(json.dumps(report, indent=2, sort_keys=True))
+    except (HouseHunterError, OSError) as exc:
+        _abort(HouseHunterError(str(exc)))
+
+
 @mountain_app.command("inspect")
 def mountain_inspect(
     geoid: str,
@@ -707,6 +725,7 @@ def mountain_inspect(
         )
         if row.height != 1:
             raise HouseHunterError(f"Mountain GEOID not found: {geoid}")
+        row = row.drop("mountain_score", "mountain_score_version", strict=False)
         typer.echo(json.dumps(row.row(0, named=True), indent=2, sort_keys=True))
     except (HouseHunterError, OSError, KeyError, json.JSONDecodeError) as exc:
         _abort(HouseHunterError(str(exc)))
@@ -793,14 +812,16 @@ def rank(
     level: Annotated[str, typer.Option("--level", help="tract or county")] = "tract",
     limit: Annotated[int, typer.Option("--limit", min=1, max=500)] = 25,
     include_unranked: Annotated[bool, typer.Option("--include-unranked")] = False,
-    mountain_min: Annotated[float | None, typer.Option("--mountain-min", min=0, max=100)] = None,
+    mountain_magnitude_min: Annotated[
+        float | None, typer.Option("--mountain-magnitude-min", min=0)
+    ] = None,
     metric: Annotated[
         str,
         typer.Option("--metric", help="risk, community-conditions, or mountain"),
     ] = "risk",
     order: Annotated[str, typer.Option("--order", help="best or worst")] = "best",
 ) -> None:
-    """Rank geographies by FEMA risk, Community Conditions, or Mountain Score."""
+    """Rank geographies by FEMA risk, Community Conditions, or Mountain Magnitude."""
     selected = level.lower()
     if selected not in {"tract", "county"}:
         _abort(HouseHunterError("Rank level must be tract or county"))
@@ -815,7 +836,7 @@ def rank(
     sort = {
         "risk": "risk_score",
         "community-conditions": "community_conditions_group",
-        "mountain": "mountain_score",
+        "mountain": "mountain_magnitude",
     }[selected_metric]
     if selected_metric == "mountain":
         direction = "desc" if selected_order == "best" else "asc"
@@ -828,43 +849,57 @@ def rank(
                     state=state,
                     limit=limit,
                     include_unranked=include_unranked,
-                    mountain_min=mountain_min,
+                    mountain_magnitude_min=mountain_magnitude_min,
                     sort=sort,
                     direction=direction,
                 )
-                label = "GROUP" if selected_metric == "community-conditions" else "SCORE"
-                typer.echo(f"COUNTY_FIPS  {label:<5}  STATE  NAME")
+                label = (
+                    "GROUP"
+                    if selected_metric == "community-conditions"
+                    else "MAGNITUDE"
+                    if selected_metric == "mountain"
+                    else "SCORE"
+                )
+                typer.echo(f"COUNTY_FIPS  {label:<9}  STATE  NAME")
             else:
                 result = store.list_places(
                     state=state,
                     county=county,
                     limit=limit,
                     include_unranked=include_unranked,
-                    mountain_min=mountain_min,
+                    mountain_magnitude_min=mountain_magnitude_min,
                     sort=sort,
                     direction=direction,
                 )
-                label = "GROUP" if selected_metric == "community-conditions" else "SCORE"
-                typer.echo(f"TRACT_ID     {label:<5}  STATE")
+                label = (
+                    "GROUP"
+                    if selected_metric == "community-conditions"
+                    else "MAGNITUDE"
+                    if selected_metric == "mountain"
+                    else "SCORE"
+                )
+                typer.echo(f"TRACT_ID     {label:<9}  STATE")
         for row in result["items"]:
             value = (
                 row["risk_score"]
                 if selected_metric == "risk"
-                else row["mountain_score"]
+                else row["mountain_magnitude"]
                 if selected_metric == "mountain"
                 else row["community_conditions_group"]
             )
             score = (
-                f"{value:.1f}"
-                if selected_metric in {"risk", "mountain"} and value is not None
+                f"M{value:.2f}"
+                if selected_metric == "mountain" and value is not None
+                else f"{value:.1f}"
+                if selected_metric == "risk" and value is not None
                 else str(value)
                 if value is not None
                 else "—"
             )
             if selected == "county":
-                typer.echo(f"{row['place_id']:<12} {score:>5}  {row['state']:<5}  {row['name']}")
+                typer.echo(f"{row['place_id']:<12} {score:>9}  {row['state']:<5}  {row['name']}")
             else:
-                typer.echo(f"{row['place_id']:<12} {score:>5}  {row['state']}")
+                typer.echo(f"{row['place_id']:<12} {score:>9}  {row['state']}")
     except HouseHunterError as exc:
         _abort(exc)
 

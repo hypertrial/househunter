@@ -156,7 +156,7 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
         if x_househunter_token is None or not secrets.compare_digest(x_househunter_token, token):
             raise HTTPException(status_code=403, detail="Invalid or missing mutation token")
 
-    @app.get("/api/v1/meta")
+    @app.get("/api/v2/meta")
     def meta() -> dict[str, object]:
         result: dict[str, object] = {
             "app_version": __version__,
@@ -173,7 +173,7 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
             result["build"] = None
         return result
 
-    @app.get("/api/v1/map/scores", response_model=MapScores)
+    @app.get("/api/v2/map/scores", response_model=MapScores)
     def map_scores(level: Literal["tract", "county"] = "tract") -> dict[str, object]:
         with Store(runtime) as store:
             return store.map_scores(level)
@@ -216,12 +216,12 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
             },
         )
 
-    @app.get("/api/v1/sources", response_model=list[SourceStatus])
+    @app.get("/api/v2/sources", response_model=list[SourceStatus])
     def sources() -> list[dict[str, object]]:
         return [status.model_dump(mode="json") for status in source_statuses(runtime)]
 
     @app.post(
-        "/api/v1/jobs",
+        "/api/v2/jobs",
         dependencies=[Depends(require_token)],
         status_code=202,
         response_model=JobStatus,
@@ -229,19 +229,19 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
     def create_job(request: JobRequest) -> dict[str, object]:
         return jobs.start(request.kind, state=request.state).model_dump(mode="json")
 
-    @app.get("/api/v1/jobs/{job_id}", response_model=JobStatus)
+    @app.get("/api/v2/jobs/{job_id}", response_model=JobStatus)
     def get_job(job_id: str) -> dict[str, object]:
         return jobs.get(job_id).model_dump(mode="json")
 
     @app.delete(
-        "/api/v1/jobs/{job_id}",
+        "/api/v2/jobs/{job_id}",
         dependencies=[Depends(require_token)],
         response_model=JobStatus,
     )
     def cancel_job(job_id: str) -> dict[str, object]:
         return jobs.cancel(job_id).model_dump(mode="json")
 
-    @app.get("/api/v1/places", response_model=PlacePage)
+    @app.get("/api/v2/places", response_model=PlacePage)
     def places(
         search: str | None = None,
         state: str | None = None,
@@ -251,8 +251,8 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
         min_score: float | None = Query(None, ge=0, le=100),
         max_score: float | None = Query(None, ge=0, le=100),
         community_conditions_group: int | None = Query(None, ge=1, le=10),
-        mountain_min: float | None = Query(None, ge=0, le=100),
-        mountain_max: float | None = Query(None, ge=0, le=100),
+        mountain_magnitude_min: float | None = Query(None, ge=0),
+        mountain_magnitude_max: float | None = Query(None, ge=0),
         include_unranked: bool = False,
         sort: str = "risk_score",
         direction: Literal["asc", "desc"] = "asc",
@@ -269,8 +269,8 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
                 min_score=min_score,
                 max_score=max_score,
                 community_conditions_group=community_conditions_group,
-                mountain_min=mountain_min,
-                mountain_max=mountain_max,
+                mountain_magnitude_min=mountain_magnitude_min,
+                mountain_magnitude_max=mountain_magnitude_max,
                 include_unranked=include_unranked,
                 sort=sort,
                 direction=direction,
@@ -278,24 +278,24 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
                 limit=limit,
             )
 
-    @app.get("/api/v1/places/{place_id}", response_model=PlaceDetail)
+    @app.get("/api/v2/places/{place_id}", response_model=PlaceDetail)
     def place(place_id: str) -> dict[str, object]:
         with Store(runtime) as store:
             return store.place_detail(store.resolve_place(place_id))
 
-    @app.post("/api/v1/lookup", response_model=AddressLookup | AddressConfirmation)
+    @app.post("/api/v2/lookup", response_model=AddressLookup | AddressConfirmation)
     def lookup(request: AddressLookupRequest) -> dict[str, object]:
         return lookup_address(runtime, request.address, candidate_id=request.candidate_id)
 
-    @app.get("/api/v1/counties", response_model=PlacePage)
+    @app.get("/api/v2/counties", response_model=PlacePage)
     def counties(
         search: str | None = None,
         state: str | None = None,
         min_score: float | None = Query(None, ge=0, le=100),
         max_score: float | None = Query(None, ge=0, le=100),
         community_conditions_group: int | None = Query(None, ge=1, le=10),
-        mountain_min: float | None = Query(None, ge=0, le=100),
-        mountain_max: float | None = Query(None, ge=0, le=100),
+        mountain_magnitude_min: float | None = Query(None, ge=0),
+        mountain_magnitude_max: float | None = Query(None, ge=0),
         include_unranked: bool = False,
         sort: str = "risk_score",
         direction: Literal["asc", "desc"] = "asc",
@@ -309,8 +309,8 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
                 min_score=min_score,
                 max_score=max_score,
                 community_conditions_group=community_conditions_group,
-                mountain_min=mountain_min,
-                mountain_max=mountain_max,
+                mountain_magnitude_min=mountain_magnitude_min,
+                mountain_magnitude_max=mountain_magnitude_max,
                 include_unranked=include_unranked,
                 sort=sort,
                 direction=direction,
@@ -318,7 +318,7 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
                 limit=limit,
             )
 
-    @app.get("/api/v1/counties/{stco_fips}", response_model=PlaceDetail)
+    @app.get("/api/v2/counties/{stco_fips}", response_model=PlaceDetail)
     def county(stco_fips: str) -> dict[str, object]:
         with Store(runtime) as store:
             return store.county_detail(store.resolve_county(stco_fips))
@@ -374,29 +374,36 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
-    @app.get("/api/v1/exports/places.csv")
+    @app.get("/api/v2/exports/places.csv")
     def csv_export() -> StreamingResponse:
         return csv_export_for("places", "househunter-places.csv")
 
-    @app.get("/api/v1/exports/places.parquet")
+    @app.get("/api/v2/exports/places.parquet")
     def parquet_export() -> FileResponse:
         return parquet_export_for("places", "househunter-places.parquet")
 
-    @app.get("/api/v1/exports/places.json")
+    @app.get("/api/v2/exports/places.json")
     def json_export() -> StreamingResponse:
         return json_export_for("places", "househunter-places.json")
 
-    @app.get("/api/v1/exports/counties.csv")
+    @app.get("/api/v2/exports/counties.csv")
     def counties_csv_export() -> StreamingResponse:
         return csv_export_for("counties", "househunter-counties.csv")
 
-    @app.get("/api/v1/exports/counties.parquet")
+    @app.get("/api/v2/exports/counties.parquet")
     def counties_parquet_export() -> FileResponse:
         return parquet_export_for("counties", "househunter-counties.parquet")
 
-    @app.get("/api/v1/exports/counties.json")
+    @app.get("/api/v2/exports/counties.json")
     def counties_json_export() -> StreamingResponse:
         return json_export_for("counties", "househunter-counties.json")
+
+    legacy_methods = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]
+
+    @app.api_route("/api/v1", methods=legacy_methods, include_in_schema=False)
+    @app.api_route("/api/v1/{legacy_path:path}", methods=legacy_methods, include_in_schema=False)
+    def removed_v1_api(legacy_path: str = "") -> None:
+        raise HTTPException(status_code=404, detail="HouseHunter API v1 has been removed")
 
     static = static_directory()
     if static.is_dir():

@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import platform
 import shutil
@@ -14,9 +15,10 @@ from pathlib import Path
 
 import duckdb
 
+from househunter.build import BUILD_SCHEMA_VERSION
 from househunter.config import RuntimePaths
 from househunter.locking import exclusive_lock
-from househunter.mountain import IN_SCOPE_STATES
+from househunter.mountain import IN_SCOPE_STATES, MAGNITUDE_VERSION, RELEASE_SCHEMA_VERSION
 from househunter.mountain_pack import ensure_storage_budget, remove_owned_work_directory
 from househunter.mountain_paths import ensure_owned_child, ensure_safe_directory
 
@@ -35,6 +37,44 @@ CONNECTICUT_PLANNING_REGIONS = {
     "09170",
     "09180",
     "09190",
+}
+WESTERN_STATES = {
+    "AK",
+    "AZ",
+    "CA",
+    "CO",
+    "HI",
+    "ID",
+    "MT",
+    "NV",
+    "NM",
+    "OR",
+    "UT",
+    "WA",
+    "WY",
+}
+MAGNITUDE_REGRESSIONS = {
+    "places": {
+        "label": "tracts",
+        "count": 83_848,
+        "maximum": 4.9235,
+        "western_median": 0.88,
+        "western_p95": 1.94,
+    },
+    "counties": {
+        "label": "counties",
+        "count": 3_143,
+        "maximum": 3.4973,
+        "western_median": 0.96,
+        "western_p95": 2.14,
+    },
+}
+COUNTY_MAGNITUDE_ANCHORS = {
+    "08097": 3.4973,  # Pitkin, CO
+    "08117": 2.3213,  # Summit, CO
+    "49051": 2.2421,  # Wasatch, UT
+    "49035": 1.6109,  # Salt Lake, UT
+    "08013": 1.2349,  # Boulder, CO
 }
 
 
@@ -98,16 +138,30 @@ def validate_runtime_coverage(snapshot: Path) -> dict[str, object]:
     summary: dict[str, object] = {}
     with duckdb.connect(str(database), read_only=True) as connection:
         for table in ("places", "counties"):
+            columns = {row[0] for row in connection.execute(f"DESCRIBE {table}").fetchall()}
+            if "mountain_score" in columns or "mountain_score_version" in columns:
+                raise RuntimeError(f"Published {table} retain legacy Mountain Score columns")
             rows = connection.execute(
                 f"""SELECT state,
                            count(*) AS rows,
-                           count(mountain_score) AS scored,
+                           count(mountain_magnitude) AS scored,
                            count(*) FILTER (
                                WHERE mountain_coverage_status = 'unavailable'
                            ) AS unavailable,
                            count(*) FILTER (
-                               WHERE mountain_score_version != 'mountain_score_v1'
-                                  OR mountain_pipeline_version != 'mountain_pipeline_v1'
+                               WHERE (
+                                   mountain_magnitude_version IS NOT NULL
+                                   AND mountain_magnitude_version != 'mountain_magnitude_v2'
+                               ) OR (
+                                   mountain_pipeline_version IS NOT NULL
+                                   AND mountain_pipeline_version != 'mountain_pipeline_v1'
+                               ) OR (
+                                   mountain_magnitude IS NOT NULL
+                                   AND (
+                                       mountain_magnitude_version IS NULL
+                                       OR mountain_pipeline_version IS NULL
+                                   )
+                               )
                            ) AS wrong_version
                     FROM {table}
                     GROUP BY state"""
@@ -117,18 +171,16 @@ def validate_runtime_coverage(snapshot: Path) -> dict[str, object]:
                 raise RuntimeError(f"Published {table} omit an in-scope state or DC")
             fully_scored_states = expected - ({"CT"} if table == "counties" else set())
             if any(
-                by_state[state][1] <= 0
-                or by_state[state][2] != 0
-                or by_state[state][3] != 0
+                by_state[state][1] <= 0 or by_state[state][2] != 0 or by_state[state][3] != 0
                 for state in fully_scored_states
             ):
                 raise RuntimeError(
-                    f"Published {table} lack usable, versioned Mountain scores in every state"
+                    f"Published {table} lack usable, versioned Mountain magnitudes in every state"
                 )
             if table == "counties":
                 connecticut = connection.execute(
-                    """SELECT place_id, mountain_score, mountain_coverage_status,
-                              mountain_score_version, mountain_pipeline_version
+                    """SELECT place_id, mountain_magnitude, mountain_coverage_status,
+                              mountain_magnitude_version, mountain_pipeline_version
                        FROM counties
                        WHERE state = 'CT'
                        ORDER BY place_id"""
@@ -145,7 +197,7 @@ def validate_runtime_coverage(snapshot: Path) -> dict[str, object]:
                            WHERE mountain_coverage_status != 'outside_scope'
                         )
                     FROM {table}
-                    WHERE state NOT IN ({','.join('?' for _ in expected)})""",
+                    WHERE state NOT IN ({",".join("?" for _ in expected)})""",
                 sorted(expected),
             ).fetchone()[0]
             if outside:
@@ -157,6 +209,60 @@ def validate_runtime_coverage(snapshot: Path) -> dict[str, object]:
                     int(values[0]) for state, values in by_state.items() if state not in expected
                 ),
             }
+        summary["magnitude_regressions"] = validate_magnitude_regressions(connection)
+    return summary
+
+
+def validate_magnitude_regressions(connection: duckdb.DuckDBPyConnection) -> dict[str, object]:
+    """Enforce the reviewed national v2 discrimination and anchor gates."""
+    western_parameters = sorted(WESTERN_STATES)
+    placeholders = ",".join("?" for _ in western_parameters)
+    summary: dict[str, object] = {}
+    for table, expected in MAGNITUDE_REGRESSIONS.items():
+        count, maximum = connection.execute(
+            f"""SELECT count(mountain_magnitude), max(mountain_magnitude)
+                FROM {table}
+                WHERE mountain_magnitude IS NOT NULL"""
+        ).fetchone()
+        if int(count) != expected["count"] or not math.isclose(
+            float(maximum), float(expected["maximum"]), abs_tol=0.0001
+        ):
+            raise RuntimeError(f"Published {expected['label']} miss pinned magnitude extrema")
+        median, p95, western_maximum = connection.execute(
+            f"""SELECT quantile_cont(mountain_magnitude, 0.5),
+                       quantile_cont(mountain_magnitude, 0.95),
+                       max(mountain_magnitude)
+                FROM {table}
+                WHERE state IN ({placeholders})
+                  AND mountain_magnitude IS NOT NULL""",
+            western_parameters,
+        ).fetchone()
+        if not math.isclose(
+            float(median), float(expected["western_median"]), abs_tol=0.02
+        ) or not math.isclose(float(p95), float(expected["western_p95"]), abs_tol=0.02):
+            raise RuntimeError(f"Published {expected['label']} miss pinned western quantiles")
+        if float(p95) - float(median) < 0.75 or float(western_maximum) - float(p95) < 0.75:
+            raise RuntimeError(
+                f"Published {expected['label']} do not preserve required western separation"
+            )
+        summary[str(expected["label"])] = {
+            "scored": int(count),
+            "maximum": float(maximum),
+            "western_median": float(median),
+            "western_p95": float(p95),
+            "western_maximum": float(western_maximum),
+        }
+    anchors = dict(
+        connection.execute(
+            f"""SELECT place_id, mountain_magnitude
+                FROM counties
+                WHERE place_id IN ({",".join("?" for _ in COUNTY_MAGNITUDE_ANCHORS)})""",
+            list(COUNTY_MAGNITUDE_ANCHORS),
+        ).fetchall()
+    )
+    if anchors != COUNTY_MAGNITUDE_ANCHORS:
+        raise RuntimeError(f"Published county magnitude anchors differ: {anchors}")
+    summary["county_anchors"] = anchors
     return summary
 
 
@@ -201,8 +307,21 @@ def run_once(
     snapshot_pointer = json.loads((mountain_root.parent / "current.json").read_text())
     snapshot = Path(snapshot_pointer["path"])
     snapshot_manifest = json.loads((snapshot / "build.json").read_text())
+    if (
+        manifest.get("schema_version") != RELEASE_SCHEMA_VERSION
+        or manifest.get("magnitude_version") != MAGNITUDE_VERSION
+        or snapshot_manifest.get("schema_version") != BUILD_SCHEMA_VERSION
+    ):
+        raise RuntimeError("Published Mountain release or snapshot uses an incompatible schema")
     if snapshot_manifest["source_vintages"]["mountain"] != manifest["data_release"]:
         raise RuntimeError("Published snapshot does not expose the promoted Mountain provenance")
+    if (
+        snapshot_manifest.get("mountain_release_id") != pointer["release_id"]
+        or snapshot_manifest.get("mountain_magnitude_version") != MAGNITUDE_VERSION
+        or snapshot_manifest["source_vintages"].get("mountain_magnitude") != MAGNITUDE_VERSION
+        or snapshot_manifest["source_vintages"].get("mountain_release_id") != pointer["release_id"]
+    ):
+        raise RuntimeError("Published snapshot does not bind the active Mountain v2 identity")
     compact_pointer = json.loads((mountain_root / "compact" / "current.json").read_text())
     if compact_pointer.get("release_id") != pointer["release_id"]:
         raise RuntimeError("Compact Mountain fallback does not match the promoted release")
@@ -284,11 +403,10 @@ def write_report(
     promotion: dict[str, object],
 ) -> None:
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "machine": machine,
         "runs": [
-            {key: value for key, value in run.items() if key != "release_path"}
-            for run in runs
+            {key: value for key, value in run.items() if key != "release_path"} for run in runs
         ],
         "failures": failures,
         "promotion": promotion,
@@ -307,11 +425,7 @@ def main() -> int:
     parser.add_argument("--report", type=Path, default=Path("data/mountain/benchmark.json"))
     args = parser.parse_args()
     machine = machine_preconditions()
-    data = (
-        args.data_dir.resolve()
-        if args.data_dir
-        else RuntimePaths.from_root().data
-    )
+    data = args.data_dir.resolve() if args.data_dir else RuntimePaths.from_root().data
     mountain_root = ensure_safe_directory(data / "mountain")
     work_root = ensure_safe_directory(mountain_root / "work")
     runs = []
@@ -322,7 +436,7 @@ def main() -> int:
             work_root / uuid.uuid4().hex,
             work_root,
             name_pattern=r"[0-9a-f]{32}",
-            marker_value="benchmark-v1\n",
+            marker_value="benchmark-v2\n",
         )
         ensure_storage_budget(mountain_root, reserve_bytes=RUN_RESERVATION_BYTES)
         try:

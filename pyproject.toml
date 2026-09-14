@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "househunter"
-version = "1.0.0"
+version = "2.0.0"
 description = "Rank FEMA National Risk Index tracts and counties by ALR_NPCTL"
 readme = "README.md"
 requires-python = ">=3.12"

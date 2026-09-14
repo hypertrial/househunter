@@ -11,12 +11,16 @@ Group 1 is healthiest and Group 10 least healthy. The groups are data-driven
 clusters, not percentiles. Tracts inherit their county's group and are labeled
 county-level; HouseHunter never blends this value with FEMA risk.
 
-An optional **Mountain Score** layer summarizes nearby terrain, public mountain
-land, and mapped trail access on a 0–100 national scale. It is built offline from
-pinned GIS inputs and joined to the normal snapshot as a small tract/county
-Parquet artifact. Normal app installation does not install GIS libraries or
-download elevation rasters. If no validated national Mountain release has been
-promoted, its fields remain explicitly unavailable.
+An optional **Mountain Magnitude** layer summarizes resident exposure to nearby
+terrain, public mountain land, and mapped trail access. Its uncapped logarithmic
+scale is calibrated independently among U.S. tracts and among U.S. counties: a
+one-unit increase means ten times fewer same-grain peers have an equal-or-higher
+underlying mountain composite. Tract and county magnitudes are therefore not
+cross-grain comparable. The layer is built offline from pinned GIS inputs and
+joined to the normal snapshot as a small tract/county Parquet artifact. Normal app
+installation does not install GIS libraries or download elevation rasters. If no
+validated national Mountain release has been promoted, its fields remain explicitly
+unavailable.
 
 `ALR_NPCTL` is FEMA's national percentile for composite Expected Annual Loss Rate,
 distinct from FEMA's broader Risk Index. Tract and county percentiles are not
@@ -53,7 +57,7 @@ uv sync
 uv run househunter sources
 uv run househunter download --source all
 uv run househunter build
-uv run househunter rank --state CO --mountain-min 60 --limit 20
+uv run househunter rank --state CO --metric mountain --mountain-magnitude-min 1.5 --limit 20
 uv run househunter rank --level county --state CO
 uv run househunter rank --level county --metric community-conditions --order best
 uv run househunter inspect 08013012101
@@ -84,7 +88,7 @@ addresses.
 househunter sources [--json]
 househunter download [--source fema|fema_counties|chrr|all]
 househunter build [--state CO]
-househunter rank [--state CO] [--county STCOFIPS] [--level tract|county] [--metric risk|community-conditions|mountain] [--mountain-min 0..100] [--order best|worst] [--limit N] [--include-unranked]
+househunter rank [--state CO] [--county STCOFIPS] [--level tract|county] [--metric risk|community-conditions|mountain] [--mountain-magnitude-min NONNEGATIVE] [--order best|worst] [--limit N] [--include-unranked]
 househunter inspect TRACT_FIPS|COUNTY_FIPS
 househunter lookup "1670 Broadway, Denver, CO" [--allow-approximate]
 househunter export --format parquet|csv|json [--level tract|county] [--output PATH]
@@ -120,19 +124,31 @@ as `Not grouped` and sorts last in both directions. The processed national artif
 is `data/processed/chrr_county.parquet`, and every immutable snapshot carries its
 state-scoped copy and DuckDB table.
 
-Mountain Score is first calculated for 2020 Census blocks, then population-weighted
-to tracts and counties. The deliberately approximate terrain builder uses 250 m
-equal-area cells. Its components are national population-weighted lower-rank
-percentiles for 20 km relief, rugged terrain, ring-weighted open public mountain
-land, and mapped trail access, combined at 45%, 20%, 20%, and 15%. Population-zero
-blocks receive raw measurements but do not affect percentile calibration. Promotable
-releases cover exactly the 50 states plus DC; Puerto Rico and the other territories
-remain outside the scoring scope and are `unavailable` at runtime.
-Connecticut tract scores are reconciled to FEMA's planning-region identifiers by
-their unique six-digit tract codes. Connecticut's nine planning-region county rows
+Mountain Magnitude starts with measurements for 2020 Census blocks on deliberately
+approximate 250 m equal-area cells. National population-weighted lower-rank component
+percentiles for 20 km relief, rugged terrain, ring-weighted open public mountain land,
+and mapped trail access retain the 45%, 20%, 20%, and 15% weights. Each canonical
+two-decimal component is converted to integer hundredths; the block base is
+`45R + 20G + 20P + 15H`, and exact integer sums are resident-weighted into tract and
+county bases, rounded half-even to six decimals.
+
+Within each grain, every complete or partial non-null geography is then one equally
+weighted national peer. If `s_g` is its base and `N` is the eligible peer count,
+`M_g = round4(log10(N / count(h: s_h >= s_g)))`. Inclusive equal-or-higher tails give
+genuine six-decimal ties the same finite magnitude; singleton and all-tied cohorts are
+`M0.0000`. Values are never capped. `M2.32` means roughly 10^2.32 times fewer
+same-grain peers have an equal-or-higher base—it does not mean 2.32 times or 232%
+more mountainous terrain. Population-zero blocks receive raw measurements but do not
+affect component calibration; zero-population, insufficient-coverage, outside-scope,
+and null geographies receive no magnitude and do not enter `N`.
+
+Promotable releases cover exactly the 50 states plus DC; Puerto Rico and the other
+territories remain outside scope. Connecticut tract values are reconciled to FEMA's
+planning-region identifiers by their unique six-digit tract codes. Connecticut's nine
+planning-region county rows
 remain unavailable because the Mountain release contains the eight 2020 counties;
 HouseHunter does not substitute approximate county aggregates.
-The score does not claim property views, trail quality, drive time, or guaranteed
+The magnitude does not claim property views, trail quality, drive time, or guaranteed
 public access.
 
 Read [DATA_SOURCES.md](DATA_SOURCES.md) for source provenance, release maintenance, and
@@ -151,12 +167,18 @@ npm test
 npm run build
 ```
 
-The map-only `GET /api/v1/map/scores?level=tract|county` contract is schema
-version 2. It returns equal-length, column-oriented `place_id`, `risk_score`,
-`community_conditions_group`, and `mountain_score` arrays in ascending unique
+The map-only `GET /api/v2/map/scores?level=tract|county` contract is schema
+version 3. It returns equal-length, column-oriented `place_id`, `risk_score`,
+`community_conditions_group`, and `mountain_magnitude` arrays in ascending unique
 `place_id` order. Its `build_id`, `level`, and `scope` identify the snapshot.
 Coverage-status fields remain available from place, county, detail, and export
 interfaces; they are intentionally absent from this compact rendering payload.
+All public HTTP routes are under `/api/v2`; `/api/v1/*` is intentionally unsupported.
+List endpoints filter with nonnegative `mountain_magnitude_min` and
+`mountain_magnitude_max` bounds, reject inverted or nonfinite ranges, and impose no
+upper magnitude limit. The map uses a visual domain of M0–M5 for tracts and M0–M4 for
+counties without capping stored values; common M0–M4 values keep the same colors across
+grains.
 
 The real-data interaction benchmark is kept separate from fixture CI because its
 timings are machine-sensitive:
@@ -178,7 +200,24 @@ ready. Gestures transform the last bitmap through the compositor, and detailed
 tract geometry is prefetched with four bounded requests while retaining the 24
 most-recent non-visible states.
 
-The native GIS stack is maintainer-only and optional:
+The native GIS stack is maintainer-only and optional. An installation with an active,
+owned, nationally complete full v1 Mountain release can migrate it offline without
+re-fetching GIS inputs:
+
+```console
+uv run househunter mountain rescore-v1 --source-lock config/mountain/source-lock-v2.json
+```
+
+The single-purpose migration validates the v1 release, source identity, raw blocks,
+components, internal scores, and aggregates, then derives v2 from the validated raw
+block columns. It never trusts persisted aggregate scores or edits v1 artifacts in
+place. Full release, compact release, and schema-9 snapshot candidates are staged and
+validated before any pointer changes. A small atomic journal makes an interrupted
+pointer commit forward-recoverable: rerunning the same command completes the same v2
+transaction. A v1, mixed, symlinked, partial, compact-only, foreign, or source-drifted
+installation fails with an actionable error.
+
+A full rebuild from pinned sources uses:
 
 ```console
 uv sync --extra mountain
@@ -227,9 +266,9 @@ fragments in canonical source order, then group them by locked `GLOBALID` before
 national rasterization pass, so cross-state copies are not counted twice and an
 interruption cannot replay a contribution.
 Preparation writes 100 km cores with exact 100 km halos to a content-addressed pack and
-emits a separate prepared-pack lock. Using
-`--allow-partial --no-promote` is available for small development fixtures; partial releases can
-never become the active runtime release.
+emits a separate prepared-pack lock. Mountain Magnitude v2 never emits partial releases:
+every build requires the reviewed national 50-states-plus-DC peer universe, including
+non-promoted validation candidates.
 
 Prepared builds require both locks: the reviewed source lock is the independent trust
 anchor for the source inventory, while the prepared lock anchors every immutable tile.
@@ -240,33 +279,47 @@ does not require those inputs.
 Prepared builds use one bounded pool of one to four worker processes. `--resume` reuses
 only checksum-valid shards for the same pack and pipeline; `--fresh` clears only the
 marked work directory for that pack. A successful promoted prepared build rebuilds the
-normal snapshot, preserves one rollback release, removes older owned releases and work
-shards, publishes the validated under-50-MiB managed compact fallback, and writes a
-timing report under `data/mountain/reports/`. The Mountain workflow
+schema-9 normal snapshot, removes obsolete owned v2 releases and work shards, publishes
+the validated under-50-MiB managed compact fallback, and writes a timing report under
+`data/mountain/reports/`. Release schema 2 binds the unchanged
+`mountain_pipeline_v1`, validation-only internal `mountain_score_v1`, public
+`mountain_magnitude_v2`, exact magnitude formula and precision rules, same-grain peer
+counts, provenance, and artifact hashes into one content identity. The Mountain workflow
 enforces a 45 GB engineering ceiling, stops before 50,000,000,000 managed bytes, and
 preserves 10 GB of unrelated free filesystem space.
 
 The national laptop acceptance gate runs two clean four-worker builds and checks the
 55-minute runtime, 24 GiB aggregate RSS, swap growth, 45/50 GB storage limits, identical
-release and Parquet identities, and a queryable Mountain-ranked snapshot:
+release and Parquet identities, schema-2/9 publication identity, and a queryable
+Mountain-ranked snapshot. It also gates 83,848 scored tracts and 3,143 scored counties;
+maxima near 4.9235 and 3.4973; western tract median/p95 near 0.88/1.94 and county
+median/p95 near 0.96/2.14; at least 0.75 from median to p95 and from p95 to maximum at
+both grains; and reviewed county anchors Pitkin 3.4973, Summit 2.3213, Wasatch 2.2421,
+Salt Lake 1.6109, and Boulder 1.2349.
 
 The exact command appears in the preparation runbook above. It uses the resolved
 `$PACK_ID`, leaves the prior release active if either measured run fails, and promotes
 only the accepted second run.
 
 Before the timed gate, `scripts/compare_mountain_builds.py` proves exact canonical raw
-table and release-hash equality among the lock-anchored source-derived shards and
-prepared builds using one and four workers. Direct national `--regions` builds are
-rejected for the state-clipped trail contract because they cannot safely deduplicate
-cross-state fragments. Both scripts emit machine-readable reports beneath
+table and schema-2 release-hash equality across canonical and shuffled row order and
+among the lock-anchored source-derived shards and prepared builds using one and four
+workers. The rescore path uses the same v2 release writer, so identical validated raw
+inputs produce the same identity as a fresh v2 build; migration lineage is recorded
+only in an ignored report and cannot change that identity. Direct national `--regions`
+builds are rejected for the state-clipped trail contract because they cannot safely
+deduplicate cross-state fragments. Both scripts emit machine-readable reports beneath
 `data/mountain/` by default.
 
-Rollback is explicit and fail-closed. Read `rollback_release_id` from
-`data/mountain/current.json`, then run `househunter mountain validate --promote` on that
-retained release with the source lock, prepared pack, and prepared lock that created it;
-promotion is refused if any provenance or raw metric differs. Source licenses and public
-release identifiers are recorded per input in `source-lock-v2.json`. When refreshing a
-lock, re-review the official license page and release timestamp, preserve required notices,
+Rollback is explicit and fail-closed. A same-major v2 rollback may validate and promote
+a retained v2 full release with the source lock, prepared pack, and prepared lock that
+created it; promotion is refused if provenance or raw metrics differ. A v1 release is
+never advertised as a v2-compatible rollback. Keep the pre-migration v1 full release
+unpruned until the installed 2.0.0 wheel passes offline acceptance. Cross-major rollback
+restores the v1 application and all of its v1 full, compact, and snapshot pointers as one
+operation; do not point the v2 application at v1 data. Source licenses and public release
+identifiers are recorded per input in `source-lock-v2.json`. When refreshing a lock,
+re-review the official license page and release timestamp, preserve required notices,
 and never distribute the fetched GIS archives or the full prepared pack in the wheel.
 
 The committed `web/dist/` must match `npm run build`. The Python wheel packages the
@@ -283,7 +336,10 @@ uv run python scripts/validate_release.py
 The generator validates the live ArcGIS item/revision metadata, exact tract and county
 identifier sets, geometry, jurisdiction coverage, output sizes, and every generated
 topology. The release validator checks the pinned tract and county caches against the
-packaged map manifest and writes its report under ignored `data/`. The generator emits
+packaged map manifest and independently loads the committed schema-2 compact Mountain
+bundle, verifies its identity and hashes, absence of public legacy score columns, size
+ceiling, peer counts, extrema, western separation, and reviewed anchors. It writes its
+report under ignored `data/`. The generator emits
 deterministic content-addressed files from a clean staged candidate, validates the full
 candidate before publication, and keeps the prior release usable if validation fails. It writes
 `src/househunter/map_assets/manifest.json`; `--reuse-raw` rebuilds from the ignored local
@@ -294,7 +350,7 @@ with an explicit repair message.
 ## Scope
 
 The FEMA layer uses composite `ALR_NPCTL`; the independent Community Conditions layer
-uses only CHR&R's published group; Mountain Score remains a separate approximate
+uses only CHR&R's published group; Mountain Magnitude remains a separate approximate
 context layer. The 18 published FEMA hazard percentiles appear on inspect/detail
 and ride along in exports; there is no hazard map layer, sort or filter by hazard,
 insurance data, external basemap, hosted service, or native installer.

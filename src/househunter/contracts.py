@@ -32,8 +32,8 @@ class PlaceSummary(BaseModel):
     community_conditions_group: int | None
     community_conditions_geography: Literal["county"] = "county"
     chrr_release_year: int
-    mountain_score: float | None
-    mountain_score_version: str | None
+    mountain_magnitude: float | None
+    mountain_magnitude_version: str | None
     mountain_pipeline_version: str | None
     relief_5km_m: float | None
     relief_10km_m: float | None
@@ -144,7 +144,7 @@ class MapScoreColumns(BaseModel):
     place_id: list[str]
     risk_score: list[float | None]
     community_conditions_group: list[int | None]
-    mountain_score: list[float | None]
+    mountain_magnitude: list[float | None]
 
     @model_validator(mode="after")
     def validate_alignment(self) -> MapScoreColumns:
@@ -152,7 +152,7 @@ class MapScoreColumns(BaseModel):
             len(self.place_id),
             len(self.risk_score),
             len(self.community_conditions_group),
-            len(self.mountain_score),
+            len(self.mountain_magnitude),
         }
         if len(lengths) != 1:
             raise ValueError("Map score columns must have equal lengths")
@@ -165,7 +165,7 @@ class MapScoreColumns(BaseModel):
 class MapScores(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[2] = 2
+    schema_version: Literal[3] = 3
     build_id: str
     level: Literal["tract", "county"]
     scope: MapScoreScope

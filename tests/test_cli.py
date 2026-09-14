@@ -147,7 +147,7 @@ def test_cli_build_rank_inspect_export_and_sources(
         ["rank", "--metric", "mountain", "--state", "AL", "--include-unranked"],
     )
     assert mountain.exit_code == 0, mountain.output
-    assert "SCORE" in mountain.output
+    assert "MAGNITUDE" in mountain.output
     assert "01001000100" in mountain.output
 
     county_filter = runner.invoke(app, ["rank", "--county", "01001"])

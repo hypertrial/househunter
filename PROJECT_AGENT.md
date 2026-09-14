@@ -16,13 +16,18 @@ official 2025 integer group (1 healthiest, 10 least healthy, or null), join only
 five-digit county FIPS, label tract inheritance as county-level, and never convert it
 to a percentile or blend it with FEMA.
 
-Mountain Score is a third, independent contextual layer. Runtime snapshots may join
-only a validated, promoted national tract/county artifact. Keep its native GIS stack
-optional and maintainer-only; ordinary setup must remain lightweight. Missing Mountain
-data is null with explicit `unavailable` status, never zero. Preserve the pinned source
-lock, content-addressed release identity, national population-weighted percentile
-semantics, and 45/20/20/15 component weights. Do not describe it as property-specific
-views, trail quality, drive time, or guaranteed access.
+Mountain Magnitude is a third, independent contextual layer. Runtime snapshots may join
+only a validated schema-2 national tract/county artifact using
+`mountain_magnitude_v2`; `mountain_score_v1` remains internal full-release validation
+evidence and is never public. Keep the native GIS stack optional and maintainer-only;
+ordinary setup must remain lightweight. Missing Mountain data is null with explicit
+`unavailable` status, never zero. Preserve the pinned source lock, content-addressed
+release identity, national population-weighted component percentiles, exact integer
+45/20/20/15 base weighting, six-decimal geography bases, four-decimal uncapped
+logarithmic magnitude, and inclusive equal-or-higher same-grain peer rule. A +1
+magnitude means ten times fewer equal-or-higher peers, not ten times more terrain;
+tracts and counties are not cross-grain comparable. Do not describe it as
+property-specific views, trail quality, drive time, or guaranteed access.
 
 Use the `househunter-engineering` workspace from `.pad.toml`. Follow `AGENTS.md`
 and the local `pad-engineering` skill. Keep ticket bodies, exports, credentials,
@@ -38,9 +43,16 @@ and local Pad state out of this public repository.
   change the UI.
 - Never commit credentials or fetched FEMA payloads.
 - FEMA ranking semantics use FEMA only; Community Conditions sorting uses only the
-  official CHR&R group. Mountain Score filtering does not alter either metric. Do not
+  official CHR&R group. Mountain Magnitude filtering does not alter either metric. Do not
   contact census.gov from the normal prepare, download, or build flow.
   FEMA tract/county and CHR&R county layers are all required.
+- Runtime snapshots are schema 9, map-score payloads are schema 3, and public HTTP
+  routes are `/api/v2` only. Public artifacts, filters, and types use
+  `mountain_magnitude`; do not add score aliases or cap stored magnitudes.
+- Cross-major Mountain migration uses only `househunter mountain rescore-v1`, stages
+  and validates full/compact/snapshot artifacts before pointer publication, and resumes
+  an interrupted commit forward from its atomic journal. Never load or advertise a v1
+  Mountain release as a v2 rollback; rollback restores the v1 app and v1 pointers.
 - Address lookup may contact `geocoding.geo.census.gov` on explicit user action,
   and may contact Nominatim (`HOUSEHUNTER_NOMINATIM_URL`, default
   `nominatim.openstreetmap.org`) only after a valid Census empty match list.

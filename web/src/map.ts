@@ -22,6 +22,7 @@ export const MOUNTAIN_COLORS = {
   typical: "#929271",
   high: "#b49b69",
   highest: "#d9bd76",
+  summit: "#fedf83",
 } as const;
 
 const COLOR_SCALE_SIZE = 256;
@@ -59,6 +60,7 @@ const MOUNTAIN_ANCHORS = Object.values(MOUNTAIN_COLORS);
 export const FEMA_COLOR_SCALE = colorScale(FEMA_ANCHORS);
 export const COMMUNITY_COLOR_SCALE = colorScale(COMMUNITY_GROUP_COLORS);
 export const MOUNTAIN_COLOR_SCALE = colorScale(MOUNTAIN_ANCHORS);
+export const COUNTY_MOUNTAIN_COLOR_SCALE = colorScale(MOUNTAIN_ANCHORS.slice(0, 5));
 
 export const METRIC_COLOR_SCALES = {
   fema: {
@@ -72,8 +74,8 @@ export const METRIC_COLOR_SCALES = {
     colors: COMMUNITY_COLOR_SCALE, gradient: gradient(COMMUNITY_COLOR_SCALE),
   },
   mountain: {
-    minimum: 0, maximum: 100, ticks: [0, 20, 40, 60, 80, 100],
-    distinguishAt: [20, 40, 60, 80],
+    minimum: 0, maximum: 5, ticks: [0, 1, 2, 3, 4, 5],
+    distinguishAt: [1, 2, 3, 4],
     colors: MOUNTAIN_COLOR_SCALE, gradient: gradient(MOUNTAIN_COLOR_SCALE),
   },
 } as const satisfies Record<Metric, {
@@ -84,6 +86,18 @@ export const METRIC_COLOR_SCALES = {
   colors: readonly string[];
   gradient: string;
 }>;
+
+export function metricColorScale(metric: Metric, level: Geography) {
+  if (metric !== "mountain" || level === "tract") return METRIC_COLOR_SCALES[metric];
+  return {
+    minimum: 0,
+    maximum: 4,
+    ticks: [0, 1, 2, 3, 4] as const,
+    distinguishAt: [1, 2, 3] as const,
+    colors: COUNTY_MOUNTAIN_COLOR_SCALE,
+    gradient: gradient(COUNTY_MOUNTAIN_COLOR_SCALE),
+  };
+}
 
 export const STATE_FIPS = {
   AK: "02", AL: "01", AR: "05", AS: "60", AZ: "04", CA: "06", CO: "08", CT: "09",
@@ -117,8 +131,20 @@ export function communityGroupColor(value: number | null): string | null {
     : null;
 }
 
-export function mountainColor(value: number | null): string | null {
-  return scaleColor(value, METRIC_COLOR_SCALES.mountain);
+export function mountainColor(value: number | null, level: Geography = "tract"): string | null {
+  if (value === null || !Number.isFinite(value) || value < 0) return null;
+  const maximum = level === "tract" ? 5 : 4;
+  const bounded = Math.min(value, maximum);
+  const left = Math.floor(bounded);
+  const right = Math.ceil(bounded);
+  if (left === right) return MOUNTAIN_ANCHORS[left];
+  const mix = bounded - left;
+  const rgb = [1, 3, 5].map((start) => {
+    const from = Number.parseInt(MOUNTAIN_ANCHORS[left].slice(start, start + 2), 16);
+    const to = Number.parseInt(MOUNTAIN_ANCHORS[right].slice(start, start + 2), 16);
+    return Math.round(from + (to - from) * mix);
+  });
+  return `#${rgb.map((channel) => channel.toString(16).padStart(2, "0")).join("")}`;
 }
 
 function scaleColor(
@@ -146,26 +172,32 @@ function scaleColor(
   return colors[index];
 }
 
-export function metricColor(score: MapScore | null | undefined, metric: Metric): string | null {
+export function metricColor(
+  score: MapScore | null | undefined,
+  metric: Metric,
+  level: Geography = "tract",
+): string | null {
   return metricValueColor(
     score?.risk_score ?? null,
     score?.community_conditions_group ?? null,
-    score?.mountain_score ?? null,
+    score?.mountain_magnitude ?? null,
     metric,
+    level,
   );
 }
 
 export function metricValueColor(
   riskScore: number | null,
   communityGroup: number | null,
-  mountainScore: number | null,
+  mountainMagnitude: number | null,
   metric: Metric,
+  level: Geography = "tract",
 ): string | null {
   if (metric === "community-conditions") {
     return communityGroupColor(communityGroup);
   }
   return metric === "mountain"
-    ? mountainColor(mountainScore)
+    ? mountainColor(mountainMagnitude, level)
     : scoreColor(riskScore);
 }
 
@@ -236,9 +268,12 @@ export function readHash(hash: string) {
     county: level === "tract" ? county : "",
     place,
     unranked: params.get("unranked") === "1",
-    mountainMin: params.has("mountain_min")
-      ? number("mountain_min", 0, 0, 100)
-      : null,
+    mountainMagnitudeMin: (() => {
+      const raw = params.get("mountain_magnitude_min");
+      if (raw === null || raw.trim() === "") return null;
+      const value = Number(raw);
+      return Number.isFinite(value) && value >= 0 ? value : null;
+    })(),
     camera: {
       cx: number("cx", 0.5, 0, 1),
       cy: number("cy", 0.5, 0, 1),

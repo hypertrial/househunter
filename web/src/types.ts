@@ -16,8 +16,8 @@ export interface PlaceSummary {
   community_conditions_group: number | null;
   community_conditions_geography: "county";
   chrr_release_year: number;
-  mountain_score: number | null;
-  mountain_score_version: string | null;
+  mountain_magnitude: number | null;
+  mountain_magnitude_version: string | null;
   mountain_pipeline_version: string | null;
   relief_5km_m: number | null;
   relief_10km_m: number | null;
@@ -138,18 +138,18 @@ export interface MapScore {
   place_id: string;
   risk_score: number | null;
   community_conditions_group: number | null;
-  mountain_score: number | null;
+  mountain_magnitude: number | null;
 }
 
 export interface MapScoreColumns {
   place_id: string[];
   risk_score: Array<number | null>;
   community_conditions_group: Array<number | null>;
-  mountain_score: Array<number | null>;
+  mountain_magnitude: Array<number | null>;
 }
 
 export interface MapScores {
-  schema_version: 2;
+  schema_version: 3;
   build_id: string;
   level: Geography;
   scope: MapScope;

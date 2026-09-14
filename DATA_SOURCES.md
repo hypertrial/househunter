@@ -1,6 +1,6 @@
 # Data sources and provenance
 
-HouseHunter v1 pins data vintages. It never discovers or accepts an automatic “latest”
+HouseHunter v2 pins data vintages. It never discovers or accepts an automatic “latest”
 release. A source update requires review, validation, and a HouseHunter release.
 
 ## FEMA National Risk Index tracts
@@ -68,9 +68,9 @@ If CHR&R publication moves after funding ends, update the `chrr` block in
 identical. Recompute and review the schema fingerprint, revision pins, row count,
 spot checks, and canonical logical checksum; never repoint automatically to “latest.”
 
-## Mountain Score sources and release contract
+## Mountain Magnitude sources and release contract
 
-Mountain Score is a separate, derived contextual layer. Its maintainer build accepts:
+Mountain Magnitude is a separate, derived contextual layer. Its maintainer build accepts:
 
 - USGS 3DEP elevation rasters;
 - PAD-US 4.1 polygons from the official anonymous USGS
@@ -143,13 +143,20 @@ are never cleanup targets.
 one bounded persistent process pool, writes atomic per-tile raw Parquet shards, and
 assembles them in canonical tile/GEOID order. Percentiles remain one national
 population-weighted lower-rank ECDF per component; no tile or state percentile or
-aggregate is cached. A generated candidate is written inside the release filesystem,
-validated once by reconstructing block percentiles/composite and tract/county
-aggregates, renamed to its content identity, and then exposed through the Mountain
-pointer. The timed path finishes only after the normal HouseHunter snapshot is rebuilt
-and queryable. It also publishes one content-addressed compact fallback under
-`data/mountain/compact/`. Failure restores the prior full and compact Mountain pointers
-and leaves the prior app snapshot intact.
+aggregate is cached. A generated schema-2 candidate is written inside the release
+filesystem, validated by independently reconstructing block percentiles, the internal
+composite, tract/county bases, both same-grain peer calibrations, and final magnitudes,
+then renamed to its content identity. The timed path finishes only after the schema-9
+HouseHunter snapshot is rebuilt and queryable. It also publishes one content-addressed
+compact fallback under `data/mountain/compact/`.
+
+Publication stages and validates the full release, compact release, and snapshot before
+changing a pointer. Before pointer commit, a failure leaves all prior pointers
+byte-for-byte unchanged. During commit, an atomic `migration-v2.json` journal records
+only the expected artifact identities and phase; rerunning after interruption completes
+the same transaction until full, compact, and snapshot pointers agree, then removes the
+journal. Runtime loading fails closed on a v1 or mixed managed pointer and directs the
+operator to `househunter mountain rescore-v1` instead of silently using the bundle.
 
 The source lock records compressed-download totals, largest `.part`, extracted bytes,
 largest reviewed family/batch source-staging peak, preparation workspace and atomic duplication,
@@ -184,16 +191,49 @@ The approximation is explicit:
   within 10 and 25 km, with raw access `km_10 + 0.4 * km_10_to_25`;
 - component percentiles use a national, population-weighted lower-rank ECDF over
   in-scope blocks with valid DEM cells; population-zero blocks are not calibrators;
-- the final block score is `0.45 relief + 0.20 rugged + 0.20 public access + 0.15 trail`;
-  tract and county outputs are population-weighted block aggregates.
+- each two-decimal component percentile is converted to integer hundredths and the
+  validation-only block base units are `45R + 20G + 20P + 15H`;
+- tract and county bases use exact population-weighted integer sums and half-even
+  rounding to six decimals, eliminating accidental ties from the former two-decimal
+  aggregate;
+- complete and partial non-null geographies enter one national cohort at their own
+  grain, with each geography weighted once regardless of population;
+- for base `s_g` and eligible same-grain peer count `N`, the public value is
+  `round4(log10(N / count(h: s_h >= s_g)))` using an inclusive equal-or-higher tail;
+  genuine six-decimal base ties share a finite magnitude, singleton and all-tied
+  cohorts are zero, and values are never capped.
 
-The manifest records the source lock, pipeline and score versions, release identity,
-coverage, row counts, checksums, and whether national completeness was proven. The
-validator recomputes release identity, hashes, block domains, every component
-percentile and composite from rounded block raw values, tract/county aggregates, and
-coverage semantics before a release can be promoted. A promoted release changes
-the main HouseHunter build identity; an absent release produces null Mountain fields
-with `unavailable` status rather than silently substituting zero.
+Release schema 2 records the source lock, unchanged `mountain_pipeline_v1`, internal
+`mountain_score_v1`, public `mountain_magnitude_v2`, formula, integer weighting,
+six/four-decimal precision and half-even rounding, inclusive tie rule, national
+same-grain peer scope and counts, release identity, coverage, row counts, hashes, and
+whether national completeness was proven. Runtime artifacts expose no legacy aggregate
+score field. The validator recomputes release identity, hashes, block domains, every
+component percentile and composite from rounded raw block values, tract/county bases,
+both peer calibrations, final magnitudes, and coverage semantics before promotion. A
+promoted release changes the main HouseHunter build identity; an absent release produces
+null Mountain fields with `unavailable` status rather than silently substituting zero.
+
+The committed compact schema-2 bundle is accepted only with 83,848 scored tracts and
+3,143 scored counties, maxima approximately 4.9235 and 3.4973, western tract median/p95
+approximately 0.88/1.94, and western county median/p95 approximately 0.96/2.14. Both
+grains must retain at least 0.75 magnitude from median to p95 and from p95 to maximum.
+County anchors are Pitkin 3.4973, Summit 2.3213, Wasatch 2.2421, Salt Lake 1.6109, and
+Boulder 1.2349. Package release validation reloads the bundle, verifies its schema,
+identity, artifact hashes, peer counts, public columns, size ceiling, and these gates.
+The equivalence workflow shuffles block order and compares one- and four-worker builds;
+the two-build benchmark requires identical release identities and Parquet hashes.
+
+`househunter mountain rescore-v1 --source-lock config/mountain/source-lock-v2.json`
+is the only cross-major data migration. It runs offline under the normal exclusive lock
+and accepts only the active, owned, contained, non-symlinked, nationally complete full
+v1 release. A migration-only reader validates v1 checksums, source identity, raw blocks,
+components, scores, and aggregates, but v2 is derived from the raw block columns and is
+never written into the v1 directory. Identical raw inputs therefore produce the same v2
+identity as a fresh build; migration lineage stays in an ignored report rather than the
+deterministic manifest. The v1 full release remains unpruned through installed-package
+acceptance. Cross-major rollback restores both the v1 application and its v1 pointers;
+v1 is not a release that the v2 runtime can promote or load.
 
 FEMA v1.20 uses Connecticut planning-region FIPS while the locked 2020 block source
 uses legacy Connecticut county FIPS. Runtime tract rows are reconciled only when the
@@ -293,13 +333,16 @@ read as one particular hazard. The 18 `{CODE}_ALR_NPCTL` values are FEMA's publi
 percentiles at the same grain; HouseHunter does not blend them. Null means FEMA
 published no rating, never zero. County scores and county hazard percentiles are not
 a summary of the tracts inside the county.
-Mountain Score is an approximate regional context metric, not a parcel or address
+Mountain Magnitude is an approximate regional context metric, not a parcel or address
 assessment. Coarse cells and source completeness can miss narrow ridges, informal or
 unmapped trails, seasonal closures, entrances, legal access details, travel time, and
 views. The land rings measure classified mountain area around a block point, not a
 guaranteed route from that point. Release-to-release comparisons require review of
-source and score versions; raw values and percentiles may move when source coverage or
-the national reference population changes.
+source and magnitude versions; raw values, component percentiles, bases, and peer ranks
+may move when source coverage or the national reference population changes. A one-unit
+magnitude increase means ten times fewer equal-or-higher same-grain peers; it does not
+mean ten times more mountainous terrain. Tract and county magnitudes use different peer
+universes and are not comparable with each other.
 National tract boundaries are simplified for overview rendering, so fine boundary detail
 appears only after zoom loads the jurisdiction asset. Small urban tracts can be subpixel at
 the national extent; they are not aggregated or enlarged.

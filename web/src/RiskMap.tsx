@@ -35,7 +35,7 @@ interface Props {
   state: string;
   county: string;
   showUnranked: boolean;
-  mountainMin?: number | null;
+  mountainMagnitudeMin?: number | null;
   neutralOnly?: boolean;
   retryGeneration?: number;
   focusTarget: FocusTarget | null;
@@ -116,7 +116,7 @@ export default function RiskMap({
   state,
   county,
   showUnranked,
-  mountainMin = null,
+  mountainMagnitudeMin = null,
   neutralOnly = false,
   retryGeneration = 0,
   focusTarget,
@@ -131,6 +131,7 @@ export default function RiskMap({
   onVisibleCommit,
   onInteractiveCommit,
 }: Props) {
+  const pluralLevel = level === "tract" ? "tracts" : "counties";
   const viewportRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<Worker | null>(null);
@@ -174,8 +175,8 @@ export default function RiskMap({
   const [presentedVersion, setPresentedVersion] = useState(0);
 
   const semanticValue = useMemo<MapSemantics>(() => ({
-    metric, state, county, showUnranked, mountainMin, neutralOnly,
-  }), [county, metric, mountainMin, neutralOnly, showUnranked, state]);
+    metric, state, county, showUnranked, mountainMagnitudeMin, neutralOnly,
+  }), [county, metric, mountainMagnitudeMin, neutralOnly, showUnranked, state]);
 
   const post = useCallback((command: RendererCommand, transfer: Transferable[] = []) => {
     rendererRef.current?.postMessage(command, transfer);
@@ -365,7 +366,7 @@ export default function RiskMap({
         if (value.interactive) {
           callbackRef.current.onVisibleCommit?.(value.metric);
           callbackRef.current.onInteractiveCommit?.(value.metric);
-          callbackRef.current.onStatus(`${value.featureCount.toLocaleString()} ${level}s interactive`);
+          callbackRef.current.onStatus(`${value.featureCount.toLocaleString()} ${pluralLevel} interactive`);
         }
         recordProfile({
           name: value.type === "FRAME" ? "bitmap-commit" : "bitmap-reuse-commit",
@@ -703,7 +704,7 @@ export default function RiskMap({
   };
 
   const metricLabel = displayMetric === "fema" ? "risk"
-    : displayMetric === "mountain" ? "Mountain Score" : "Community Conditions";
+    : displayMetric === "mountain" ? "Mountain Magnitude" : "Community Conditions";
   return <div className="map-stage" data-level={level}>
     <div
       ref={viewportRef}
@@ -711,7 +712,7 @@ export default function RiskMap({
       role="img"
       tabIndex={0}
       aria-busy={busy}
-      aria-label={`Focusable USA ${level} ${metricLabel} map. ${displayMetric === "fema" ? "Lower FEMA ALR_NPCTL is better." : displayMetric === "mountain" ? "Higher Mountain Score means greater nearby mountain and access characteristics." : "Group 1 is healthiest and Group 10 least healthy; tract values are county-level."} Use arrow keys to move the focus cursor, plus and minus to zoom, and Enter to select.`}
+      aria-label={`Focusable USA ${level} ${metricLabel} map. ${displayMetric === "fema" ? "Lower FEMA ALR_NPCTL is better." : displayMetric === "mountain" ? `Higher Mountain Magnitude means fewer U.S. ${pluralLevel} have equal-or-higher resident-weighted mountain exposure.` : "Group 1 is healthiest and Group 10 least healthy; tract values are county-level."} Use arrow keys to move the focus cursor, plus and minus to zoom, and Enter to select.`}
       onKeyDown={keyboard}
     >
       <canvas ref={canvasRef} className="map-presentation" aria-hidden="true" />

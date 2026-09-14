@@ -151,7 +151,7 @@ let height = 1;
 let ratio = 1;
 let camera: MapTransform = { k: 1, x: 0, y: 0 };
 let semantics: MapSemantics = {
-  metric: "fema", state: "", county: "", showUnranked: false, mountainMin: null, neutralOnly: false,
+  metric: "fema", state: "", county: "", showUnranked: false, mountainMagnitudeMin: null, neutralOnly: false,
 };
 let selected = "";
 let scores: MapScores | null = null;
@@ -213,7 +213,7 @@ function semanticKey(value: MapSemantics): string {
     value.state,
     value.county,
     value.showUnranked ? 1 : 0,
-    value.mountainMin ?? "",
+    value.mountainMagnitudeMin ?? "",
     value.neutralOnly ? 1 : 0,
   ].join("|");
 }
@@ -223,14 +223,15 @@ function scoreValues(index: number | null): [number | null, number | null, numbe
   return [
     scores.columns.risk_score[index],
     scores.columns.community_conditions_group[index],
-    scores.columns.mountain_score[index],
+    scores.columns.mountain_magnitude[index],
   ];
 }
 
 function scoreIncluded(index: number | null, value: MapSemantics): boolean {
   if (index === null || !scores || value.neutralOnly) return false;
-  const mountain = scores.columns.mountain_score[index];
-  return value.mountainMin === null || (mountain !== null && mountain >= value.mountainMin);
+  const mountain = scores.columns.mountain_magnitude[index];
+  return value.mountainMagnitudeMin === null
+    || (mountain !== null && mountain >= value.mountainMagnitudeMin);
 }
 
 function featureStyle(
@@ -242,7 +243,7 @@ function featureStyle(
   const index = scoreIndexes.get(id) ?? null;
   const included = scoreIncluded(index, value);
   const [risk, community, mountain] = included ? scoreValues(index) : [null, null, null];
-  const color = included ? metricValueColor(risk, community, mountain, value.metric) : null;
+  const color = included ? metricValueColor(risk, community, mountain, value.metric, level) : null;
   const filtered = Boolean(
     (value.state && featureState !== value.state)
     || (value.county && countyFips !== value.county),
@@ -1004,7 +1005,7 @@ function pick(command: Extract<RendererCommand, { type: "PICK" }>) {
         place_id: match.id,
         risk_score: risk,
         community_conditions_group: community,
-        mountain_score: mountain,
+        mountain_magnitude: mountain,
       },
     };
   }

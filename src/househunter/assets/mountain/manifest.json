@@ -1,0 +1,54 @@
+{
+  "artifact_kind": "compact",
+  "base_score_version": "mountain_score_v1",
+  "block_geoid_sha256": "2919b6adea1c67708502768579e87ba2a430d55896b6b7473ebb2d988f5c7f42",
+  "data_release": "2026q3",
+  "files": {
+    "counties": {
+      "filename": "counties.parquet",
+      "rows": 3143,
+      "sha256": "a51248879951752db9065f6ad4875f785a3f45cbf340d2f493ec2e0e63efd5fa"
+    },
+    "tracts": {
+      "filename": "tracts.parquet",
+      "rows": 84414,
+      "sha256": "25c951f04a19d104ddfbef36db69df2e5198f1c109d53f88002255cad25943f9"
+    }
+  },
+  "full_manifest_sha256": "e2b4a540d2da501f2980d197696dec766b041fab23e0e35b33357dec5f5c1e94",
+  "magnitude_contract": {
+    "base_decimals": 6,
+    "base_rounding": "half_even",
+    "component_percentile_decimals": 2,
+    "eligible_statuses": [
+      "complete",
+      "partial"
+    ],
+    "formula": "log10(N / count(peer_base >= geography_base))",
+    "integer_weights": {
+      "public_mountain_access_pct": 20,
+      "relief_20km_pct": 45,
+      "rugged_pct": 20,
+      "trail_access_pct": 15
+    },
+    "magnitude_decimals": 4,
+    "magnitude_rounding": "half_even",
+    "peer_counts": {
+      "county": 3143,
+      "tract": 83848
+    },
+    "peer_geography_weight": "one",
+    "peer_scope": "national_50_states_dc_same_grain",
+    "population_weighting": "exact_integer_sums",
+    "tie_rule": "inclusive_equal_or_higher",
+    "uncapped": true
+  },
+  "magnitude_version": "mountain_magnitude_v2",
+  "national_complete": true,
+  "national_expectations_sha256": "36f2d9a85cdc70cefea0f3850ce5f32d68d74541ebf535e4149bd87b6dc40836",
+  "pipeline_version": "mountain_pipeline_v1",
+  "release_id": "95e0f7fba44f7309",
+  "schema_version": 2,
+  "source_lock_sha256": "055a8855d12e5062a3c66c677dc4e962bfa920291fc0ad05b1efc237605adace",
+  "source_provenance_sha256": "dd00e381dd7056c48716c05ebaabc367140e1ae25a0bc64d08a8976dfa45672c"
+}

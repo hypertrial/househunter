@@ -12,7 +12,12 @@ import polars as pl
 from househunter.config import RuntimePaths, canonical_json, sha256_bytes, sha256_file
 from househunter.geography import STATE_BY_FIPS
 from househunter.locking import exclusive_lock
-from househunter.mountain import validate_national_expectations, write_release
+from househunter.mountain import (
+    MAGNITUDE_VERSION,
+    RELEASE_SCHEMA_VERSION,
+    validate_national_expectations,
+    write_release,
+)
 from househunter.mountain_gis import (
     build_region_raw_metrics,
     load_regions,
@@ -33,7 +38,10 @@ from househunter.mountain_paths import ensure_owned_child, ensure_safe_directory
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Compare national serial, prepared-one, and prepared-four Mountain output"
+        description=(
+            "Compare national serial, shuffled, prepared-one, and prepared-four "
+            "Mountain Magnitude output"
+        )
     )
     parser.add_argument("--source-lock", required=True, type=Path)
     parser.add_argument("--regions", required=True, type=Path)
@@ -90,23 +98,16 @@ def _run_locked(args: argparse.Namespace, paths: RuntimePaths) -> int:
         shards = []
         for item in manifest["shards"]:
             shard = reference / str(item["filename"])
-            if (
-                shard.is_symlink()
-                or sha256_file(shard) != item.get("parquet_sha256")
-            ):
+            if shard.is_symlink() or sha256_file(shard) != item.get("parquet_sha256"):
                 raise RuntimeError("Source-derived comparison shard is corrupt")
             frame = pl.read_parquet(shard)
             if raw_metric_sha256(frame) != item.get("raw_metric_sha256"):
                 raise RuntimeError("Source-derived comparison shard content differs")
             shards.append(frame)
         serial = pl.concat(shards).sort("block_geoid")
-        if (
-            serial.height != manifest.get("block_count")
-            or sha256_bytes(
-                canonical_json([item.get("raw_metric_sha256") for item in manifest["shards"]])
-            )
-            != manifest.get("raw_metric_sha256")
-        ):
+        if serial.height != manifest.get("block_count") or sha256_bytes(
+            canonical_json([item.get("raw_metric_sha256") for item in manifest["shards"]])
+        ) != manifest.get("raw_metric_sha256"):
             raise RuntimeError("Source-derived comparison manifest does not match its shards")
     expectations = lock["expected_states"]
     validate_national_expectations(
@@ -120,7 +121,7 @@ def _run_locked(args: argparse.Namespace, paths: RuntimePaths) -> int:
         work_root / uuid.uuid4().hex,
         work_root,
         name_pattern=r"[0-9a-f]{32}",
-        marker_value="equivalence-v1\n",
+        marker_value="equivalence-v2\n",
     )
     ensure_storage_budget(managed_root, reserve_bytes=8_100_000_000)
     try:
@@ -137,11 +138,15 @@ def _run_locked(args: argparse.Namespace, paths: RuntimePaths) -> int:
         }
         manifests = []
         for index, (name, workers) in enumerate(
-            (("serial", None), ("one", 1), ("four", 4)), 1
+            (("serial", None), ("shuffled", 0), ("one", 1), ("four", 4)), 1
         ):
             work = scratch / (str(index) * 64)
-            frame = serial
-            if workers is not None:
+            frame = (
+                serial.sample(fraction=1.0, shuffle=True, seed=20260914) if workers == 0 else serial
+            )
+            if workers == 0 and not serial.equals(frame.sort("block_geoid")):
+                raise RuntimeError("Shuffled national raw table changed canonical content")
+            if workers not in {None, 0}:
                 frame, _ = build_prepared_raw_metrics(
                     args.prepared_pack.resolve(),
                     args.prepared_lock.resolve(),
@@ -163,7 +168,7 @@ def _run_locked(args: argparse.Namespace, paths: RuntimePaths) -> int:
                 national_expectations=expectations,
             )
             manifests.append(json.loads((release / "manifest.json").read_text()))
-            if workers is not None:
+            if workers not in {None, 0}:
                 remove_owned_work_directory(work, scratch)
             if release.parent != scratch or release.is_symlink():
                 raise RuntimeError("Equivalence release escaped managed scratch")
@@ -174,14 +179,28 @@ def _run_locked(args: argparse.Namespace, paths: RuntimePaths) -> int:
             for manifest in manifests
         }
         if len(identities) != 1 or len(hashes) != 1:
-            raise RuntimeError("National releases differ across serial/prepared worker modes")
+            raise RuntimeError(
+                "National releases differ across row ordering or prepared worker modes"
+            )
+        if any(
+            manifest.get("schema_version") != RELEASE_SCHEMA_VERSION
+            or manifest.get("magnitude_version") != MAGNITUDE_VERSION
+            or manifest.get("magnitude_contract", {}).get("uncapped") is not True
+            or manifest.get("magnitude_contract", {}).get("tie_rule") != "inclusive_equal_or_higher"
+            for manifest in manifests
+        ):
+            raise RuntimeError("National releases do not carry the Mountain Magnitude v2 contract")
         report = {
-            "schema_version": 1,
+            "schema_version": 2,
             "block_count": serial.height,
             "pack_id": pack["pack_id"],
             "release_id": manifests[0]["release_id"],
+            "mountain_release_schema_version": RELEASE_SCHEMA_VERSION,
+            "mountain_magnitude_version": MAGNITUDE_VERSION,
             "exact_raw_equality": True,
             "exact_release_equality": True,
+            "row_order_independent": True,
+            "worker_count_independent": True,
         }
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")

@@ -47,7 +47,7 @@ test("canonical map interaction performance gates", async ({ page, browser }, te
   const coldInteractive = Date.now() - coldStarted;
 
   const scoreText = await page.evaluate(async () => {
-    const response = await fetch("/api/v1/map/scores?level=tract");
+    const response = await fetch("/api/v2/map/scores?level=tract");
     return response.text();
   });
   const decodedScores = Buffer.byteLength(scoreText);

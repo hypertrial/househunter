@@ -38,12 +38,31 @@ def test_run_once_records_post_exit_storage_and_swap(
     )
     (tmp_path / "current.json").write_text(json.dumps({"path": str(snapshot)}))
     (release / "data.parquet").write_bytes(b"data")
-    (release / "manifest.json").write_text(json.dumps({
-        "data_release": "fixture", "files": {"data": {"filename": "data.parquet"}}
-    }))
-    (snapshot / "build.json").write_text(json.dumps({
-        "build_id": "build", "source_vintages": {"mountain": "fixture"}
-    }))
+    (release / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "data_release": "fixture",
+                "magnitude_version": "mountain_magnitude_v2",
+                "files": {"data": {"filename": "data.parquet"}},
+            }
+        )
+    )
+    (snapshot / "build.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 9,
+                "build_id": "build",
+                "mountain_release_id": "release",
+                "mountain_magnitude_version": "mountain_magnitude_v2",
+                "source_vintages": {
+                    "mountain": "fixture",
+                    "mountain_magnitude": "mountain_magnitude_v2",
+                    "mountain_release_id": "release",
+                },
+            }
+        )
+    )
 
     class Process:
         returncode = 0
@@ -125,13 +144,15 @@ def _accepted_run(release: Path) -> dict[str, object]:
 
 def test_runtime_coverage_accepts_only_the_connecticut_county_exception(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     benchmark = _load_benchmark()
+    monkeypatch.setattr(benchmark, "validate_magnitude_regressions", lambda connection: {})
     snapshot = tmp_path / "snapshot"
     snapshot.mkdir()
     database = snapshot / "househunter.duckdb"
-    columns = """place_id VARCHAR, state VARCHAR, mountain_score DOUBLE,
-                 mountain_coverage_status VARCHAR, mountain_score_version VARCHAR,
+    columns = """place_id VARCHAR, state VARCHAR, mountain_magnitude DOUBLE,
+                 mountain_coverage_status VARCHAR, mountain_magnitude_version VARCHAR,
                  mountain_pipeline_version VARCHAR"""
     with duckdb.connect(str(database)) as connection:
         connection.execute(f"CREATE TABLE places ({columns})")
@@ -141,9 +162,9 @@ def test_runtime_coverage_accepts_only_the_connecticut_county_exception(
             return (
                 place_id,
                 state,
-                50.0,
+                2.0,
                 "complete",
-                "mountain_score_v1",
+                "mountain_magnitude_v2",
                 "mountain_pipeline_v1",
             )
 

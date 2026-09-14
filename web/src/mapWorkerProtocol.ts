@@ -22,7 +22,7 @@ export interface MapSemantics {
   state: string;
   county: string;
   showUnranked: boolean;
-  mountainMin: number | null;
+  mountainMagnitudeMin: number | null;
   neutralOnly: boolean;
 }
 

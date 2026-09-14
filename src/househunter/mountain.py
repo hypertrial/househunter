@@ -8,6 +8,7 @@ import shutil
 import time
 import uuid
 from collections.abc import Iterable
+from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -16,7 +17,7 @@ import polars as pl
 if TYPE_CHECKING:
     import numpy as np
 
-from .config import RuntimePaths, canonical_json, sha256_bytes, sha256_file
+from .config import RuntimePaths, atomic_write_json, canonical_json, sha256_bytes, sha256_file
 from .errors import HouseHunterError
 from .geography import STATE_BY_FIPS
 from .mountain_paths import (
@@ -30,6 +31,8 @@ from .mountain_paths import (
 
 PIPELINE_VERSION = "mountain_pipeline_v1"
 SCORE_VERSION = "mountain_score_v1"
+MAGNITUDE_VERSION = "mountain_magnitude_v2"
+RELEASE_SCHEMA_VERSION = 2
 TERRITORIES = frozenset({"AS", "GU", "MP", "PR", "VI"})
 IN_SCOPE_STATES = frozenset(STATE_BY_FIPS.values()) - TERRITORIES
 SCORE_WEIGHTS = {
@@ -44,7 +47,7 @@ RAW_COMPONENTS = {
     "public_mountain_access_raw": "public_mountain_access_pct",
     "trail_access_raw": "trail_access_pct",
 }
-SCORE_COLUMNS = [*SCORE_WEIGHTS, "mountain_score"]
+BLOCK_SCORE_COLUMNS = [*SCORE_WEIGHTS, "mountain_score"]
 RAW_PRECISION = {
     "relief_5km_m": 0,
     "relief_10km_m": 0,
@@ -80,18 +83,36 @@ AGGREGATE_MEANS = [
     "nearest_mountain_trail_km",
     "mountain_trail_km_10",
     "mountain_trail_km_25",
-    *SCORE_COLUMNS,
+    *SCORE_WEIGHTS,
 ]
 MOUNTAIN_RUNTIME_COLUMNS = [
     *AGGREGATE_MEANS,
-    "mountain_score_version",
+    "mountain_magnitude",
+    "mountain_magnitude_version",
     "mountain_pipeline_version",
     "mountain_population_coverage",
     "mountain_coverage_status",
 ]
+AGGREGATE_ARTIFACT_COLUMNS = [
+    "place_id",
+    "state",
+    "population_2020",
+    "mountain_covered_population",
+    "mountain_population_coverage",
+    "mountain_coverage_status",
+    *AGGREGATE_MEANS,
+    "mountain_magnitude",
+    "mountain_magnitude_version",
+    "mountain_pipeline_version",
+]
 BUNDLED_COMPACT_RELEASE = Path(__file__).with_name("assets") / "mountain"
 FULL_RELEASE_MAX_BYTES = 4_000_000_000
 COMPACT_RELEASE_MAX_BYTES = 50 * 1024 * 1024
+BASE_PRECISION = 6
+MAGNITUDE_PRECISION = 4
+INTEGER_WEIGHTS = {column: int(weight * 100) for column, weight in SCORE_WEIGHTS.items()}
+_INT64_MAX = 2**63 - 1
+MIGRATION_JOURNAL = "migration-v2.json"
 
 
 def _allocated_tree_bytes(path: Path) -> int:
@@ -260,7 +281,7 @@ def _validate_block_ranges(frame: pl.DataFrame, *, label: str) -> None:
             invalid |= pl.col(column) > 1
         if frame.filter(invalid).height:
             raise HouseHunterError(f"Mountain {label} {column} is outside its valid range")
-    for column in SCORE_COLUMNS:
+    for column in BLOCK_SCORE_COLUMNS:
         if frame.filter(
             pl.col(column).is_not_null()
             & (~pl.col(column).is_finite() | ~pl.col(column).is_between(0, 100, closed="both"))
@@ -291,11 +312,7 @@ def score_blocks(frame: pl.DataFrame, *, minimum_coverage: float = 0.995) -> pl.
     )
     rugged = pl.col("rugged_fraction_20km")
     frame = frame.with_columns(
-        pl.when(
-            pl.col("relief_20km_m").is_null()
-            & (pl.col("pop20") == 0)
-            & rugged.is_not_null()
-        )
+        pl.when(pl.col("relief_20km_m").is_null() & (pl.col("pop20") == 0) & rugged.is_not_null())
         .then(None)
         .when(rugged.is_between(1, 1 + 1e-9, closed="both"))
         .then(1.0)
@@ -339,7 +356,7 @@ def score_blocks(frame: pl.DataFrame, *, minimum_coverage: float = 0.995) -> pl.
                 .then(pl.col(column))
                 .otherwise(pl.lit(None, dtype=pl.Float64))
                 .alias(column)
-                for column in SCORE_COLUMNS
+                for column in BLOCK_SCORE_COLUMNS
             )
         )
     )
@@ -407,25 +424,205 @@ def _reconstruct_block_scores(frame: pl.DataFrame) -> pl.DataFrame:
                 .then(pl.col(column))
                 .otherwise(pl.lit(None, dtype=pl.Float64))
                 .alias(column)
-                for column in SCORE_COLUMNS
+                for column in BLOCK_SCORE_COLUMNS
             )
         )
         .sort("block_geoid")
     )
 
 
+def _quantized_magnitude(total: int, tail: int) -> float:
+    if total <= 0 or tail <= 0 or tail > total:
+        raise HouseHunterError("Mountain magnitude peer tail is invalid")
+    with localcontext() as context:
+        context.prec = 40
+        value = (
+            (Decimal(total) / Decimal(tail))
+            .log10()
+            .quantize(Decimal("0.0001"), rounding=ROUND_HALF_EVEN)
+        )
+    return 0.0 if value == 0 else float(value)
+
+
+def magnitude_values(values: Iterable[float | None]) -> list[float | None]:
+    """Return four-decimal inclusive-tail magnitudes for six-decimal peer bases."""
+    canonical: list[Decimal | None] = []
+    quantum = Decimal("0.000001")
+    for value in values:
+        if value is None:
+            canonical.append(None)
+            continue
+        candidate = Decimal(str(value))
+        if not candidate.is_finite() or candidate < 0:
+            raise HouseHunterError("Mountain magnitude bases must be finite and nonnegative")
+        canonical.append(candidate.quantize(quantum, rounding=ROUND_HALF_EVEN))
+    peers = [value for value in canonical if value is not None]
+    if not peers:
+        return [None] * len(canonical)
+    counts: dict[Decimal, int] = {}
+    for value in peers:
+        counts[value] = counts.get(value, 0) + 1
+    tails: dict[Decimal, int] = {}
+    tail = 0
+    for value in sorted(counts, reverse=True):
+        tail += counts[value]
+        tails[value] = tail
+    total = len(peers)
+    return [
+        None if value is None else _quantized_magnitude(total, tails[value]) for value in canonical
+    ]
+
+
+def _writer_magnitudes(base_micros: pl.Series) -> pl.Series:
+    eligible = [value for value in base_micros.to_list() if value is not None]
+    if not eligible:
+        return pl.Series("mountain_magnitude", [None] * len(base_micros), dtype=pl.Float64)
+    counts: dict[int, int] = {}
+    for value in eligible:
+        counts[int(value)] = counts.get(int(value), 0) + 1
+    tail = 0
+    lookup: dict[int, float] = {}
+    for value in sorted(counts, reverse=True):
+        tail += counts[value]
+        lookup[value] = _quantized_magnitude(len(eligible), tail)
+    return pl.Series(
+        "mountain_magnitude",
+        [None if value is None else lookup[int(value)] for value in base_micros],
+        dtype=pl.Float64,
+    )
+
+
+def _base_unit_expression() -> pl.Expr:
+    complete = pl.all_horizontal(pl.col(column).is_not_null() for column in SCORE_WEIGHTS)
+    units = sum(
+        (pl.col(column) * 100).round(0).cast(pl.Int64) * weight
+        for column, weight in INTEGER_WEIGHTS.items()
+    )
+    return pl.when(complete).then(units).otherwise(pl.lit(None, dtype=pl.Int64))
+
+
+def _validate_aggregate_artifact(frame: pl.DataFrame, *, name: str) -> None:
+    """Validate the exact persisted/runtime aggregate contract and numeric domains."""
+    if frame.columns != AGGREGATE_ARTIFACT_COLUMNS:
+        raise HouseHunterError(f"Mountain {name} artifact columns are incompatible")
+    expected_types = {
+        "place_id": pl.String,
+        "state": pl.String,
+        "population_2020": pl.Int64,
+        "mountain_covered_population": pl.Int64,
+        "mountain_population_coverage": pl.Float64,
+        "mountain_coverage_status": pl.String,
+        "mountain_magnitude": pl.Float64,
+        "mountain_magnitude_version": pl.String,
+        "mountain_pipeline_version": pl.String,
+        **{column: pl.Float64 for column in AGGREGATE_MEANS},
+    }
+    if any(frame.schema[column] != dtype for column, dtype in expected_types.items()):
+        raise HouseHunterError(f"Mountain {name} artifact types are incompatible")
+    if frame.select(
+        pl.any_horizontal(
+            pl.col(column).is_null()
+            for column in (
+                "place_id",
+                "state",
+                "population_2020",
+                "mountain_covered_population",
+                "mountain_population_coverage",
+                "mountain_coverage_status",
+                "mountain_magnitude_version",
+                "mountain_pipeline_version",
+            )
+        ).any()
+    ).item():
+        raise HouseHunterError(f"Mountain {name} artifact has null required values")
+    if frame["place_id"].n_unique() != frame.height:
+        raise HouseHunterError(f"Mountain {name} identifiers are not unique")
+    id_pattern = r"^\d{11}$" if name == "tracts" else r"^\d{5}$"
+    if frame.filter(~pl.col("place_id").str.contains(id_pattern)).height:
+        raise HouseHunterError(f"Mountain {name} identifiers are invalid")
+    if frame.filter(
+        (pl.col("population_2020") < 0)
+        | (pl.col("mountain_covered_population") < 0)
+        | (pl.col("mountain_covered_population") > pl.col("population_2020"))
+    ).height:
+        raise HouseHunterError(f"Mountain {name} population values are invalid")
+    if frame.filter(
+        ~pl.col("mountain_population_coverage").is_finite()
+        | ~pl.col("mountain_population_coverage").is_between(0, 1, closed="both")
+    ).height:
+        raise HouseHunterError(f"Mountain {name} coverage is invalid")
+    allowed_statuses = [
+        "complete",
+        "partial",
+        "insufficient_coverage",
+        "zero_population",
+        "outside_scope",
+    ]
+    if frame.filter(~pl.col("mountain_coverage_status").is_in(allowed_statuses)).height:
+        raise HouseHunterError(f"Mountain {name} coverage status is invalid")
+    for column in AGGREGATE_MEANS:
+        invalid = pl.col(column).is_not_null() & ~pl.col(column).is_finite()
+        if column in SCORE_WEIGHTS:
+            invalid |= pl.col(column).is_not_null() & ~pl.col(column).is_between(
+                0, 100, closed="both"
+            )
+        elif column == "rugged_fraction_20km":
+            invalid |= pl.col(column).is_not_null() & ~pl.col(column).is_between(
+                0, 1, closed="both"
+            )
+        else:
+            invalid |= pl.col(column).is_not_null() & (pl.col(column) < 0)
+        if frame.filter(invalid).height:
+            raise HouseHunterError(f"Mountain {name} {column} is outside its valid range")
+    invalid_magnitude = pl.col("mountain_magnitude").is_not_null() & (
+        ~pl.col("mountain_magnitude").is_finite()
+        | (pl.col("mountain_magnitude") < 0)
+        | (pl.col("mountain_magnitude") != pl.col("mountain_magnitude").round(4))
+    )
+    if frame.filter(invalid_magnitude).height:
+        raise HouseHunterError(f"Mountain {name} magnitudes are not canonical")
+    if any(
+        value == 0 and math.copysign(1.0, value) < 0
+        for value in frame["mountain_magnitude"].drop_nulls().to_list()
+    ):
+        raise HouseHunterError(f"Mountain {name} magnitudes contain negative zero")
+    eligible_status = pl.col("mountain_coverage_status").is_in(["complete", "partial"])
+    if frame.filter(eligible_status != pl.col("mountain_magnitude").is_not_null()).height:
+        raise HouseHunterError(f"Mountain {name} eligibility and magnitude disagree")
+    if frame.filter(
+        (pl.col("mountain_magnitude_version") != MAGNITUDE_VERSION)
+        | (pl.col("mountain_pipeline_version") != PIPELINE_VERSION)
+    ).height:
+        raise HouseHunterError(f"Mountain {name} version columns are incompatible")
+
+
 def aggregate_scores(blocks: pl.DataFrame, geography: str) -> pl.DataFrame:
-    """Produce population-weighted tract or county values from identical block scores."""
+    """Produce v2 aggregate detail and same-grain Mountain Magnitudes."""
     if geography not in {"tract_geoid", "county_fips"}:
         raise HouseHunterError("Mountain aggregation geography must be tract_geoid or county_fips")
     _require_columns(blocks, [geography, "state", "pop20", *AGGREGATE_MEANS])
-    prepared = blocks.with_columns(
-        pl.when(pl.col("mountain_score").is_not_null())
+    if (
+        not blocks.schema["pop20"].is_integer()
+        or blocks.select(pl.col("pop20").is_null().any()).item()
+        or blocks.filter(pl.col("pop20") < 0).height
+    ):
+        raise HouseHunterError("Mountain block population must be a nonnegative integer")
+    maximum_group_population = int(
+        blocks.group_by(geography)
+        .agg(pl.col("pop20").cast(pl.Int128).sum().alias("_population"))["_population"]
+        .max()
+        or 0
+    )
+    if maximum_group_population > _INT64_MAX // 100_000_000:
+        raise HouseHunterError("Mountain integer accumulation exceeds Int64 bounds")
+
+    prepared = blocks.with_columns(_base_unit_expression().alias("_base_units")).with_columns(
+        pl.when(pl.col("_base_units").is_not_null())
         .then(pl.col("pop20"))
         .otherwise(0)
-        .alias("covered_pop")
+        .alias("_covered_pop")
     )
-    weighted = []
+    weighted: list[pl.Expr] = []
     for column in AGGREGATE_MEANS:
         weighted.extend(
             [
@@ -440,16 +637,17 @@ def aggregate_scores(blocks: pl.DataFrame, geography: str) -> pl.DataFrame:
     grouped = prepared.group_by(geography).agg(
         pl.col("state").first(),
         pl.col("pop20").sum().alias("population_2020"),
-        pl.col("covered_pop").sum().alias("mountain_covered_population"),
+        pl.col("_covered_pop").sum().alias("mountain_covered_population"),
+        (pl.col("_base_units") * pl.col("pop20")).sum().alias("_base_weighted_units"),
         *weighted,
     )
-    coverage = (
+    grouped = grouped.with_columns(
         pl.when(pl.col("population_2020") > 0)
         .then(pl.col("mountain_covered_population") / pl.col("population_2020"))
         .otherwise(0.0)
-    )
-    grouped = grouped.with_columns(coverage.round(6).alias("mountain_population_coverage"))
-    status = (
+        .round(BASE_PRECISION)
+        .alias("mountain_population_coverage")
+    ).with_columns(
         pl.when(~pl.col("state").is_in(IN_SCOPE_STATES))
         .then(pl.lit("outside_scope"))
         .when(pl.col("population_2020") == 0)
@@ -459,59 +657,98 @@ def aggregate_scores(blocks: pl.DataFrame, geography: str) -> pl.DataFrame:
         .when(pl.col("mountain_population_coverage") >= 0.9)
         .then(pl.lit("partial"))
         .otherwise(pl.lit("insufficient_coverage"))
+        .alias("mountain_coverage_status")
     )
-    grouped = grouped.with_columns(status.alias("mountain_coverage_status"))
-    means = [
-        pl.when(
-            pl.col("state").is_in(IN_SCOPE_STATES)
-            & (pl.col("mountain_population_coverage") >= 0.9)
-            & (pl.col("mountain_covered_population") > 0)
-            & (pl.col(f"_{column}_population") > 0)
-        )
-        .then(pl.col(f"_{column}_weighted") / pl.col(f"_{column}_population"))
-        .otherwise(pl.lit(None, dtype=pl.Float64))
-        .round(2 if column in SCORE_COLUMNS else RAW_PRECISION.get(column, 3))
-        .alias(column)
-        for column in AGGREGATE_MEANS
+    eligible = (
+        pl.col("state").is_in(IN_SCOPE_STATES)
+        & (pl.col("mountain_population_coverage") >= 0.9)
+        & (pl.col("mountain_covered_population") > 0)
+    )
+    scaled = pl.col("_base_weighted_units") * 100
+    quotient = scaled // pl.col("mountain_covered_population")
+    remainder = scaled % pl.col("mountain_covered_population")
+    round_up = (remainder * 2 > pl.col("mountain_covered_population")) | (
+        (remainder * 2 == pl.col("mountain_covered_population")) & (quotient % 2 == 1)
+    )
+    grouped = grouped.with_columns(
+        pl.when(eligible)
+        .then(quotient + round_up.cast(pl.Int64))
+        .otherwise(pl.lit(None, dtype=pl.Int64))
+        .alias("_base_micros"),
+        *(
+            pl.when(eligible & (pl.col(f"_{column}_population") > 0))
+            .then(pl.col(f"_{column}_weighted") / pl.col(f"_{column}_population"))
+            .otherwise(pl.lit(None, dtype=pl.Float64))
+            .round(2 if column in SCORE_WEIGHTS else RAW_PRECISION.get(column, 3))
+            .alias(column)
+            for column in AGGREGATE_MEANS
+        ),
+    )
+    grouped = grouped.with_columns(_writer_magnitudes(grouped["_base_micros"])).with_columns(
+        pl.lit(MAGNITUDE_VERSION).alias("mountain_magnitude_version"),
+        pl.lit(PIPELINE_VERSION).alias("mountain_pipeline_version"),
+    )
+    private = [
+        "_base_weighted_units",
+        "_base_micros",
+        *(
+            name
+            for column in AGGREGATE_MEANS
+            for name in (f"_{column}_weighted", f"_{column}_population")
+        ),
     ]
-    return (
-        grouped.with_columns(
-            *means,
-            pl.lit(SCORE_VERSION).alias("mountain_score_version"),
-            pl.lit(PIPELINE_VERSION).alias("mountain_pipeline_version"),
-        )
-        .drop(
-            [
-                name
-                for column in AGGREGATE_MEANS
-                for name in (f"_{column}_weighted", f"_{column}_population")
-            ]
-        )
-        .rename({geography: "place_id"})
-        .sort("place_id")
+    result = grouped.drop(private).rename({geography: "place_id"}).sort("place_id")
+    _validate_aggregate_artifact(
+        result, name="tracts" if geography == "tract_geoid" else "counties"
     )
+    return result
+
+
+def _round_ratio_half_even(numerator: int, denominator: int) -> int:
+    quotient, remainder = divmod(numerator, denominator)
+    doubled = remainder * 2
+    if doubled > denominator or (doubled == denominator and quotient % 2):
+        return quotient + 1
+    return quotient
 
 
 def _reconstruct_aggregate_scores(blocks: pl.DataFrame, geography: str) -> pl.DataFrame:
-    """Independent aggregation oracle for persisted tract and county validation."""
+    """Independent v2 aggregation oracle used by full-release validation."""
     if geography not in {"tract_geoid", "county_fips"}:
         raise HouseHunterError("Mountain aggregation geography must be tract_geoid or county_fips")
+    component_complete = pl.all_horizontal(pl.col(column).is_not_null() for column in SCORE_WEIGHTS)
+    integer_components = [
+        (pl.col(column) * 100).round(0).cast(pl.Int64).alias(f"_{column}_hundredths")
+        for column in SCORE_WEIGHTS
+    ]
+    prepared = blocks.with_columns(*integer_components).with_columns(
+        pl.when(component_complete)
+        .then(
+            sum(
+                pl.col(f"_{column}_hundredths") * weight
+                for column, weight in INTEGER_WEIGHTS.items()
+            )
+        )
+        .otherwise(pl.lit(None, dtype=pl.Int64))
+        .alias("_validator_units")
+    )
     base = (
-        blocks.group_by(geography)
+        prepared.group_by(geography)
         .agg(
             pl.col("state").first(),
             pl.col("pop20").sum().alias("population_2020"),
-            pl.when(pl.col("mountain_score").is_not_null())
+            pl.when(pl.col("_validator_units").is_not_null())
             .then(pl.col("pop20"))
             .otherwise(0)
             .sum()
             .alias("mountain_covered_population"),
+            (pl.col("_validator_units") * pl.col("pop20")).sum().alias("_validator_numerator"),
         )
         .with_columns(
             pl.when(pl.col("population_2020") > 0)
             .then(pl.col("mountain_covered_population") / pl.col("population_2020"))
             .otherwise(0.0)
-            .round(6)
+            .round(BASE_PRECISION)
             .alias("mountain_population_coverage")
         )
         .with_columns(
@@ -527,6 +764,20 @@ def _reconstruct_aggregate_scores(blocks: pl.DataFrame, geography: str) -> pl.Da
             .alias("mountain_coverage_status")
         )
     )
+    eligible = (
+        pl.col("state").is_in(IN_SCOPE_STATES)
+        & (pl.col("mountain_population_coverage") >= 0.9)
+        & (pl.col("mountain_covered_population") > 0)
+    )
+    base_micros = [
+        _round_ratio_half_even(int(numerator) * 100, int(denominator)) if is_eligible else None
+        for numerator, denominator, is_eligible in base.select(
+            "_validator_numerator",
+            "mountain_covered_population",
+            eligible.alias("_eligible"),
+        ).iter_rows()
+    ]
+    base = base.with_columns(pl.Series("_validator_base_micros", base_micros, dtype=pl.Int64))
     for column in AGGREGATE_MEANS:
         means = (
             blocks.filter(pl.col(column).is_not_null())
@@ -546,23 +797,25 @@ def _reconstruct_aggregate_scores(blocks: pl.DataFrame, geography: str) -> pl.Da
         base = (
             base.join(means, on=geography, how="left")
             .with_columns(
-                pl.when(
-                    pl.col("state").is_in(IN_SCOPE_STATES)
-                    & (pl.col("mountain_population_coverage") >= 0.9)
-                    & (pl.col("mountain_covered_population") > 0)
-                )
+                pl.when(eligible)
                 .then(pl.col("_mean"))
                 .otherwise(pl.lit(None, dtype=pl.Float64))
-                .round(2 if column in SCORE_COLUMNS else RAW_PRECISION.get(column, 3))
+                .round(2 if column in SCORE_WEIGHTS else RAW_PRECISION.get(column, 3))
                 .alias(column)
             )
             .drop("_mean")
         )
+    validator_bases = [
+        None if value is None else int(value) / 1_000_000
+        for value in base["_validator_base_micros"].to_list()
+    ]
     return (
         base.with_columns(
-            pl.lit(SCORE_VERSION).alias("mountain_score_version"),
+            pl.Series("mountain_magnitude", magnitude_values(validator_bases)),
+            pl.lit(MAGNITUDE_VERSION).alias("mountain_magnitude_version"),
             pl.lit(PIPELINE_VERSION).alias("mountain_pipeline_version"),
         )
+        .drop("_validator_numerator", "_validator_base_micros")
         .rename({geography: "place_id"})
         .sort("place_id")
     )
@@ -647,6 +900,26 @@ def validate_national_expectations(
         raise HouseHunterError("Mountain national block GEOIDs differ from the reviewed lock")
 
 
+def magnitude_contract(*, tract_peers: int, county_peers: int) -> dict[str, object]:
+    """Return the release-identity contract for Mountain Magnitude v2."""
+    return {
+        "formula": "log10(N / count(peer_base >= geography_base))",
+        "component_percentile_decimals": 2,
+        "integer_weights": INTEGER_WEIGHTS,
+        "population_weighting": "exact_integer_sums",
+        "base_decimals": BASE_PRECISION,
+        "base_rounding": "half_even",
+        "magnitude_decimals": MAGNITUDE_PRECISION,
+        "magnitude_rounding": "half_even",
+        "tie_rule": "inclusive_equal_or_higher",
+        "peer_scope": "national_50_states_dc_same_grain",
+        "peer_geography_weight": "one",
+        "eligible_statuses": ["complete", "partial"],
+        "uncapped": True,
+        "peer_counts": {"tract": tract_peers, "county": county_peers},
+    }
+
+
 def write_release(
     raw_blocks: pl.DataFrame,
     destination: Path,
@@ -656,10 +929,11 @@ def write_release(
     national_expectations: dict[str, object] | None = None,
     validate: bool = True,
 ) -> Path:
-    """Write one deterministic, checksummed compact release plus local block detail."""
+    """Write one deterministic, nationally complete v2 release."""
+    if national_expectations is None:
+        raise HouseHunterError("Mountain Magnitude v2 releases must be nationally complete")
     scored = score_blocks(raw_blocks)
-    if national_expectations is not None:
-        validate_national_expectations(scored, national_expectations)
+    validate_national_expectations(scored, national_expectations)
     tracts = aggregate_scores(scored, "tract_geoid")
     counties = aggregate_scores(scored, "county_fips")
     temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
@@ -672,17 +946,24 @@ def write_release(
         }
         for path, frame in outputs.values():
             frame.write_parquet(path, compression="zstd", statistics=True)
-        (temporary / OWNERSHIP_MARKER).write_text("release-v1\n")
+        (temporary / OWNERSHIP_MARKER).write_text("release-v2\n")
+        peer_counts = {
+            "tract": tracts["mountain_magnitude"].drop_nulls().len(),
+            "county": counties["mountain_magnitude"].drop_nulls().len(),
+        }
         manifest = {
-            "schema_version": 1,
+            "schema_version": RELEASE_SCHEMA_VERSION,
+            "artifact_kind": "full",
             "pipeline_version": PIPELINE_VERSION,
-            "score_version": SCORE_VERSION,
+            "base_score_version": SCORE_VERSION,
+            "magnitude_version": MAGNITUDE_VERSION,
+            "magnitude_contract": magnitude_contract(
+                tract_peers=peer_counts["tract"], county_peers=peer_counts["county"]
+            ),
             "data_release": data_release,
-            "national_complete": national_expectations is not None,
+            "national_complete": True,
             "national_expectations": national_expectations,
-            "block_geoid_sha256": national_block_geoid_sha256(scored)
-            if national_expectations is not None
-            else None,
+            "block_geoid_sha256": national_block_geoid_sha256(scored),
             "sources": sources,
             "files": {
                 name: {
@@ -743,6 +1024,36 @@ def _complete_release_expectations(manifest: dict[str, object]) -> dict[str, obj
     return expectations
 
 
+def _compact_manifest(
+    manifest: dict[str, object], *, full_manifest_sha256: str
+) -> dict[str, object]:
+    """Derive a small runtime manifest bound to one validated full release."""
+    sources = manifest.get("sources")
+    files = manifest.get("files")
+    if not isinstance(sources, dict) or not isinstance(files, dict):
+        raise HouseHunterError("Mountain full manifest cannot produce a compact view")
+    result = {
+        "schema_version": RELEASE_SCHEMA_VERSION,
+        "artifact_kind": "compact",
+        "release_id": manifest["release_id"],
+        "full_manifest_sha256": full_manifest_sha256,
+        "pipeline_version": manifest["pipeline_version"],
+        "base_score_version": manifest["base_score_version"],
+        "magnitude_version": manifest["magnitude_version"],
+        "magnitude_contract": manifest["magnitude_contract"],
+        "data_release": manifest["data_release"],
+        "national_complete": manifest["national_complete"],
+        "source_lock_sha256": sources.get("source_lock_sha256"),
+        "source_provenance_sha256": sha256_bytes(canonical_json(sources)),
+        "national_expectations_sha256": sha256_bytes(
+            canonical_json(manifest.get("national_expectations"))
+        ),
+        "block_geoid_sha256": manifest.get("block_geoid_sha256"),
+        "files": {name: files[name] for name in ("tracts", "counties")},
+    }
+    return result
+
+
 def validate_release(
     path: Path,
     *,
@@ -757,10 +1068,12 @@ def validate_release(
     except (OSError, json.JSONDecodeError) as exc:
         raise HouseHunterError(f"Cannot read Mountain release manifest: {exc}") from exc
     if (
-        manifest.get("schema_version") != 1
+        manifest.get("schema_version") != RELEASE_SCHEMA_VERSION
+        or manifest.get("artifact_kind") != "full"
         or manifest.get("pipeline_version") != PIPELINE_VERSION
-        or manifest.get("score_version") != SCORE_VERSION
-        or not isinstance(manifest.get("national_complete"), bool)
+        or manifest.get("base_score_version") != SCORE_VERSION
+        or manifest.get("magnitude_version") != MAGNITUDE_VERSION
+        or manifest.get("national_complete") is not True
     ):
         raise HouseHunterError("Mountain release version is incompatible")
     identity = {key: value for key, value in manifest.items() if key != "release_id"}
@@ -803,22 +1116,7 @@ def validate_release(
         frames[name] = frame
     for name in ("tracts", "counties"):
         frame = frames[name]
-        _require_columns(
-            frame,
-            [
-                "place_id",
-                "mountain_score",
-                "mountain_coverage_status",
-                "mountain_population_coverage",
-            ],
-        )
-        if frame["place_id"].n_unique() != frame.height:
-            raise HouseHunterError(f"Mountain {name} identifiers are not unique")
-        if frame.filter(
-            pl.col("mountain_score").is_not_null()
-            & ~pl.col("mountain_score").is_between(0, 100, closed="both")
-        ).height:
-            raise HouseHunterError(f"Mountain {name} scores are outside 0..100")
+        _validate_aggregate_artifact(frame, name=name)
     blocks = frames["blocks"]
     _require_columns(
         blocks,
@@ -829,9 +1127,22 @@ def validate_release(
             "state",
             "pop20",
             *RAW_COMPONENTS,
-            *SCORE_COLUMNS,
+            *BLOCK_SCORE_COLUMNS,
         ],
     )
+    if blocks.select(
+        pl.any_horizontal(
+            pl.col(column).is_null()
+            for column in (
+                "block_geoid",
+                "tract_geoid",
+                "county_fips",
+                "state",
+                "pop20",
+            )
+        ).any()
+    ).item():
+        raise HouseHunterError("Mountain block identifiers, state, and population cannot be null")
     invalid_ids = blocks.filter(
         ~pl.col("block_geoid").str.contains(r"^\d{15}$")
         | (pl.col("tract_geoid") != pl.col("block_geoid").str.slice(0, 11))
@@ -858,25 +1169,30 @@ def validate_release(
     recomputed_blocks = _reconstruct_block_scores(blocks.select(raw_columns))
     score_columns = [
         "block_geoid",
-        *SCORE_COLUMNS,
+        *BLOCK_SCORE_COLUMNS,
         "mountain_score_version",
         "mountain_pipeline_version",
     ]
     if not blocks.select(score_columns).equals(recomputed_blocks.select(score_columns)):
         raise HouseHunterError("Mountain block scores do not match rounded national raw metrics")
-    expectations = manifest.get("national_expectations")
-    if manifest["national_complete"]:
-        expectations = _complete_release_expectations(manifest)
-        digest = manifest.get("block_geoid_sha256")
-        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
-            raise HouseHunterError("Complete Mountain release lacks its block GEOID digest")
-        validate_national_expectations(blocks, expectations, expected_block_geoid_sha256=digest)
-    elif expectations is not None:
-        raise HouseHunterError("Partial Mountain release cannot claim national expectations")
+    expectations = _complete_release_expectations(manifest)
+    digest = manifest.get("block_geoid_sha256")
+    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise HouseHunterError("Complete Mountain release lacks its block GEOID digest")
+    validate_national_expectations(blocks, expectations, expected_block_geoid_sha256=digest)
     for name, geography in (("tracts", "tract_geoid"), ("counties", "county_fips")):
         expected = _reconstruct_aggregate_scores(blocks, geography)
         if frames[name].columns != expected.columns or not frames[name].equals(expected):
-            raise HouseHunterError(f"Mountain {name} do not match block aggregation")
+            raise HouseHunterError(f"Mountain {name} do not match reconstructed block aggregation")
+    peer_counts = {
+        "tract": frames["tracts"]["mountain_magnitude"].drop_nulls().len(),
+        "county": frames["counties"]["mountain_magnitude"].drop_nulls().len(),
+    }
+    expected_contract = magnitude_contract(
+        tract_peers=peer_counts["tract"], county_peers=peer_counts["county"]
+    )
+    if manifest.get("magnitude_contract") != expected_contract:
+        raise HouseHunterError("Mountain magnitude contract or peer counts are invalid")
     compact_bytes = sum(
         (path / files[name]["filename"]).stat().st_size for name in ("tracts", "counties")
     )
@@ -906,21 +1222,65 @@ def load_compact_release(
         manifest = json.loads((path / "manifest.json").read_text())
     except (OSError, json.JSONDecodeError) as exc:
         raise HouseHunterError(f"Cannot read Mountain release manifest: {exc}") from exc
+    if manifest.get("schema_version") == 1:
+        raise HouseHunterError(
+            "Mountain release uses v1 scoring; run `househunter mountain rescore-v1`"
+        )
     if (
-        manifest.get("schema_version") != 1
+        manifest.get("schema_version") != RELEASE_SCHEMA_VERSION
         or manifest.get("pipeline_version") != PIPELINE_VERSION
-        or manifest.get("score_version") != SCORE_VERSION
+        or manifest.get("base_score_version") != SCORE_VERSION
+        or manifest.get("magnitude_version") != MAGNITUDE_VERSION
         or manifest.get("national_complete") is not True
     ):
         raise HouseHunterError("Mountain runtime release is incomplete or incompatible")
-    _complete_release_expectations(manifest)
-    identity = {key: value for key, value in manifest.items() if key != "release_id"}
-    if manifest.get("release_id") != sha256_bytes(canonical_json(identity))[:16]:
-        raise HouseHunterError("Mountain release identity does not match its manifest")
+    artifact_kind = manifest.get("artifact_kind")
+    if artifact_kind == "full":
+        _complete_release_expectations(manifest)
+        identity = {key: value for key, value in manifest.items() if key != "release_id"}
+        if manifest.get("release_id") != sha256_bytes(canonical_json(identity))[:16]:
+            raise HouseHunterError("Mountain release identity does not match its manifest")
+        expected_file_names = {"blocks", "tracts", "counties"}
+    elif artifact_kind == "compact":
+        expected_keys = {
+            "schema_version",
+            "artifact_kind",
+            "release_id",
+            "full_manifest_sha256",
+            "pipeline_version",
+            "base_score_version",
+            "magnitude_version",
+            "magnitude_contract",
+            "data_release",
+            "national_complete",
+            "source_lock_sha256",
+            "source_provenance_sha256",
+            "national_expectations_sha256",
+            "block_geoid_sha256",
+            "files",
+        }
+        digest_keys = {
+            "full_manifest_sha256",
+            "source_lock_sha256",
+            "source_provenance_sha256",
+            "national_expectations_sha256",
+            "block_geoid_sha256",
+        }
+        if (
+            set(manifest) != expected_keys
+            or re.fullmatch(r"[0-9a-f]{16}", str(manifest.get("release_id"))) is None
+            or any(
+                re.fullmatch(r"[0-9a-f]{64}", str(manifest.get(key))) is None for key in digest_keys
+            )
+        ):
+            raise HouseHunterError("Mountain compact manifest is incompatible")
+        expected_file_names = {"tracts", "counties"}
+    else:
+        raise HouseHunterError("Mountain runtime artifact kind is incompatible")
     files = manifest.get("files")
-    if not isinstance(files, dict) or set(files) != {"blocks", "tracts", "counties"}:
+    if not isinstance(files, dict) or set(files) != expected_file_names:
         raise HouseHunterError("Mountain release manifest has an invalid file set")
-    frames = []
+    frames: list[pl.DataFrame] = []
     for name in ("tracts", "counties"):
         metadata = files[name]
         if not isinstance(metadata, dict) or Path(
@@ -936,10 +1296,15 @@ def load_compact_release(
             raise HouseHunterError(f"Cannot read Mountain {name} artifact: {exc}") from exc
         if sha256_file(file_path) != metadata.get("sha256") or frame.height != metadata.get("rows"):
             raise HouseHunterError(f"Mountain {name} artifact does not match its manifest")
-        _require_columns(frame, ["place_id", *MOUNTAIN_RUNTIME_COLUMNS])
-        if frame["place_id"].n_unique() != frame.height:
-            raise HouseHunterError(f"Mountain {name} identifiers are not unique")
-        frames.append(frame.select("place_id", *MOUNTAIN_RUNTIME_COLUMNS))
+        _validate_aggregate_artifact(frame, name=name)
+        frames.append(frame)
+    contract = magnitude_contract(
+        tract_peers=frames[0]["mountain_magnitude"].drop_nulls().len(),
+        county_peers=frames[1]["mountain_magnitude"].drop_nulls().len(),
+    )
+    if manifest.get("magnitude_contract") != contract:
+        raise HouseHunterError("Mountain runtime magnitude contract is incompatible")
+    frames = [frame.select("place_id", *MOUNTAIN_RUNTIME_COLUMNS) for frame in frames]
     return manifest, frames[0], frames[1]
 
 
@@ -950,20 +1315,29 @@ def current_compact_release(
 ) -> tuple[Path, dict[str, object], pl.DataFrame, pl.DataFrame] | None:
     mountain_root = paths.data / "mountain"
     releases_root = mountain_root / "releases"
-    if mountain_root.is_symlink() or releases_root.is_symlink():
+    compact_root = mountain_root / "compact"
+    if mountain_root.is_symlink() or releases_root.is_symlink() or compact_root.is_symlink():
         raise HouseHunterError("Mountain runtime path cannot contain symlinked managed roots")
+    journal = mountain_root / MIGRATION_JOURNAL
+    if journal.is_symlink() or journal.exists():
+        if journal.is_symlink() or not journal.is_file():
+            raise HouseHunterError("Mountain migration journal is unsafe")
+        raise HouseHunterError(
+            "Mountain v2 migration is incomplete; rerun `househunter mountain rescore-v1`"
+        )
     pointer = mountain_root / "current.json"
+    if pointer.is_symlink():
+        raise HouseHunterError("Current Mountain release pointer cannot be a symlink")
     if not pointer.is_file():
         managed_fallback = False
         if bundled_path is not None:
             bundled = bundled_path
         else:
-            compact_root = mountain_root / "compact"
             compact_pointer = compact_root / "current.json"
             bundled = BUNDLED_COMPACT_RELEASE
+            if compact_pointer.is_symlink():
+                raise HouseHunterError("Mountain compact fallback pointer is invalid")
             if compact_pointer.is_file():
-                if compact_root.is_symlink() or compact_pointer.is_symlink():
-                    raise HouseHunterError("Mountain compact fallback path cannot be a symlink")
                 try:
                     compact_metadata = json.loads(compact_pointer.read_text())
                     compact_id = str(compact_metadata["release_id"])
@@ -992,8 +1366,6 @@ def current_compact_release(
         if managed_fallback and manifest["release_id"] != bundled.name:
             raise HouseHunterError("Mountain compact fallback pointer and release disagree")
         return bundled, manifest, tracts, counties
-    if pointer.is_symlink():
-        raise HouseHunterError("Current Mountain release pointer cannot be a symlink")
     try:
         metadata = json.loads(pointer.read_text())
         release_id = str(metadata["release_id"])
@@ -1006,9 +1378,35 @@ def current_compact_release(
     release = unresolved_release.resolve()
     if metadata.get("schema_version") != 1 or not release.is_relative_to(releases):
         raise HouseHunterError("Current Mountain release pointer is invalid")
+    compact_pointer = mountain_root / "compact" / "current.json"
+    if compact_pointer.is_symlink():
+        raise HouseHunterError("Mountain compact fallback pointer is invalid")
+    if compact_pointer.exists():
+        if not compact_pointer.is_file():
+            raise HouseHunterError("Mountain compact fallback pointer is invalid")
+        try:
+            compact_metadata = json.loads(compact_pointer.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise HouseHunterError(f"Mountain compact fallback pointer is invalid: {exc}") from exc
+        if (
+            compact_metadata.get("schema_version") != 1
+            or compact_metadata.get("release_id") != release_id
+        ):
+            raise HouseHunterError(
+                "Mountain managed pointers disagree; rerun `househunter mountain rescore-v1`"
+            )
     manifest, tracts, counties = load_compact_release(release)
     if manifest["release_id"] != release_id:
         raise HouseHunterError("Current Mountain pointer and release disagree")
+    if compact_pointer.exists():
+        compact_root = ensure_safe_directory(mountain_root / "compact")
+        compact_release = lexical_path(compact_root / release_id)
+        require_owned_child(compact_release, compact_root, name_pattern=r"[0-9a-f]{16}")
+        compact_manifest, _, _ = load_compact_release(compact_release)
+        if compact_manifest.get("release_id") != release_id or compact_manifest.get(
+            "full_manifest_sha256"
+        ) != sha256_file(release / "manifest.json"):
+            raise HouseHunterError("Mountain managed full and compact artifacts disagree")
     return release, manifest, tracts, counties
 
 
@@ -1034,12 +1432,10 @@ def _publish_pointer(root: Path, release_id: str, rollback_release_id: str | Non
     payload: dict[str, object] = {"schema_version": 1, "release_id": release_id}
     if rollback_release_id and rollback_release_id != release_id:
         payload["rollback_release_id"] = rollback_release_id
-    temporary_pointer = root / f".current.{uuid.uuid4().hex}.tmp"
-    temporary_pointer.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-    os.replace(temporary_pointer, root / "current.json")
+    atomic_write_json(root / "current.json", payload)
 
 
-def _promote_validated_release(
+def stage_validated_release(
     paths: RuntimePaths,
     candidate: Path,
     manifest: dict[str, object],
@@ -1053,7 +1449,6 @@ def _promote_validated_release(
     releases = ensure_safe_directory(releases)
     release_id = str(manifest["release_id"])
     target = lexical_path(releases / release_id)
-    previous, previous_rollback = _current_release_ids(root)
     if target.exists():
         require_owned_child(target, releases, name_pattern=r"[0-9a-f]{16}")
         validate_release(target)
@@ -1069,7 +1464,7 @@ def _promote_validated_release(
         temporary = releases / f".{release_id}.{uuid.uuid4().hex}.tmp"
         try:
             shutil.copytree(candidate, temporary)
-            (temporary / OWNERSHIP_MARKER).write_text("release-v1\n")
+            (temporary / OWNERSHIP_MARKER).write_text("release-v2\n")
             validate_release(temporary)
             os.replace(temporary, target)
         except BaseException:
@@ -1085,8 +1480,59 @@ def _promote_validated_release(
                     name_pattern=r"\.[0-9a-f]{16}\.[0-9a-f]{32}\.tmp",
                 )
             raise
+    return target
+
+
+def publish_release_pointer(
+    paths: RuntimePaths,
+    release_id: str,
+    *,
+    rollback_release_id: str | None = None,
+) -> None:
+    """Publish a pointer only after its installed v2 release validates."""
+    if re.fullmatch(r"[0-9a-f]{16}", release_id) is None:
+        raise HouseHunterError("Mountain release ID is invalid")
+    root = ensure_safe_directory(paths.data / "mountain")
+    releases = ensure_safe_directory(root / "releases")
+    target = lexical_path(releases / release_id)
+    require_owned_child(target, releases, name_pattern=r"[0-9a-f]{16}")
+    manifest = validate_release(target)
+    if manifest.get("release_id") != release_id:
+        raise HouseHunterError("Mountain staged release identity disagrees")
+    if rollback_release_id is not None:
+        rollback = lexical_path(releases / rollback_release_id)
+        require_owned_child(rollback, releases, name_pattern=r"[0-9a-f]{16}")
+        rollback_manifest = validate_release(rollback)
+        if rollback_manifest.get("release_id") != rollback_release_id:
+            raise HouseHunterError("Mountain rollback release identity disagrees")
+    _publish_pointer(root, release_id, rollback_release_id)
+
+
+def _promote_validated_release(
+    paths: RuntimePaths,
+    candidate: Path,
+    manifest: dict[str, object],
+    *,
+    move_candidate: bool,
+) -> Path:
+    root = paths.data / "mountain"
+    previous, previous_rollback = _current_release_ids(root)
+    if (root / "current.json").is_file() and previous is None:
+        raise HouseHunterError("Current Mountain release pointer is invalid")
+    if previous is not None:
+        previous_path = root / "releases" / previous
+        try:
+            previous_manifest = validate_release(previous_path)
+        except HouseHunterError as exc:
+            raise HouseHunterError(
+                "Current Mountain release is v1; run `househunter mountain rescore-v1`"
+            ) from exc
+        if previous_manifest.get("release_id") != previous:
+            raise HouseHunterError("Current Mountain pointer and release disagree")
+    target = stage_validated_release(paths, candidate, manifest, move_candidate=move_candidate)
+    release_id = str(manifest["release_id"])
     rollback = previous_rollback if previous == release_id else previous
-    _publish_pointer(root, release_id, rollback)
+    publish_release_pointer(paths, release_id, rollback_release_id=rollback)
     return target
 
 
@@ -1129,7 +1575,7 @@ def promote_release(
     return _promote_validated_release(paths, candidate, manifest, move_candidate=False)
 
 
-def write_and_promote_release(
+def write_and_stage_release(
     paths: RuntimePaths,
     raw_blocks: pl.DataFrame,
     *,
@@ -1138,12 +1584,10 @@ def write_and_promote_release(
     national_expectations: dict[str, object],
     timings: dict[str, float] | None = None,
 ) -> tuple[Path, dict[str, object]]:
-    """Write, definitively validate once, and atomically promote a generated release."""
+    """Write, definitively validate, and install a release without publishing."""
     from .mountain_pack import ensure_storage_budget
 
-    ensure_storage_budget(
-        paths.data / "mountain", reserve_bytes=FULL_RELEASE_MAX_BYTES
-    )
+    ensure_storage_budget(paths.data / "mountain", reserve_bytes=FULL_RELEASE_MAX_BYTES)
     releases = paths.data / "mountain" / "releases"
     releases = ensure_safe_directory(releases)
     candidate = releases / f".{uuid.uuid4().hex}.tmp"
@@ -1168,7 +1612,7 @@ def write_and_promote_release(
                 time.monotonic() - validation_started, 3
             )
         promotion_started = time.monotonic()
-        target = _promote_validated_release(paths, candidate, manifest, move_candidate=True)
+        target = stage_validated_release(paths, candidate, manifest, move_candidate=True)
         if timings is not None:
             timings["promotion_seconds"] = round(time.monotonic() - promotion_started, 3)
         return target, manifest
@@ -1181,6 +1625,40 @@ def write_and_promote_release(
         ):
             remove_owned_child(candidate, releases, name_pattern=r"\.[0-9a-f]{32}\.tmp")
         raise
+
+
+def write_and_promote_release(
+    paths: RuntimePaths,
+    raw_blocks: pl.DataFrame,
+    *,
+    data_release: str,
+    sources: dict[str, object],
+    national_expectations: dict[str, object],
+    timings: dict[str, float] | None = None,
+) -> tuple[Path, dict[str, object]]:
+    """Write, definitively validate, install, and publish a generated release."""
+    target, manifest = write_and_stage_release(
+        paths,
+        raw_blocks,
+        data_release=data_release,
+        sources=sources,
+        national_expectations=national_expectations,
+        timings=timings,
+    )
+    previous, previous_rollback = _current_release_ids(paths.data / "mountain")
+    if (paths.data / "mountain" / "current.json").is_file() and previous is None:
+        raise HouseHunterError("Current Mountain release pointer is invalid")
+    if previous is not None:
+        try:
+            validate_release(paths.data / "mountain" / "releases" / previous)
+        except HouseHunterError as exc:
+            raise HouseHunterError(
+                "Current Mountain release is v1; run `househunter mountain rescore-v1`"
+            ) from exc
+    release_id = str(manifest["release_id"])
+    rollback = previous_rollback if previous == release_id else previous
+    publish_release_pointer(paths, release_id, rollback_release_id=rollback)
+    return target, manifest
 
 
 def restore_release_pointer(paths: RuntimePaths, pointer: bytes | None) -> None:
@@ -1216,13 +1694,15 @@ def prune_owned_releases(paths: RuntimePaths) -> list[str]:
     protected = {pointer.get("release_id"), pointer.get("rollback_release_id")}
     removed: list[str] = []
     for child in releases.iterdir():
+        marker = child / OWNERSHIP_MARKER
         if (
             child.name in protected
             or re.fullmatch(r"[0-9a-f]{16}", child.name) is None
             or child.is_symlink()
             or not child.is_dir()
-            or not (child / OWNERSHIP_MARKER).is_file()
-            or (child / OWNERSHIP_MARKER).is_symlink()
+            or not marker.is_file()
+            or marker.is_symlink()
+            or marker.read_text() != "release-v2\n"
         ):
             continue
         remove_owned_child(child, releases, name_pattern=r"[0-9a-f]{16}")
@@ -1230,16 +1710,19 @@ def prune_owned_releases(paths: RuntimePaths) -> list[str]:
     return sorted(removed)
 
 
-def write_and_promote_compact_fallback(
+def stage_compact_fallback(
     paths: RuntimePaths,
     release: Path,
     manifest: dict[str, object],
 ) -> Path:
-    """Atomically publish the compact managed fallback for a validated release."""
+    """Copy and validate a compact fallback without publishing its pointer."""
     runtime_manifest, _, _ = load_compact_release(release)
     release_id = str(manifest.get("release_id", ""))
     if runtime_manifest.get("release_id") != release_id:
         raise HouseHunterError("Mountain compact fallback source was not definitively validated")
+    compact_manifest = _compact_manifest(
+        runtime_manifest, full_manifest_sha256=sha256_file(release / "manifest.json")
+    )
     files = runtime_manifest["files"]
     compact_bytes = sum(
         (release / files[name]["filename"]).stat().st_size for name in ("tracts", "counties")
@@ -1254,7 +1737,7 @@ def write_and_promote_compact_fallback(
     if target.exists():
         require_owned_child(target, root, name_pattern=r"[0-9a-f]{16}")
         existing, _, _ = load_compact_release(target)
-        if existing.get("release_id") != release_id:
+        if existing != compact_manifest:
             raise HouseHunterError("Mountain compact fallback identity collision")
     else:
         from .mountain_pack import ensure_storage_budget
@@ -1262,20 +1745,19 @@ def write_and_promote_compact_fallback(
         reserve_bytes = sum(
             (release / filename).stat().st_blocks * 512
             for filename in (
-                "manifest.json",
                 str(files["tracts"]["filename"]),
                 str(files["counties"]["filename"]),
             )
-        )
+        ) + len(json.dumps(compact_manifest).encode())
         ensure_storage_budget(paths.data / "mountain", reserve_bytes=reserve_bytes)
         temporary = ensure_owned_child(
             root / f".{release_id}.{uuid.uuid4().hex}.tmp",
             root,
             name_pattern=r"\.[0-9a-f]{16}\.[0-9a-f]{32}\.tmp",
-            marker_value="compact-release-v1\n",
+            marker_value="compact-release-v2\n",
         )
         try:
-            shutil.copy2(release / "manifest.json", temporary / "manifest.json")
+            atomic_write_json(temporary / "manifest.json", compact_manifest)
             for name in ("tracts", "counties"):
                 filename = str(files[name]["filename"])
                 shutil.copy2(release / filename, temporary / filename)
@@ -1293,12 +1775,30 @@ def write_and_promote_compact_fallback(
                     name_pattern=r"\.[0-9a-f]{16}\.[0-9a-f]{32}\.tmp",
                 )
             raise
-    pointer = root / "current.json"
-    temporary_pointer = root / f".current.{uuid.uuid4().hex}.tmp"
-    temporary_pointer.write_text(
-        json.dumps({"schema_version": 1, "release_id": release_id}, indent=2, sort_keys=True) + "\n"
-    )
-    os.replace(temporary_pointer, pointer)
+    return target
+
+
+def publish_compact_pointer(paths: RuntimePaths, release_id: str) -> None:
+    """Publish a pointer only after its staged compact release validates."""
+    if re.fullmatch(r"[0-9a-f]{16}", release_id) is None:
+        raise HouseHunterError("Mountain compact release ID is invalid")
+    root = ensure_safe_directory(paths.data / "mountain" / "compact")
+    target = lexical_path(root / release_id)
+    require_owned_child(target, root, name_pattern=r"[0-9a-f]{16}")
+    manifest, _, _ = load_compact_release(target)
+    if manifest.get("release_id") != release_id:
+        raise HouseHunterError("Mountain compact staged identity disagrees")
+    atomic_write_json(root / "current.json", {"schema_version": 1, "release_id": release_id})
+
+
+def write_and_promote_compact_fallback(
+    paths: RuntimePaths,
+    release: Path,
+    manifest: dict[str, object],
+) -> Path:
+    """Stage and atomically publish the compact managed fallback."""
+    target = stage_compact_fallback(paths, release, manifest)
+    publish_compact_pointer(paths, str(manifest["release_id"]))
     return target
 
 
@@ -1336,11 +1836,13 @@ def prune_owned_compact_fallbacks(paths: RuntimePaths) -> list[str]:
     for child in root.iterdir():
         if child.name == protected or re.fullmatch(r"[0-9a-f]{16}", child.name) is None:
             continue
+        marker = child / OWNERSHIP_MARKER
         if (
             child.is_symlink()
             or not child.is_dir()
-            or not (child / OWNERSHIP_MARKER).is_file()
-            or (child / OWNERSHIP_MARKER).is_symlink()
+            or not marker.is_file()
+            or marker.is_symlink()
+            or marker.read_text() != "compact-release-v2\n"
         ):
             continue
         remove_owned_child(child, root, name_pattern=r"[0-9a-f]{16}")
@@ -1356,7 +1858,10 @@ def write_compact_bundle(release: Path, destination: Path) -> Path:
         raise HouseHunterError(f"Mountain compact bundle already exists: {destination}")
     temporary.mkdir(parents=True)
     try:
-        shutil.copy2(release / "manifest.json", temporary / "manifest.json")
+        compact_manifest = _compact_manifest(
+            manifest, full_manifest_sha256=sha256_file(release / "manifest.json")
+        )
+        atomic_write_json(temporary / "manifest.json", compact_manifest)
         files = manifest["files"]
         for name in ("tracts", "counties"):
             shutil.copy2(release / files[name]["filename"], temporary / files[name]["filename"])

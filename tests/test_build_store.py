@@ -11,7 +11,7 @@ import yaml
 from househunter.build import (
     BUILD_SCHEMA_VERSION,
     MOUNTAIN_RUNTIME_GEOGRAPHY_VERSION,
-    _attach_mountain_scores,
+    _attach_current_mountain,
     _cached_snapshot_artifacts_valid,
     build_snapshot,
 )
@@ -203,23 +203,155 @@ def test_build_joins_promoted_mountain_release_and_changes_identity(
         metadata["source_vintages"]["mountain_runtime_geography"]
         == MOUNTAIN_RUNTIME_GEOGRAPHY_VERSION
     )
+    assert metadata["source_vintages"]["mountain_magnitude"] == "mountain_magnitude_v2"
+    assert metadata["mountain_magnitude_version"] == "mountain_magnitude_v2"
+    assert metadata["mountain_release_id"] == metadata["source_vintages"]["mountain_release_id"]
     with Store(paths) as store:
         alabama = store.place_detail("01001000100")["summary"]
         alaska = store.place_detail("02001000100")["summary"]
-        assert alabama["mountain_score"] == 0.0
-        assert alaska["mountain_score"] > alabama["mountain_score"]
-        assert [row["place_id"] for row in store.list_places(mountain_min=1)["items"]] == [
-            "02001000100"
+        assert alabama["mountain_magnitude"] == 0.0
+        assert alaska["mountain_magnitude"] > alabama["mountain_magnitude"]
+        assert "mountain_score" not in alabama
+        assert [
+            row["place_id"] for row in store.list_places(mountain_magnitude_min=1)["items"]
+        ] == ["02001000100"]
+
+
+def test_store_magnitude_filter_sort_ties_nulls_and_map_schema_three(
+    fixture_environment: tuple[RuntimePaths, Path],
+) -> None:
+    paths, root = fixture_environment
+    _promote_mountain_fixture(paths, root)
+    build_snapshot(paths)
+
+    with Store(paths) as store:
+        ascending = store.list_places(
+            sort="mountain_magnitude", direction="asc", include_unranked=True
+        )["items"]
+        descending = store.list_places(
+            sort="mountain_magnitude", direction="desc", include_unranked=True
+        )["items"]
+        assert [row["place_id"] for row in ascending] == [
+            "01001000100",
+            "01001000200",
+            "01001000300",
+            "02001000100",
+            "99999999999",
         ]
+        assert [row["place_id"] for row in descending] == [
+            "02001000100",
+            "01001000100",
+            "01001000200",
+            "01001000300",
+            "99999999999",
+        ]
+        assert ascending[-1]["mountain_magnitude"] is None
+        assert store.list_places(mountain_magnitude_min=0)["total"] == 4
+        assert store.list_places(mountain_magnitude_max=0)["total"] == 3
+        exact = store.list_places(
+            mountain_magnitude_min=ascending[3]["mountain_magnitude"],
+            mountain_magnitude_max=ascending[3]["mountain_magnitude"],
+        )
+        assert [row["place_id"] for row in exact["items"]] == ["02001000100"]
+        with pytest.raises(HouseHunterError, match="Unsupported sort"):
+            store.list_places(sort="mountain_score")
+
+        payload = store.map_scores("tract")
+        assert payload["schema_version"] == 3
+        assert set(payload["columns"]) == {
+            "place_id",
+            "risk_score",
+            "community_conditions_group",
+            "mountain_magnitude",
+        }
+        assert "mountain_score" not in payload["columns"]
+        assert len({len(values) for values in payload["columns"].values()}) == 1
+
+
+@pytest.mark.parametrize(
+    ("minimum", "maximum"),
+    [
+        (-0.0001, None),
+        (float("nan"), None),
+        (float("inf"), None),
+        (-float("inf"), None),
+        (2.0, 1.0),
+    ],
+)
+def test_store_rejects_invalid_magnitude_bounds(
+    fixture_environment: tuple[RuntimePaths, object],
+    minimum: float | None,
+    maximum: float | None,
+) -> None:
+    paths, _ = fixture_environment
+    build_snapshot(paths)
+
+    with Store(paths) as store, pytest.raises(HouseHunterError, match="Magnitude"):
+        store.list_places(
+            mountain_magnitude_min=minimum,
+            mountain_magnitude_max=maximum,
+        )
+
+
+def test_snapshot_and_all_exports_exclude_legacy_mountain_score_fields(
+    fixture_environment: tuple[RuntimePaths, Path],
+) -> None:
+    paths, root = fixture_environment
+    _promote_mountain_fixture(paths, root)
+    build = build_snapshot(paths)
+    forbidden = {"mountain_score", "mountain_score_version"}
+
+    for artifact in ("places.parquet", "counties.parquet"):
+        columns = set(pl.read_parquet_schema(build / artifact))
+        assert "mountain_magnitude" in columns
+        assert "mountain_magnitude_version" in columns
+        assert "relief_20km_m" in columns
+        assert not forbidden & columns
+
+    connection = duckdb.connect(str(build / "househunter.duckdb"), read_only=True)
+    try:
+        for table in ("places", "counties"):
+            columns = {row[0] for row in connection.execute(f"DESCRIBE {table}").fetchall()}
+            assert "mountain_magnitude" in columns
+            assert not forbidden & columns
+    finally:
+        connection.close()
+
+    with Store(paths) as store:
+        summary = store.place_detail("01001000100")["summary"]
+        assert "mountain_magnitude" in summary
+        assert not forbidden & set(summary)
+        for format in ("csv", "json", "parquet"):
+            output = root / f"places-export.{format}"
+            store.export(format, output)
+            if format == "csv":
+                exported_columns = set(pl.read_csv(output).columns)
+            elif format == "json":
+                exported_columns = set(json.loads(output.read_text())[0])
+            else:
+                exported_columns = set(pl.read_parquet_schema(output))
+            assert "mountain_magnitude" in exported_columns
+            assert not forbidden & exported_columns
+
+
+def test_state_snapshot_keeps_national_magnitude_calibration(
+    fixture_environment: tuple[RuntimePaths, Path],
+) -> None:
+    paths, root = fixture_environment
+    _promote_mountain_fixture(paths, root)
+
+    build_snapshot(paths, state="AK")
+
+    with Store(paths) as store:
+        alaska = store.place_detail("02001000100")["summary"]
+    assert alaska["mountain_magnitude"] > 1
 
 
 def test_mountain_runtime_reconciles_connecticut_tracts_and_marks_missing_counties(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     paths = RuntimePaths.from_root(tmp_path)
-    places = pl.DataFrame(
-        {"place_id": ["09110100100", "72001000100"], "state": ["CT", "PR"]}
-    )
+    places = pl.DataFrame({"place_id": ["09110100100", "72001000100"], "state": ["CT", "PR"]})
     counties = pl.DataFrame({"place_id": ["09110", "72001"], "state": ["CT", "PR"]})
     ids = [
         "09001100100",
@@ -228,7 +360,7 @@ def test_mountain_runtime_reconciles_connecticut_tracts_and_marks_missing_counti
         "09009990000",
         "09011990100",
     ]
-    strings = {"mountain_score_version", "mountain_pipeline_version"}
+    strings = {"mountain_magnitude_version", "mountain_pipeline_version"}
     mountain_tracts = pl.DataFrame(
         {
             "place_id": ids,
@@ -237,11 +369,11 @@ def test_mountain_runtime_reconciles_connecticut_tracts_and_marks_missing_counti
                 for column in MOUNTAIN_RUNTIME_COLUMNS
                 if column not in strings | {"mountain_coverage_status"}
             },
-            "mountain_score": [42.0, None, None, None, None],
-            "mountain_score_version": ["mountain_score_v1"] * len(ids),
+            "mountain_magnitude": [2.42, None, None, None, None],
+            "mountain_magnitude_version": ["mountain_magnitude_v2"] * len(ids),
             "mountain_pipeline_version": ["mountain_pipeline_v1"] * len(ids),
             "mountain_population_coverage": [1.0, 0.0, 0.0, 0.0, 0.0],
-            "mountain_coverage_status": ["sufficient"] + ["zero_population"] * 4,
+            "mountain_coverage_status": ["complete"] + ["zero_population"] * 4,
         }
     ).select("place_id", *MOUNTAIN_RUNTIME_COLUMNS)
     mountain_counties = mountain_tracts.head(0)
@@ -250,15 +382,19 @@ def test_mountain_runtime_reconciles_connecticut_tracts_and_marks_missing_counti
         "househunter.mountain.current_compact_release",
         lambda paths: (
             tmp_path,
-            {"data_release": "fixture", "score_version": "mountain_score_v1"},
+            {
+                "data_release": "fixture",
+                "magnitude_version": "mountain_magnitude_v2",
+                "release_id": "1" * 16,
+            },
             mountain_tracts,
             mountain_counties,
         ),
     )
 
-    attached, attached_counties, _ = _attach_mountain_scores(places, counties, paths)
-    assert attached["mountain_score"].to_list() == [42.0, None]
-    assert attached["mountain_coverage_status"].to_list() == ["sufficient", "outside_scope"]
+    attached, attached_counties, _ = _attach_current_mountain(places, counties, paths)
+    assert attached["mountain_magnitude"].to_list() == [2.42, None]
+    assert attached["mountain_coverage_status"].to_list() == ["complete", "outside_scope"]
     assert attached_counties["mountain_coverage_status"].to_list() == [
         "unavailable",
         "outside_scope",
@@ -266,7 +402,7 @@ def test_mountain_runtime_reconciles_connecticut_tracts_and_marks_missing_counti
 
     poisoned = mountain_tracts.with_columns(
         pl.when(pl.col("place_id") == "09001990000")
-        .then(pl.lit("sufficient"))
+        .then(pl.lit("complete"))
         .otherwise(pl.col("mountain_coverage_status"))
         .alias("mountain_coverage_status")
     )
@@ -274,23 +410,27 @@ def test_mountain_runtime_reconciles_connecticut_tracts_and_marks_missing_counti
         "househunter.mountain.current_compact_release",
         lambda paths: (
             tmp_path,
-            {"data_release": "fixture", "score_version": "mountain_score_v1"},
+            {
+                "data_release": "fixture",
+                "magnitude_version": "mountain_magnitude_v2",
+                "release_id": "1" * 16,
+            },
             poisoned,
             mountain_counties,
         ),
     )
     with pytest.raises(HouseHunterError, match="tract exceptions differ"):
-        _attach_mountain_scores(places, counties, paths)
+        _attach_current_mountain(places, counties, paths)
 
     with pytest.raises(HouseHunterError, match="missing 1 in-scope"):
-        _attach_mountain_scores(
+        _attach_current_mountain(
             pl.DataFrame({"place_id": ["01001000100"], "state": ["AL"]}),
             pl.DataFrame({"place_id": ["01001"], "state": ["AL"]}),
             paths,
         )
 
     monkeypatch.setattr("househunter.mountain.current_compact_release", lambda paths: None)
-    attached, attached_counties, _ = _attach_mountain_scores(places, counties, paths)
+    attached, attached_counties, _ = _attach_current_mountain(places, counties, paths)
     assert attached["mountain_coverage_status"].to_list() == ["unavailable", "outside_scope"]
     assert attached_counties["mountain_coverage_status"].to_list() == [
         "unavailable",
@@ -381,8 +521,7 @@ def test_build_and_store_reject_same_count_database_mutation(
     connection = duckdb.connect(str(output / "househunter.duckdb"))
     try:
         connection.execute(
-            "UPDATE places SET risk_score = 0 "
-            "WHERE place_id = (SELECT min(place_id) FROM places)"
+            "UPDATE places SET risk_score = 0 WHERE place_id = (SELECT min(place_id) FROM places)"
         )
     finally:
         connection.close()
@@ -417,8 +556,7 @@ def test_store_caches_validation_until_an_artifact_changes(
     connection = duckdb.connect(str(output / "househunter.duckdb"))
     try:
         connection.execute(
-            "UPDATE places SET risk_score = 0 "
-            "WHERE place_id = (SELECT min(place_id) FROM places)"
+            "UPDATE places SET risk_score = 0 WHERE place_id = (SELECT min(place_id) FROM places)"
         )
     finally:
         connection.close()
