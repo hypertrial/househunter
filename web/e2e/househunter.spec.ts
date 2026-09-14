@@ -266,7 +266,7 @@ test("renders and filters the independent Mountain Magnitude layer", async ({ pa
   await page.goto("/");
   await page.getByRole("button", { name: "Mountain Magnitude" }).click();
   await expect(page).toHaveURL(/metric=mountain/);
-  await expect(page.getByLabel(/Continuous Mountain Magnitude color scale/))
+  await expect(page.getByLabel(/Stepped Mountain Magnitude color scale/))
     .toContainText("not property-specific");
   await page.getByRole("button", { name: /Filters/ }).click();
   await page.getByLabel("Minimum Mountain Magnitude").fill("2.3");
@@ -739,6 +739,17 @@ test("keeps narrow map actions, status, and controls fully usable", async ({ pag
   const more = page.getByRole("button", { name: "More" });
   await expect(more).toBeVisible();
   await expect(more).toHaveAttribute("aria-expanded", "false");
+  await page.getByRole("button", { name: "Mountain Magnitude" }).click();
+  const mountainLegend = page.getByLabel(
+    "Stepped Mountain Magnitude color scale for U.S. tracts, higher means fewer equal-or-higher peers",
+  );
+  await expect(mountainLegend).toBeVisible();
+  await expect(mountainLegend).toContainText("½-step colors ≈ 3.2× fewer peers");
+  await expect(mountainLegend.getByRole("img")).toHaveAttribute(
+    "aria-label",
+    "Mountain Magnitude half-step color bands from M0 up to M5 for U.S. tracts; M5 and above use the separate cap color",
+  );
+  await expect(mountainLegend).toContainText("M5+");
   const layout = await page.evaluate(() => {
     const rect = (selector: string) => document.querySelector(selector)!.getBoundingClientRect().toJSON();
     const actions = document.querySelector(".dock-actions")!;

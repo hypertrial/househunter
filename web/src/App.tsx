@@ -1,12 +1,13 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import RiskMap, { type FocusTarget, type MapPreview } from "./RiskMap";
-import { metricColorScale, readHash, scoreBand, scoreColor, STATE_ABBREVIATIONS, STATE_FIPS, type CameraState, type ScoreBand } from "./map";
+import { metricColorScale, mountainColor, readHash, scoreBand, scoreColor, STATE_ABBREVIATIONS, STATE_FIPS, type CameraState, type ScoreBand } from "./map";
 import type { AddressConfirmation, AddressLookup, Geography, HazardPercentile, JobStatus, LookupResult, Meta, Metric, PlaceDetail, PlaceSummary } from "./types";
 
 export { scoreBand } from "./map";
 export type { ScoreBand } from "./map";
 
 const number = new Intl.NumberFormat("en-US");
+const rarityPercent = new Intl.NumberFormat("en-US", { maximumSignificantDigits: 2 });
 const initial = readHash(window.location.hash);
 const COMMUNITY_EXPLANATION = "National CHR&R Community Conditions Health Group. Group 1 represents the healthiest community conditions and Group 10 the least healthy. Groups are data-driven clusters, not percentiles.";
 const geographyPlural = (level: Geography) => level === "tract" ? "tracts" : "counties";
@@ -46,6 +47,11 @@ export function communityLabel(place: PlaceSummary): string {
 
 export function mountainLabel(place: PlaceSummary): string {
   return place.mountain_magnitude === null ? "Unavailable" : `M${place.mountain_magnitude.toFixed(2)}`;
+}
+
+export function mountainRarityLabel(magnitude: number | null, level: Geography): string {
+  if (magnitude === null || !Number.isFinite(magnitude) || magnitude < 0) return "Rarity unavailable";
+  return `≈ top ${rarityPercent.format(100 * 10 ** -magnitude)}% of U.S. ${geographyPlural(level)} by base exposure`;
 }
 
 function percentileLabel(value: number | null): string {
@@ -120,12 +126,12 @@ function MetricLegend({ metric, level }: { metric: Metric; level: Geography }) {
   const label = metric === "fema"
     ? "Continuous score color scale, lower is better"
     : metric === "mountain"
-      ? `Continuous Mountain Magnitude color scale for U.S. ${peers}, higher means fewer equal-or-higher peers`
+      ? `Stepped Mountain Magnitude color scale for U.S. ${peers}, higher means fewer equal-or-higher peers`
       : "Continuous Community Conditions color scale, Group 1 is healthiest";
   const rampLabel = metric === "fema"
     ? "FEMA Risk continuous color ramp from 0 to 100"
     : metric === "mountain"
-      ? `Mountain Magnitude continuous color ramp from M0 to M${maximum} for U.S. ${peers}`
+      ? `Mountain Magnitude half-step color bands from M0 up to M${maximum} for U.S. ${peers}; M${maximum} and above use the separate cap color`
       : "Community Conditions color ramp from Group 1 to Group 10";
   return <div className="legend" role="group" aria-label={label}>
     <div className="legend-keys">
@@ -136,9 +142,10 @@ function MetricLegend({ metric, level }: { metric: Metric; level: Geography }) {
           style={{ left: `${(tick - minimum) * 100 / (maximum - minimum)}%` }}
         >{tick}</span>)}</div>
       </div>
+      {metric === "mountain" && <span className="missing-key mountain-cap-key"><i aria-hidden="true" style={{ backgroundColor: mountainColor(maximum, level) ?? undefined }} />M{maximum}+</span>}
       <span className="missing-key"><i className="hatched" aria-hidden="true" />{missing}</span>
     </div>
-    <p>{metric === "fema" ? <><strong>FEMA ALR_NPCTL</strong> · lower is better · national percentile · not property-level risk</> : metric === "mountain" ? <><strong>Mountain Magnitude</strong> · U.S. {peers} · +1 means 10× fewer equal-or-higher peers · not comparable across grains · not property-specific</> : <><strong>CHR&amp;R Community Conditions</strong> · 1 healthiest · 10 least healthy · county-level clusters, not percentiles</>}</p>
+    <p>{metric === "fema" ? <><strong>FEMA ALR_NPCTL</strong> · lower is better · national percentile · not property-level risk</> : metric === "mountain" ? <><strong>Mountain Magnitude</strong> · ½-step colors ≈ 3.2× fewer peers · M1 ≈ top 10% · M2 ≈ top 1% · M3 ≈ top 0.1% · U.S. {peers} · not comparable across grains · not property-specific</> : <><strong>CHR&amp;R Community Conditions</strong> · 1 healthiest · 10 least healthy · county-level clusters, not percentiles</>}</p>
   </div>;
 }
 
@@ -156,7 +163,7 @@ function DetailDrawer({ detail, loading, error, level, metric, onClose, onRetry,
       <div className="metric-cards">
         <section className={`metric-card ${metric === "fema" ? "active" : ""}`} aria-label="FEMA risk"><strong>Natural Hazard Risk</strong><span style={{ color: scoreColor(detail.summary.risk_score) ?? undefined }}>{scoreLabel(detail.summary)}</span><small>FEMA {level === "county" ? "county " : ""}ALR_NPCTL<br />Lower is better</small></section>
         <section className={`metric-card ${metric === "community-conditions" ? "active" : ""}`} aria-label="Community Conditions"><strong>Community Conditions</strong><span>{communityLabel(detail.summary)}</span><small>CHR&R Community Conditions<br />Better conditions ↑ · County-level <button className="metric-help" title={COMMUNITY_EXPLANATION} aria-label={COMMUNITY_EXPLANATION}>ⓘ</button></small></section>
-        <section className={`metric-card ${metric === "mountain" ? "active" : ""}`} aria-label="Mountain Magnitude"><strong>Mountain Magnitude</strong><span>{mountainLabel(detail.summary)}</span><small>U.S. {geographyPlural(level)} resident exposure<br />Fewer equal-or-higher peers ↑ <button className="metric-help" title={mountainExplanation(level)} aria-label={mountainExplanation(level)}>ⓘ</button></small></section>
+        <section className={`metric-card ${metric === "mountain" ? "active" : ""}`} aria-label="Mountain Magnitude"><strong>Mountain Magnitude</strong><span>{mountainLabel(detail.summary)}</span><small>{detail.summary.mountain_magnitude !== null && <>{mountainRarityLabel(detail.summary.mountain_magnitude, level)}<br /></>}Resident exposure · fewer equal-or-higher peers ↑ <button className="metric-help" title={mountainExplanation(level)} aria-label={mountainExplanation(level)}>ⓘ</button></small></section>
       </div>
       <details className="mountain-breakdown"><summary>Mountain Magnitude breakdown</summary>{detail.summary.mountain_magnitude === null ? <p>Mountain data is {detail.summary.mountain_coverage_status.replaceAll("_", " ")} for this geography.</p> : <dl className="facts"><div><dt>Relief within 20 km</dt><dd>{detail.summary.relief_20km_m === null ? "Unavailable" : `${number.format(detail.summary.relief_20km_m)} m`} · {percentileLabel(detail.summary.relief_20km_pct)}</dd></div><div><dt>Rugged terrain</dt><dd>{detail.summary.rugged_fraction_20km === null ? "Unavailable" : `${(detail.summary.rugged_fraction_20km * 100).toFixed(1)}%`} · {percentileLabel(detail.summary.rugged_pct)}</dd></div><div><dt>Weighted public access</dt><dd>{detail.summary.public_mountain_access_raw === null ? "Unavailable" : `${detail.summary.public_mountain_access_raw.toFixed(1)} km²`} · {percentileLabel(detail.summary.public_mountain_access_pct)}</dd></div><div><dt>Hiking access</dt><dd>{detail.summary.nearest_mountain_trail_km === null ? "No mapped trail nearby" : `${detail.summary.nearest_mountain_trail_km.toFixed(1)} km nearest`} · {percentileLabel(detail.summary.trail_access_pct)}</dd></div></dl>}<p className="notice">{mountainExplanation(level)}</p></details>
       <dl className="facts"><div><dt>{level === "county" ? "County" : "Tract"} FIPS</dt><dd>{detail.summary.place_id}</dd></div><div><dt>State</dt><dd>{detail.summary.state}</dd></div>{level === "tract" && <div><dt>County</dt><dd>{detail.summary.county_name}</dd></div>}<div><dt>FEMA vintage</dt><dd>{detail.summary.fema_vintage}</dd></div></dl>
@@ -506,7 +513,7 @@ function Workspace({ meta }: { meta: Meta }) {
     {overlay === "more" && <section id="more-panel" className="floating-panel more-panel" aria-label="More actions"><h2>More</h2><button className="secondary" onClick={() => setOverlay("exports")}>Export snapshot</button><button className="secondary" onClick={() => setOverlay("info")}>About this map</button></section>}
     {overlay === "exports" && <nav id="exports-panel" className="floating-panel export-panel" aria-label="Exports"><h2>Export snapshot</h2><a ref={(node) => { overlayEntry.current = node; }} href="/api/v2/exports/places.csv" download>Tracts CSV</a><a href="/api/v2/exports/places.parquet" download>Tracts Parquet</a><a href="/api/v2/exports/counties.csv" download>Counties CSV</a><a href="/api/v2/exports/counties.parquet" download>Counties Parquet</a></nav>}
     {overlay === "info" && <section id="info-panel" className="floating-panel info-panel" aria-label="About this map"><h2 ref={(node) => { overlayEntry.current = node; }} tabIndex={-1}>About this map</h2><p>Every geography is drawn from the pinned FEMA National Risk Index December 2025 release. Dense tracts become distinguishable as you zoom; none are aggregated or enlarged.</p><p>Tracts and counties use separate FEMA percentile universes. County values are never tract averages. Hazard percentiles appear only in details.</p><p>{COMMUNITY_EXPLANATION} Tract colors inherit their county group and never imply tract-level resolution.</p><p>{mountainExplanation(level)}</p><p>HouseHunter is local-only and uses no basemap, telemetry, account, or hosted database.</p></section>}
-    {preview && <div className={tooltipClass} style={{ left: preview.x, top: preview.y }}><strong>{preview.name}</strong><span>{preview.state} · {preview.placeId}</span><b>{metric === "fema" ? preview.score?.risk_score === null || !preview.score ? "Not ranked / unavailable" : `${preview.score.risk_score.toFixed(1)} · ${tooltipBand ? SCORE_BAND_LABELS[tooltipBand] : ""}` : metric === "mountain" ? preview.score?.mountain_magnitude === null || !preview.score ? "Mountain Magnitude unavailable" : `M${preview.score.mountain_magnitude.toFixed(2)}` : preview.score?.community_conditions_group === null || !preview.score ? "Not grouped · County-level" : `Group ${preview.score.community_conditions_group} of 10 · County-level`}</b></div>}
+    {preview && <div className={tooltipClass} style={{ left: preview.x, top: preview.y }}><strong>{preview.name}</strong><span>{preview.state} · {preview.placeId}</span><b>{metric === "fema" ? preview.score?.risk_score === null || !preview.score ? "Not ranked / unavailable" : `${preview.score.risk_score.toFixed(1)} · ${tooltipBand ? SCORE_BAND_LABELS[tooltipBand] : ""}` : metric === "mountain" ? preview.score?.mountain_magnitude === null || !preview.score ? "Mountain Magnitude unavailable" : `M${preview.score.mountain_magnitude.toFixed(2)} · ${mountainRarityLabel(preview.score.mountain_magnitude, level)}` : preview.score?.community_conditions_group === null || !preview.score ? "Not grouped · County-level" : `Group ${preview.score.community_conditions_group} of 10 · County-level`}</b></div>}
     {scoreError && <section className="recovery-card" role="alert"><strong>Scores could not be loaded</strong><span>{scoreError}</span><button className="secondary" onClick={retryScores}>Retry scores</button></section>}
     {mapUpdating && <div className="map-updating" aria-hidden="true">{renderedMetric !== metric ? `Updating ${metricName} map…` : `Preparing ${metricName} interaction…`}</div>}
     <MetricLegend metric={renderedMetric} level={level} />

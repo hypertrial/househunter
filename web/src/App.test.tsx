@@ -1,8 +1,8 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import App, { communityLabel, mapFocusTarget, mapTooltipClass, mountainLabel, scoreBand, scoreLabel, scorePillLabel, sortedHazardPercentiles, STATE_ABBREVIATIONS } from "./App";
+import App, { communityLabel, mapFocusTarget, mapTooltipClass, mountainLabel, mountainRarityLabel, scoreBand, scoreLabel, scorePillLabel, sortedHazardPercentiles, STATE_ABBREVIATIONS } from "./App";
 import RiskMap from "./RiskMap";
-import { cameraFromTransform, COMMUNITY_COLOR_SCALE, COMMUNITY_GROUP_COLORS, communityGroupColor, COUNTY_MOUNTAIN_COLOR_SCALE, FEMA_COLOR_SCALE, MAP_COLORS, METRIC_COLOR_SCALES, metricColor, metricColorScale, MOUNTAIN_COLOR_SCALE, MOUNTAIN_COLORS, mountainColor, readHash, relativeTransform, scoreColor, transformFromCamera } from "./map";
+import { cameraFromTransform, COMMUNITY_COLOR_SCALE, COMMUNITY_GROUP_COLORS, communityGroupColor, COUNTY_MOUNTAIN_COLOR_SCALE, FEMA_COLOR_SCALE, MAP_COLORS, METRIC_COLOR_SCALES, metricColor, metricColorScale, MOUNTAIN_BAND_COLORS, MOUNTAIN_COLOR_SCALE, MOUNTAIN_COLORS, mountainColor, readHash, relativeTransform, scoreColor, transformFromCamera } from "./map";
 import type { HazardPercentile, MapScore, PlaceSummary } from "./types";
 
 const tract: PlaceSummary = {
@@ -220,10 +220,10 @@ describe("score semantics", () => {
     expect(readHash("#metric=mountain&mountain_magnitude_min=Infinity").mountainMagnitudeMin).toBeNull();
     expect(readHash("#metric=quality").metric).toBe("fema");
   });
-  it("uses bounded fixed-domain continuous color scales and honest null labels", () => {
+  it("uses bounded fixed-domain color scales and honest null labels", () => {
     expect(FEMA_COLOR_SCALE).toHaveLength(256);
-    expect(MOUNTAIN_COLOR_SCALE).toHaveLength(256);
-    expect(COUNTY_MOUNTAIN_COLOR_SCALE).toHaveLength(256);
+    expect(MOUNTAIN_COLOR_SCALE).toHaveLength(11);
+    expect(COUNTY_MOUNTAIN_COLOR_SCALE).toHaveLength(9);
     expect(COMMUNITY_COLOR_SCALE).toHaveLength(256);
     expect(METRIC_COLOR_SCALES.fema).toMatchObject({
       minimum: 0, maximum: 100, ticks: [0, 20, 40, 60, 80, 100],
@@ -240,7 +240,7 @@ describe("score semantics", () => {
     expect(METRIC_COLOR_SCALES.fema.gradient.match(/#[\da-f]{6}/g)).toHaveLength(256);
     expect(METRIC_COLOR_SCALES["community-conditions"].gradient.match(/#[\da-f]{6}/g))
       .toHaveLength(256);
-    expect(METRIC_COLOR_SCALES.mountain.gradient.match(/#[\da-f]{6}/g)).toHaveLength(256);
+    expect(METRIC_COLOR_SCALES.mountain.gradient.match(/#[\da-f]{6}/g)).toHaveLength(10);
     expect(scoreColor(0)).toBe(MAP_COLORS.low);
     expect(scoreColor(25)).toBe(MAP_COLORS.below);
     expect(scoreColor(50)).toBe(MAP_COLORS.typical);
@@ -259,6 +259,10 @@ describe("score semantics", () => {
     expect(mountainColor(5)).toBe(MOUNTAIN_COLORS.summit);
     expect(mountainColor(100)).toBe(MOUNTAIN_COLORS.summit);
     expect(mountainColor(100, "county")).toBe(MOUNTAIN_COLORS.highest);
+    expect(mountainColor(0.49)).toBe(MOUNTAIN_BAND_COLORS[0]);
+    expect(mountainColor(0.5)).toBe(MOUNTAIN_BAND_COLORS[1]);
+    expect(mountainColor(0.99)).toBe(MOUNTAIN_BAND_COLORS[1]);
+    expect(mountainColor(1)).toBe(MOUNTAIN_BAND_COLORS[2]);
     for (const magnitude of [0, 0.5, 1, 2.3213, 3.9, 4]) {
       expect(mountainColor(magnitude, "tract")).toBe(mountainColor(magnitude, "county"));
     }
@@ -269,22 +273,66 @@ describe("score semantics", () => {
     expect(communityGroupColor(null)).toBeNull();
     expect(communityLabel({ ...county, community_conditions_group: null })).toBe("Not grouped");
     expect(mountainLabel(tract)).toBe("M2.32");
+    expect(mountainRarityLabel(0, "county")).toBe("≈ top 100% of U.S. counties by base exposure");
+    expect(mountainRarityLabel(1, "county")).toBe("≈ top 10% of U.S. counties by base exposure");
+    expect(mountainRarityLabel(2.3213, "tract")).toBe("≈ top 0.48% of U.S. tracts by base exposure");
+    expect(mountainRarityLabel(5, "tract")).toBe("≈ top 0.001% of U.S. tracts by base exposure");
   });
-  it("interpolates between anchors without recreating former score bands", () => {
+  it("uses high-contrast half-magnitude mountain bands", () => {
     expect(scoreColor(12.5)).toBe("#a2ac64");
     expect(scoreColor(37.5)).toBe("#cbac39");
     for (const boundary of [20, 40, 60, 80]) {
       expect(scoreColor(boundary - 0.1)).not.toBe(scoreColor(boundary + 0.1));
     }
-    for (const boundary of [1, 2, 3, 4]) {
+    for (const boundary of [0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4]) {
       expect(mountainColor(boundary - 0.1)).not.toBe(mountainColor(boundary + 0.1));
     }
     const femaColors = new Set(Array.from({ length: 10_001 }, (_, index) => scoreColor(index / 100)));
     const mountainColors = new Set(Array.from({ length: 501 }, (_, index) => mountainColor(index / 100)));
     expect(femaColors.size).toBeGreaterThan(5);
     expect(femaColors.size).toBeLessThanOrEqual(256);
-    expect(mountainColors.size).toBeGreaterThan(5);
-    expect(mountainColors.size).toBeLessThanOrEqual(501);
+    expect(mountainColors.size).toBe(11);
+  });
+  it("changes color at every exact half-magnitude boundary and only clamps the upper endpoint", () => {
+    for (let band = 1; band < MOUNTAIN_BAND_COLORS.length; band += 1) {
+      const boundary = band / 2;
+      expect(mountainColor(boundary - 1e-9, "tract")).toBe(MOUNTAIN_BAND_COLORS[band - 1]);
+      expect(mountainColor(boundary, "tract")).toBe(MOUNTAIN_BAND_COLORS[band]);
+    }
+    expect(mountainColor(4 - 1e-9, "county")).toBe(MOUNTAIN_BAND_COLORS[7]);
+    expect(mountainColor(4, "county")).toBe(MOUNTAIN_BAND_COLORS[8]);
+    expect(mountainColor(4 + 1e-9, "county")).toBe(MOUNTAIN_BAND_COLORS[8]);
+    expect(mountainColor(5 - 1e-9, "tract")).toBe(MOUNTAIN_BAND_COLORS[9]);
+    expect(mountainColor(5, "tract")).toBe(MOUNTAIN_BAND_COLORS[10]);
+    expect(mountainColor(5 + 1e-9, "tract")).toBe(MOUNTAIN_BAND_COLORS[10]);
+    expect(mountainColor(-1e-9, "tract")).toBeNull();
+    expect(mountainColor(-1e-9, "county")).toBeNull();
+  });
+  it("shares every county color with tracts while retaining the tract-only summit bands", () => {
+    for (let band = 0; band <= 8; band += 1) {
+      const magnitude = band / 2;
+      expect(mountainColor(magnitude, "county")).toBe(MOUNTAIN_BAND_COLORS[band]);
+      expect(mountainColor(magnitude, "county")).toBe(mountainColor(magnitude, "tract"));
+    }
+    expect(COUNTY_MOUNTAIN_COLOR_SCALE).toEqual(MOUNTAIN_BAND_COLORS.slice(0, 9));
+    expect(MOUNTAIN_COLOR_SCALE.slice(9)).toEqual(MOUNTAIN_BAND_COLORS.slice(9));
+  });
+  it("keeps legend intervals aligned with map colors and separates the terminal cap", () => {
+    const tractScale = metricColorScale("mountain", "tract");
+    const countyScale = metricColorScale("mountain", "county");
+    expect(tractScale.gradient).toContain(`${mountainColor(4.9235, "tract")} 90% 100%`);
+    expect(tractScale.gradient).not.toContain(MOUNTAIN_BAND_COLORS[10]);
+    expect(countyScale.gradient).toContain(`${mountainColor(3.4973, "county")} 75% 87.5%`);
+    expect(countyScale.gradient).not.toContain(MOUNTAIN_BAND_COLORS[8]);
+  });
+  it("formats approximate peer rarity at release extrema and rejects invalid magnitudes", () => {
+    expect(mountainRarityLabel(3.4973, "county"))
+      .toBe("≈ top 0.032% of U.S. counties by base exposure");
+    expect(mountainRarityLabel(4.9235, "tract"))
+      .toBe("≈ top 0.0012% of U.S. tracts by base exposure");
+    for (const invalid of [null, -Number.EPSILON, Number.NaN, Number.NEGATIVE_INFINITY, Number.POSITIVE_INFINITY]) {
+      expect(mountainRarityLabel(invalid, "tract")).toBe("Rarity unavailable");
+    }
   });
   it("rejects every invalid scale value and keeps Community groups on official integer anchors", () => {
     for (const invalid of [Number.NEGATIVE_INFINITY, Number.POSITIVE_INFINITY, Number.NaN, -0.1]) {
@@ -854,10 +902,10 @@ it("keeps the committed legend and accessible map description aligned during met
   expect(canvas).toHaveAttribute("aria-busy", "true");
   expect(canvas).toHaveAccessibleName(/tract risk map/i);
   expect(screen.getByLabelText("Continuous score color scale, lower is better")).toBeVisible();
-  expect(screen.queryByLabelText(/Continuous Mountain Magnitude color scale/)).not.toBeInTheDocument();
+  expect(screen.queryByLabelText(/Stepped Mountain Magnitude color scale/)).not.toBeInTheDocument();
 
   expect(await screen.findByLabelText(
-    "Continuous Mountain Magnitude color scale for U.S. tracts, higher means fewer equal-or-higher peers",
+    "Stepped Mountain Magnitude color scale for U.S. tracts, higher means fewer equal-or-higher peers",
   )).toBeVisible();
   await waitFor(() => expect(canvas).toHaveAttribute("aria-busy", "false"));
   expect(canvas).toHaveAccessibleName(/tract Mountain Magnitude map/i);
@@ -881,7 +929,7 @@ it("commits only the final metric after rapid successive map changes", async () 
   expect(finalLegend).toBeVisible();
   await waitFor(() => expect(canvas).toHaveAttribute("aria-busy", "false"));
   expect(canvas).toHaveAccessibleName(/tract Community Conditions map/i);
-  expect(screen.queryByLabelText(/Continuous Mountain Magnitude color scale/)).not.toBeInTheDocument();
+  expect(screen.queryByLabelText(/Stepped Mountain Magnitude color scale/)).not.toBeInTheDocument();
   expect(screen.queryByText(/Updating .* map…/)).not.toBeInTheDocument();
 });
 
@@ -897,7 +945,7 @@ it("finishes a metric transition when active filters leave no interactive geogra
 
   const canvas = screen.getByRole("img", { name: /focusable USA tract/i });
   expect(await screen.findByLabelText(
-    "Continuous Mountain Magnitude color scale for U.S. tracts, higher means fewer equal-or-higher peers",
+    "Stepped Mountain Magnitude color scale for U.S. tracts, higher means fewer equal-or-higher peers",
   )).toBeVisible();
   await waitFor(() => expect(canvas).toHaveAttribute("aria-busy", "false"));
   expect(document.querySelector(".map-updating")).not.toBeInTheDocument();
@@ -1020,16 +1068,18 @@ it("maps and filters Mountain Magnitude with an honest expandable breakdown", as
 
   fireEvent.click(screen.getByRole("button", { name: "Mountain Magnitude" }));
   const legend = await screen.findByLabelText(
-    "Continuous Mountain Magnitude color scale for U.S. tracts, higher means fewer equal-or-higher peers",
+    "Stepped Mountain Magnitude color scale for U.S. tracts, higher means fewer equal-or-higher peers",
   );
   expect(legend).toBeVisible();
   expect(within(legend).getByRole("img", {
-    name: "Mountain Magnitude continuous color ramp from M0 to M5 for U.S. tracts",
+    name: "Mountain Magnitude half-step color bands from M0 up to M5 for U.S. tracts; M5 and above use the separate cap color",
   })).toBeVisible();
   for (const tick of ["0", "1", "2", "3", "4", "5"]) {
     expect(within(legend).getByText(tick)).toBeVisible();
   }
   expect(within(legend).getByText("Unavailable")).toBeVisible();
+  expect(within(legend).getByText("M5+").querySelector("i"))
+    .toHaveStyle({ backgroundColor: mountainColor(5, "tract")! });
   expect(legend.querySelector(".missing-key .hatched")).toHaveAttribute("aria-hidden", "true");
   fireEvent.click(screen.getByRole("button", { name: /^Filters/ }));
   fireEvent.change(screen.getByLabelText("Minimum Mountain Magnitude"), { target: { value: "2.3" } });
@@ -1049,30 +1099,34 @@ it("maps and filters Mountain Magnitude with an honest expandable breakdown", as
   fireEvent.click(within(drawer).getByText("Mountain Magnitude breakdown"));
   expect(within(drawer).getByText(/property-specific views/)).toBeVisible();
   expect(within(drawer).getByText(/1,200 m/)).toBeVisible();
+  expect(within(drawer).getByLabelText("Mountain Magnitude"))
+    .toHaveTextContent("≈ top 0.48% of U.S. tracts by base exposure");
 });
 
-it("uses grain-specific magnitude legends without changing shared decade colors", async () => {
+it("uses grain-specific magnitude legends without changing shared half-magnitude colors", async () => {
   vi.stubGlobal("fetch", mockFetch());
   render(<App />);
   await screen.findByText("HouseHunter");
 
   fireEvent.click(screen.getByRole("button", { name: "Mountain Magnitude" }));
   const tractLegend = await screen.findByLabelText(
-    "Continuous Mountain Magnitude color scale for U.S. tracts, higher means fewer equal-or-higher peers",
+    "Stepped Mountain Magnitude color scale for U.S. tracts, higher means fewer equal-or-higher peers",
   );
   expect(within(tractLegend).getByRole("img", {
-    name: "Mountain Magnitude continuous color ramp from M0 to M5 for U.S. tracts",
+    name: "Mountain Magnitude half-step color bands from M0 up to M5 for U.S. tracts; M5 and above use the separate cap color",
   })).toBeVisible();
   expect(within(tractLegend).getByText("5")).toBeVisible();
+  expect(within(tractLegend).getByText("M5+")).toBeVisible();
 
   fireEvent.click(screen.getByRole("button", { name: "Counties" }));
   const countyLegend = await screen.findByLabelText(
-    "Continuous Mountain Magnitude color scale for U.S. counties, higher means fewer equal-or-higher peers",
+    "Stepped Mountain Magnitude color scale for U.S. counties, higher means fewer equal-or-higher peers",
   );
   expect(within(countyLegend).getByRole("img", {
-    name: "Mountain Magnitude continuous color ramp from M0 to M4 for U.S. counties",
+    name: "Mountain Magnitude half-step color bands from M0 up to M4 for U.S. counties; M4 and above use the separate cap color",
   })).toBeVisible();
   expect(within(countyLegend).queryByText("5")).not.toBeInTheDocument();
+  expect(within(countyLegend).getByText("M4+")).toBeVisible();
   expect(countyLegend).toHaveTextContent("not comparable across grains");
 });
 

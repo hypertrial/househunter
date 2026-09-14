@@ -16,13 +16,18 @@ export const COMMUNITY_GROUP_COLORS = [
   "#cf992d", "#c97e39", "#c36641", "#ba583f", "#b14a3c",
 ] as const;
 
+export const MOUNTAIN_BAND_COLORS = [
+  "#440154", "#482878", "#3e4989", "#31688e", "#26828e", "#1f9e89",
+  "#35b779", "#6ece58", "#b5de2b", "#fde725", "#fff4a8",
+] as const;
+
 export const MOUNTAIN_COLORS = {
-  low: "#59676c",
-  below: "#73806d",
-  typical: "#929271",
-  high: "#b49b69",
-  highest: "#d9bd76",
-  summit: "#fedf83",
+  low: MOUNTAIN_BAND_COLORS[0],
+  below: MOUNTAIN_BAND_COLORS[2],
+  typical: MOUNTAIN_BAND_COLORS[4],
+  high: MOUNTAIN_BAND_COLORS[6],
+  highest: MOUNTAIN_BAND_COLORS[8],
+  summit: MOUNTAIN_BAND_COLORS[10],
 } as const;
 
 const COLOR_SCALE_SIZE = 256;
@@ -55,12 +60,10 @@ function gradient(colors: readonly string[]): string {
 }
 
 const FEMA_ANCHORS = Object.values(MAP_COLORS);
-const MOUNTAIN_ANCHORS = Object.values(MOUNTAIN_COLORS);
-
 export const FEMA_COLOR_SCALE = colorScale(FEMA_ANCHORS);
 export const COMMUNITY_COLOR_SCALE = colorScale(COMMUNITY_GROUP_COLORS);
-export const MOUNTAIN_COLOR_SCALE = colorScale(MOUNTAIN_ANCHORS);
-export const COUNTY_MOUNTAIN_COLOR_SCALE = colorScale(MOUNTAIN_ANCHORS.slice(0, 5));
+export const MOUNTAIN_COLOR_SCALE = MOUNTAIN_BAND_COLORS;
+export const COUNTY_MOUNTAIN_COLOR_SCALE = MOUNTAIN_BAND_COLORS.slice(0, 9);
 
 export const METRIC_COLOR_SCALES = {
   fema: {
@@ -76,7 +79,7 @@ export const METRIC_COLOR_SCALES = {
   mountain: {
     minimum: 0, maximum: 5, ticks: [0, 1, 2, 3, 4, 5],
     distinguishAt: [1, 2, 3, 4],
-    colors: MOUNTAIN_COLOR_SCALE, gradient: gradient(MOUNTAIN_COLOR_SCALE),
+    colors: MOUNTAIN_COLOR_SCALE, gradient: gradient(MOUNTAIN_COLOR_SCALE.slice(0, -1)),
   },
 } as const satisfies Record<Metric, {
   minimum: number;
@@ -95,7 +98,7 @@ export function metricColorScale(metric: Metric, level: Geography) {
     ticks: [0, 1, 2, 3, 4] as const,
     distinguishAt: [1, 2, 3] as const,
     colors: COUNTY_MOUNTAIN_COLOR_SCALE,
-    gradient: gradient(COUNTY_MOUNTAIN_COLOR_SCALE),
+    gradient: gradient(COUNTY_MOUNTAIN_COLOR_SCALE.slice(0, -1)),
   };
 }
 
@@ -134,17 +137,7 @@ export function communityGroupColor(value: number | null): string | null {
 export function mountainColor(value: number | null, level: Geography = "tract"): string | null {
   if (value === null || !Number.isFinite(value) || value < 0) return null;
   const maximum = level === "tract" ? 5 : 4;
-  const bounded = Math.min(value, maximum);
-  const left = Math.floor(bounded);
-  const right = Math.ceil(bounded);
-  if (left === right) return MOUNTAIN_ANCHORS[left];
-  const mix = bounded - left;
-  const rgb = [1, 3, 5].map((start) => {
-    const from = Number.parseInt(MOUNTAIN_ANCHORS[left].slice(start, start + 2), 16);
-    const to = Number.parseInt(MOUNTAIN_ANCHORS[right].slice(start, start + 2), 16);
-    return Math.round(from + (to - from) * mix);
-  });
-  return `#${rgb.map((channel) => channel.toString(16).padStart(2, "0")).join("")}`;
+  return MOUNTAIN_BAND_COLORS[Math.min(Math.floor(value * 2), maximum * 2)];
 }
 
 function scaleColor(
