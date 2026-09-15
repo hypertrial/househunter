@@ -6,7 +6,7 @@ import json
 import secrets
 from pathlib import Path
 from typing import Annotated, Literal
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -22,8 +22,11 @@ from .contracts import (
     AddressConfirmation,
     AddressLookup,
     AddressLookupRequest,
+    CostOfLivingMapScores,
+    HomeCostsMapScores,
     JobStatus,
     MapScores,
+    MapScoresCore,
     PlaceDetail,
     PlacePage,
     SourceStatus,
@@ -31,6 +34,8 @@ from .contracts import (
 from .download import source_statuses
 from .errors import AmbiguousPlaceError, BuildNotFoundError, HouseHunterError
 from .geocode import lookup_address
+from .home_market import is_stale as home_market_is_stale
+from .home_market import source_status as home_market_source_status
 from .jobs import JobKind, JobManager
 from .map_assets import (
     MANIFEST_NAME,
@@ -125,6 +130,31 @@ def static_directory() -> Path:
     return checkout
 
 
+def _with_live_home_market_staleness(metadata: dict[str, object]) -> dict[str, object]:
+    """Refresh the time-varying stale flag without changing immutable build metadata."""
+    sources = metadata.get("sources")
+    if not isinstance(sources, list):
+        return metadata
+    refreshed_sources: list[object] = []
+    for value in sources:
+        if not isinstance(value, dict) or value.get("source") != "home_market":
+            refreshed_sources.append(value)
+            continue
+        source = dict(value)
+        release = source.get("release")
+        if source.get("cached") is True and isinstance(release, str):
+            try:
+                source["stale"] = home_market_is_stale(release)
+            except ValueError:
+                source["stale"] = None
+        else:
+            source["stale"] = None
+        refreshed_sources.append(source)
+    refreshed = dict(metadata)
+    refreshed["sources"] = refreshed_sources
+    return refreshed
+
+
 def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> FastAPI:
     runtime = paths or RuntimePaths.from_root()
     runtime.ensure()
@@ -168,15 +198,61 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
         }
         try:
             _, metadata = current_build(runtime)
+            metadata = _with_live_home_market_staleness(metadata)
             result["build"] = metadata
+            result["layers"] = metadata.get("layers", [])
         except BuildNotFoundError:
             result["build"] = None
+            result["layers"] = []
         return result
 
     @app.get("/api/v2/map/scores", response_model=MapScores)
     def map_scores(level: Literal["tract", "county"] = "tract") -> dict[str, object]:
         with Store(runtime) as store:
             return store.map_scores(level)
+
+    @app.get("/api/v2/map/scores/core", response_model=MapScoresCore)
+    def map_scores_core(
+        level: Literal["tract", "county"] = "tract",
+    ) -> dict[str, object]:
+        with Store(runtime) as store:
+            payload = store.map_scores_core(level)
+        query = urlencode({"level": level, "build_id": payload["build_id"]})
+        payload["add_ons"] = {
+            "cost_of_living": f"/api/v2/map/scores/addons/cost-of-living?{query}",
+            "home_costs": f"/api/v2/map/scores/addons/home-costs?{query}",
+        }
+        return payload
+
+    def map_scores_addon(level: str, kind: str, expected_build_id: str) -> dict[str, object]:
+        try:
+            with Store(runtime, build_id=expected_build_id) as store:
+                return store.map_scores_addon(level, kind)
+        except BuildNotFoundError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="The requested immutable map-score build is no longer available",
+            ) from exc
+
+    @app.get(
+        "/api/v2/map/scores/addons/cost-of-living",
+        response_model=CostOfLivingMapScores,
+    )
+    def cost_of_living_map_scores(
+        build_id: Annotated[str, Query(min_length=1, max_length=128)],
+        level: Literal["tract", "county"] = "tract",
+    ) -> dict[str, object]:
+        return map_scores_addon(level, "cost-of-living", build_id)
+
+    @app.get(
+        "/api/v2/map/scores/addons/home-costs",
+        response_model=HomeCostsMapScores,
+    )
+    def home_costs_map_scores(
+        build_id: Annotated[str, Query(min_length=1, max_length=128)],
+        level: Literal["tract", "county"] = "tract",
+    ) -> dict[str, object]:
+        return map_scores_addon(level, "home-costs", build_id)
 
     @app.get(f"/map-assets/{MANIFEST_NAME}")
     def map_manifest() -> Response:
@@ -218,7 +294,19 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
 
     @app.get("/api/v2/sources", response_model=list[SourceStatus])
     def sources() -> list[dict[str, object]]:
-        return [status.model_dump(mode="json") for status in source_statuses(runtime)]
+        try:
+            _, metadata = current_build(runtime)
+            metadata = _with_live_home_market_staleness(metadata)
+            snapshot_sources = metadata.get("sources")
+            if isinstance(snapshot_sources, list):
+                return snapshot_sources
+        except BuildNotFoundError:
+            pass
+        live = [status.model_dump(mode="json") for status in source_statuses(runtime)]
+        home = home_market_source_status(runtime)
+        home["version"] = str(home["release"] or "unavailable")
+        live.append(home)
+        return live
 
     @app.post(
         "/api/v2/jobs",
@@ -251,8 +339,15 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
         min_score: float | None = Query(None, ge=0, le=100),
         max_score: float | None = Query(None, ge=0, le=100),
         community_conditions_group: int | None = Query(None, ge=1, le=10),
+        max_community_conditions_group: int | None = Query(None, ge=1, le=10),
         mountain_magnitude_min: float | None = Query(None, ge=0),
         mountain_magnitude_max: float | None = Query(None, ge=0),
+        cost_of_living_index_min: float | None = Query(None, ge=0),
+        cost_of_living_index_max: float | None = Query(None, ge=0),
+        home_sqft_for_1m_min: float | None = Query(None, ge=0),
+        home_sqft_for_1m_max: float | None = Query(None, ge=0),
+        housing_built_2000_plus_pct_min: float | None = Query(None, ge=0, le=100),
+        housing_built_2000_plus_pct_max: float | None = Query(None, ge=0, le=100),
         include_unranked: bool = False,
         sort: str = "risk_score",
         direction: Literal["asc", "desc"] = "asc",
@@ -269,8 +364,15 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
                 min_score=min_score,
                 max_score=max_score,
                 community_conditions_group=community_conditions_group,
+                max_community_conditions_group=max_community_conditions_group,
                 mountain_magnitude_min=mountain_magnitude_min,
                 mountain_magnitude_max=mountain_magnitude_max,
+                cost_of_living_index_min=cost_of_living_index_min,
+                cost_of_living_index_max=cost_of_living_index_max,
+                home_sqft_for_1m_min=home_sqft_for_1m_min,
+                home_sqft_for_1m_max=home_sqft_for_1m_max,
+                housing_built_2000_plus_pct_min=housing_built_2000_plus_pct_min,
+                housing_built_2000_plus_pct_max=housing_built_2000_plus_pct_max,
                 include_unranked=include_unranked,
                 sort=sort,
                 direction=direction,
@@ -294,8 +396,15 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
         min_score: float | None = Query(None, ge=0, le=100),
         max_score: float | None = Query(None, ge=0, le=100),
         community_conditions_group: int | None = Query(None, ge=1, le=10),
+        max_community_conditions_group: int | None = Query(None, ge=1, le=10),
         mountain_magnitude_min: float | None = Query(None, ge=0),
         mountain_magnitude_max: float | None = Query(None, ge=0),
+        cost_of_living_index_min: float | None = Query(None, ge=0),
+        cost_of_living_index_max: float | None = Query(None, ge=0),
+        home_sqft_for_1m_min: float | None = Query(None, ge=0),
+        home_sqft_for_1m_max: float | None = Query(None, ge=0),
+        housing_built_2000_plus_pct_min: float | None = Query(None, ge=0, le=100),
+        housing_built_2000_plus_pct_max: float | None = Query(None, ge=0, le=100),
         include_unranked: bool = False,
         sort: str = "risk_score",
         direction: Literal["asc", "desc"] = "asc",
@@ -309,8 +418,15 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
                 min_score=min_score,
                 max_score=max_score,
                 community_conditions_group=community_conditions_group,
+                max_community_conditions_group=max_community_conditions_group,
                 mountain_magnitude_min=mountain_magnitude_min,
                 mountain_magnitude_max=mountain_magnitude_max,
+                cost_of_living_index_min=cost_of_living_index_min,
+                cost_of_living_index_max=cost_of_living_index_max,
+                home_sqft_for_1m_min=home_sqft_for_1m_min,
+                home_sqft_for_1m_max=home_sqft_for_1m_max,
+                housing_built_2000_plus_pct_min=housing_built_2000_plus_pct_min,
+                housing_built_2000_plus_pct_max=housing_built_2000_plus_pct_max,
                 include_unranked=include_unranked,
                 sort=sort,
                 direction=direction,

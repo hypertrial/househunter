@@ -29,7 +29,8 @@ import type {
   RendererCommand,
   RendererEvent,
 } from "./mapWorkerProtocol";
-import type { Geography, MapScores, Metric } from "./types";
+import type { Geography, MapScoreAddonKind, MapScores, Metric } from "./types";
+import { requestedMapAddons } from "./mapScores";
 
 declare const self: DedicatedWorkerGlobalScope;
 
@@ -151,11 +152,18 @@ let height = 1;
 let ratio = 1;
 let camera: MapTransform = { k: 1, x: 0, y: 0 };
 let semantics: MapSemantics = {
-  metric: "fema", state: "", county: "", showUnranked: false, mountainMagnitudeMin: null, neutralOnly: false,
+  metric: "fema", state: "", county: "", showUnavailable: false,
+  mountainMagnitudeMin: null, communityConditionsGroupMax: null,
+  costOfLivingIndexMax: null, homeSqftFor1mMin: null,
+  housingBuilt2000PlusPctMin: null, neutralOnly: false,
 };
 let selected = "";
 let scores: MapScores | null = null;
 let scoreIndexes = new Map<string, number>();
+let scoreRevision = 0;
+let loadedAddOns = new Set<MapScoreAddonKind>();
+let requestedAddOns = new Set<MapScoreAddonKind>();
+let failedAddOns = new Set<MapScoreAddonKind>();
 let rawStates: MapFeature[] = [];
 let rawFeatures: MapFeature[] = [];
 let rawDetails = new Map<string, MapFeature[]>();
@@ -206,32 +214,85 @@ function profile(entry: ProfileEntry) {
   post({ type: "PROFILE", datasetGeneration, entry });
 }
 
-function semanticKey(value: MapSemantics): string {
+function semanticKey(value: MapSemantics, revision = scoreRevision): string {
   return [
     scores?.build_id || "neutral",
+    revision,
     value.metric,
     value.state,
     value.county,
-    value.showUnranked ? 1 : 0,
+    value.showUnavailable ? 1 : 0,
     value.mountainMagnitudeMin ?? "",
+    value.communityConditionsGroupMax ?? "",
+    value.costOfLivingIndexMax ?? "",
+    value.homeSqftFor1mMin ?? "",
+    value.housingBuilt2000PlusPctMin ?? "",
     value.neutralOnly ? 1 : 0,
   ].join("|");
 }
 
-function scoreValues(index: number | null): [number | null, number | null, number | null] {
-  if (index === null || !scores) return [null, null, null];
+function scoreValues(index: number | null): [
+  number | null,
+  number | null,
+  number | null,
+  number | null,
+  number | null,
+  number | null,
+  number | null,
+] {
+  if (index === null || !scores) return [null, null, null, null, null, null, null];
   return [
     scores.columns.risk_score[index],
     scores.columns.community_conditions_group[index],
     scores.columns.mountain_magnitude[index],
+    scores.columns.cost_of_living_index[index],
+    scores.columns.home_buying_power_percentile[index],
+    scores.columns.home_sqft_for_1m[index],
+    scores.columns.housing_built_2000_plus_pct[index],
   ];
+}
+
+function activeMetricValue(index: number, metric: Metric): number | null {
+  if (!scores) return null;
+  if (metric === "fema") return scores.columns.risk_score[index];
+  if (metric === "community-conditions") return scores.columns.community_conditions_group[index];
+  if (metric === "mountain") return scores.columns.mountain_magnitude[index];
+  if (metric === "cost-of-living") return scores.columns.cost_of_living_index[index];
+  return scores.columns.home_buying_power_percentile[index];
 }
 
 function scoreIncluded(index: number | null, value: MapSemantics): boolean {
   if (index === null || !scores || value.neutralOnly) return false;
+  const community = scores.columns.community_conditions_group[index];
   const mountain = scores.columns.mountain_magnitude[index];
-  return value.mountainMagnitudeMin === null
-    || (mountain !== null && mountain >= value.mountainMagnitudeMin);
+  return (value.mountainMagnitudeMin === null
+      || (mountain !== null && mountain >= value.mountainMagnitudeMin))
+    && (value.communityConditionsGroupMax === null
+      || (community !== null && community <= value.communityConditionsGroupMax))
+    && (value.costOfLivingIndexMax === null
+      || (scores.columns.cost_of_living_index[index] !== null
+        && scores.columns.cost_of_living_index[index]! <= value.costOfLivingIndexMax))
+    && (value.homeSqftFor1mMin === null
+      || (scores.columns.home_sqft_for_1m[index] !== null
+        && scores.columns.home_sqft_for_1m[index]! >= value.homeSqftFor1mMin))
+    && (value.housingBuilt2000PlusPctMin === null
+      || (scores.columns.housing_built_2000_plus_pct[index] !== null
+        && scores.columns.housing_built_2000_plus_pct[index]!
+          >= value.housingBuilt2000PlusPctMin));
+}
+
+function requestSemanticAddOns(value: MapSemantics): boolean {
+  let waiting = false;
+  for (const kind of requestedMapAddons(value.metric, value)) {
+    if (loadedAddOns.has(kind)) continue;
+    if (failedAddOns.has(kind)) continue;
+    waiting = true;
+    if (!requestedAddOns.has(kind)) {
+      requestedAddOns.add(kind);
+      loaderPort?.postMessage({ type: "ADDON", datasetGeneration, kind } satisfies LoaderCommand);
+    }
+  }
+  return waiting;
 }
 
 function featureStyle(
@@ -242,16 +303,15 @@ function featureStyle(
 ): PaintStyle {
   const index = scoreIndexes.get(id) ?? null;
   const included = scoreIncluded(index, value);
-  const [risk, community, mountain] = included ? scoreValues(index) : [null, null, null];
-  const color = included ? metricValueColor(risk, community, mountain, value.metric, level) : null;
+  const active = included && index !== null ? activeMetricValue(index, value.metric) : null;
+  const color = included ? metricValueColor(active, value.metric, level) : null;
   const filtered = Boolean(
     (value.state && featureState !== value.state)
     || (value.county && countyFips !== value.county),
   );
-  const showMissing = value.metric === "community-conditions" || value.showUnranked;
   return {
-    fill: color || (included && showMissing ? "hatch" : "#344149"),
-    alpha: filtered ? 0.12 : included ? 1 : 0.34,
+    fill: color || (included && value.showUnavailable ? "hatch" : "#344149"),
+    alpha: filtered ? 0.12 : included && (active !== null || value.showUnavailable) ? 1 : 0.34,
     stroke: filtered ? "#233038" : "rgba(9,15,18,.54)",
   };
 }
@@ -261,10 +321,9 @@ function eligible(record: FeatureRecord, value: MapSemantics): boolean {
   if ((value.state && record.state !== value.state) || (value.county && record.countyFips !== value.county)) {
     return false;
   }
-  const [risk, community, mountain] = scoreValues(record.scoreIndex);
-  const present = value.metric === "fema" ? risk !== null
-    : value.metric === "mountain" ? mountain !== null : community !== null;
-  return present || value.metric === "community-conditions" || value.showUnranked;
+  const present = record.scoreIndex !== null
+    && activeMetricValue(record.scoreIndex, value.metric) !== null;
+  return present || value.showUnavailable;
 }
 
 function groupFor(groups: Map<string, PaintGroup[]>, order: PaintGroup[], style: PaintStyle): PaintGroup {
@@ -338,6 +397,7 @@ async function buildPartition(
   value: MapSemantics,
   epoch: number,
 ): Promise<Partition> {
+  const partitionScoreRevision = scoreRevision;
   const records: FeatureRecord[] = [];
   const groupMap = new Map<string, PaintGroup[]>();
   const groups: PaintGroup[] = [];
@@ -375,7 +435,10 @@ async function buildPartition(
       sliceStarted = performance.now();
     }
   }
-  const key = semanticKey(value);
+  // The add-on payload can arrive while this yielding loop is constructing paths.
+  // Stamp the initial plan with the revision captured before the loop so the next
+  // render recomputes every style when scores changed mid-build.
+  const key = semanticKey(value, partitionScoreRevision);
   return {
     state: code,
     detail,
@@ -408,7 +471,7 @@ async function stylePlan(partition: Partition, value: MapSemantics, epoch: numbe
   }
   const plan = { key, groups };
   partition.stylePlans.set(key, plan);
-  while (partition.stylePlans.size > 3) {
+  while (partition.stylePlans.size > 5) {
     const oldest = partition.stylePlans.keys().next().value as string | undefined;
     if (oldest && oldest !== key) partition.stylePlans.delete(oldest);
     else break;
@@ -602,7 +665,14 @@ async function render(epoch: number) {
   const bitmap = canvas.transferToImageBitmap();
   profile({
     name: "bitmap-ready", start: started, duration: performance.now() - started,
-    details: { snapshot: snapshot.id, features: snapshot.featureCount, groups: composite.groups.length, outlines: composite.outlines.length },
+    details: {
+      snapshot: snapshot.id,
+      features: snapshot.featureCount,
+      groups: composite.groups.length,
+      styles: new Set(composite.groups.map((group) =>
+        `${group.fill}|${group.alpha}|${group.stroke}`)).size,
+      outlines: composite.outlines.length,
+    },
   });
   post({
     type: "FRAME",
@@ -928,6 +998,14 @@ function receiveLoader(event: LoaderEvent) {
     post(event);
     return;
   }
+  if (event.type === "ADDON_ERROR") {
+    requestedAddOns.delete(event.kind);
+    failedAddOns.add(event.kind);
+    post(event);
+    post({ type: "STATUS", datasetGeneration, message: `${event.kind} data unavailable` });
+    scheduleRender();
+    return;
+  }
   if (event.type === "ERROR") {
     if (event.kind === "detail" && event.state) {
       requestedDetails.delete(event.state);
@@ -941,6 +1019,20 @@ function receiveLoader(event: LoaderEvent) {
     void pumpDetailBuilds();
     return;
   }
+  if (event.type === "ADDON") {
+    scores = event.scores;
+    scoreRevision += 1;
+    loadedAddOns.add(event.kind);
+    requestedAddOns.delete(event.kind);
+    failedAddOns.delete(event.kind);
+    post({ type: "ADDON_READY", datasetGeneration, kind: event.kind });
+    viewportPlans.clear();
+    if (!requestSemanticAddOns(semantics)) {
+      post({ type: "STATUS", datasetGeneration, message: `Rendering ${semantics.metric} map` });
+      scheduleRender();
+    }
+    return;
+  }
   if (event.type === "STATES") {
     rawStates = event.states;
     rawFeatures = [];
@@ -950,6 +1042,10 @@ function receiveLoader(event: LoaderEvent) {
     return;
   }
   scores = event.scores;
+  scoreRevision = 0;
+  loadedAddOns = new Set(event.loadedAddOns);
+  requestedAddOns.clear();
+  failedAddOns.clear();
   scoreIndexes = new Map(scores?.columns.place_id.map((id, index) => [id, index]) || []);
   rawStates = event.states;
   rawFeatures = event.features;
@@ -964,6 +1060,7 @@ function receiveLoader(event: LoaderEvent) {
   failedDetails.clear();
   evictedDetails.clear();
   if (scores) post({ type: "SCORES_READY", datasetGeneration, count: scores.columns.place_id.length });
+  requestSemanticAddOns(semantics);
   void rebuildGeometry();
 }
 
@@ -996,7 +1093,7 @@ function pick(command: Extract<RendererCommand, { type: "PICK" }>) {
   const match = candidates.find(({ record }) => hitContext?.isPointInPath(record.path, point[0], point[1]))?.record;
   let preview: MapPickPreview | null = null;
   if (match) {
-    const [risk, community, mountain] = scoreValues(match.scoreIndex);
+    const [risk, community, mountain, cost, homePercentile, squareFeet, built2000] = scoreValues(match.scoreIndex);
     preview = {
       placeId: match.id,
       name: match.name,
@@ -1006,6 +1103,10 @@ function pick(command: Extract<RendererCommand, { type: "PICK" }>) {
         risk_score: risk,
         community_conditions_group: community,
         mountain_magnitude: mountain,
+        cost_of_living_index: cost,
+        home_buying_power_percentile: homePercentile,
+        home_sqft_for_1m: squareFeet,
+        housing_built_2000_plus_pct: built2000,
       },
     };
   }
@@ -1071,6 +1172,9 @@ function initialize(command: Extract<RendererCommand, { type: "INIT" }>) {
   loaderPort.start();
   readySent = false;
   dataReady = false;
+  loadedAddOns.clear();
+  requestedAddOns.clear();
+  failedAddOns.clear();
   snapshots.clear();
   presentedSnapshotId = 0;
   const loaderCommand: LoaderCommand = {
@@ -1118,8 +1222,12 @@ function command(event: MessageEvent<RendererCommand>) {
   } else if (value.type === "SET_SEMANTICS") {
     semanticGeneration = value.semanticGeneration;
     semantics = value.semantics;
-    post({ type: "STATUS", datasetGeneration, message: `Rendering ${value.semantics.metric} map` });
-    scheduleRender();
+    const waiting = requestSemanticAddOns(semantics);
+    post({
+      type: "STATUS", datasetGeneration,
+      message: `${waiting ? "Loading" : "Rendering"} ${value.semantics.metric} map`,
+    });
+    if (!waiting) scheduleRender();
   } else if (value.type === "SET_SELECTION") {
     semanticGeneration = value.semanticGeneration;
     selected = value.selected;
@@ -1127,6 +1235,17 @@ function command(event: MessageEvent<RendererCommand>) {
   } else if (value.type === "PICK") pick(value);
   else if (value.type === "FOCUS") focus(value);
   else if (value.type === "FRAME_COMMITTED") commitSnapshot(value.snapshotId, value.presented);
+  else if (value.type === "RETRY_ADDON") {
+    requestedAddOns.delete(value.kind);
+    failedAddOns.delete(value.kind);
+    if (!loadedAddOns.has(value.kind)) {
+      requestedAddOns.add(value.kind);
+      loaderPort?.postMessage({
+        type: "ADDON", datasetGeneration, kind: value.kind,
+      } satisfies LoaderCommand);
+      post({ type: "STATUS", datasetGeneration, message: `Loading ${value.kind} map` });
+    }
+  }
   else if (value.type === "RETRY") {
     failedDetails.clear();
     requestedDetails.clear();

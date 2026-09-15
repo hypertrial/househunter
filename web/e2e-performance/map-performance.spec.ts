@@ -11,8 +11,10 @@ const TARGETS = {
   coldDetail: 500,
   coldInteractive: 1_500,
   longTask: 50,
-  decodedScores: 3_500_000,
-  gzipScores: 1_100_000,
+  decodedCore: 3_500_000,
+  gzipCore: 1_100_000,
+  decodedFull: 5_700_000,
+  gzipFull: 1_300_000,
 };
 
 type Profile = {
@@ -46,12 +48,25 @@ test("canonical map interaction performance gates", async ({ page, browser }, te
   await expect(page.locator(".build-pill")).toContainText("interactive", { timeout: 60_000 });
   const coldInteractive = Date.now() - coldStarted;
 
-  const scoreText = await page.evaluate(async () => {
-    const response = await fetch("/api/v2/map/scores?level=tract");
-    return response.text();
+  const scoreTexts = await page.evaluate(async () => {
+    const [coreResponse, fullResponse] = await Promise.all([
+      fetch("/api/v2/map/scores/core?level=tract"),
+      fetch("/api/v2/map/scores?level=tract"),
+    ]);
+    const [core, full] = await Promise.all([coreResponse.text(), fullResponse.text()]);
+    const addOns = JSON.parse(core).add_ons as {
+      cost_of_living: string; home_costs: string;
+    };
+    const [cost, home] = await Promise.all([
+      fetch(addOns.cost_of_living).then((response) => response.text()),
+      fetch(addOns.home_costs).then((response) => response.text()),
+    ]);
+    return { core, full, cost, home };
   });
-  const decodedScores = Buffer.byteLength(scoreText);
-  const gzipScores = gzipSync(Buffer.from(scoreText)).byteLength;
+  const payloadBytes = Object.fromEntries(Object.entries(scoreTexts).map(([name, value]) => [
+    name,
+    { decoded: Buffer.byteLength(value), gzip: gzipSync(Buffer.from(value)).byteLength },
+  ]));
 
   const map = page.getByRole("img", { name: /Focusable USA tract/ });
   await map.focus();
@@ -190,7 +205,7 @@ test("canonical map interaction performance gates", async ({ page, browser }, te
       .map((name) => [name, initialProfiles
         .filter((entry) => entry.name === name && typeof entry.duration === "number")
         .map((entry) => entry.duration)])),
-    payloadBytes: { decodedScores, gzipScores },
+    payloadBytes,
   };
   const evidencePath = testInfo.outputPath("map-performance.json");
   writeFileSync(evidencePath, JSON.stringify(evidence, null, 2));
@@ -210,6 +225,8 @@ test("canonical map interaction performance gates", async ({ page, browser }, te
   } else {
     expect(percentile(gestureFrames, 0.95)).toBeLessThanOrEqual(TARGETS.gestureP95);
   }
-  expect(decodedScores).toBeLessThanOrEqual(TARGETS.decodedScores);
-  expect(gzipScores).toBeLessThanOrEqual(TARGETS.gzipScores);
+  expect(payloadBytes.core.decoded).toBeLessThanOrEqual(TARGETS.decodedCore);
+  expect(payloadBytes.core.gzip).toBeLessThanOrEqual(TARGETS.gzipCore);
+  expect(payloadBytes.full.decoded).toBeLessThanOrEqual(TARGETS.decodedFull);
+  expect(payloadBytes.full.gzip).toBeLessThanOrEqual(TARGETS.gzipFull);
 });

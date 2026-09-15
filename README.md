@@ -22,6 +22,20 @@ installation does not install GIS libraries or download elevation rasters. If no
 validated national Mountain release has been promoted, its fields remain explicitly
 unavailable.
 
+**Cost of Living** is a separate BEA Regional Price Parity layer. The map uses the
+2024 all-items RPP (U.S. = 100), with lower values treated as better; goods, housing
+rents, utilities, and other services remain visible in details and exports. Counties
+inherit either their metropolitan statistical area's value or BEA's single U.S.
+Nonmetropolitan Portion value, and tracts inherit their county assignment.
+
+**Home Costs** is a separate county asking-market layer showing the national county
+percentile of square feet purchasable for a fixed $1 million budget. Higher is better.
+It requires an approved, manually imported Realtor.com county file and never downloads
+one automatically. ACS 2024 five-year housing-stock context remains available
+independently: built-2000+, built-2010+, built-2020+, and median year built. These are
+not sale prices, valuations, total ownership costs, or promises that a matching home
+is listed. HouseHunter never combines any of its five dimensions into one score.
+
 `ALR_NPCTL` is FEMA's national percentile for composite Expected Annual Loss Rate,
 distinct from FEMA's broader Risk Index. Tract and county percentiles are not
 comparable. Detail views and exports also show FEMA's 18 published
@@ -44,9 +58,10 @@ interface is committed, so Node is not required to use the app. No API keys are 
 ./scripts/dev
 ```
 
-That installs the small runtime dependency set, downloads the pinned FEMA
-tract/county and CHR&R Community Conditions county layers if needed, publishes a snapshot, and
-starts the loopback app. Flags:
+That installs the small runtime dependency set, downloads the pinned FEMA tract/county
+and CHR&R sources plus optional BEA RPP if needed, publishes a snapshot, and starts the
+loopback app. It never downloads Realtor.com data or contacts Census for housing-stock
+assets. Flags:
 `--port`, `--no-open`, `--state`, `--skip-prepare`. `--state` only scopes the
 snapshot. The first run downloads each source once and reuses verified local caches afterward.
 
@@ -56,8 +71,11 @@ The same steps can be run individually:
 uv sync
 uv run househunter sources
 uv run househunter download --source all
+uv run househunter import-home-market RDC_Inventory_Core_Metrics_County.csv --acknowledge-personal-use
 uv run househunter build
 uv run househunter rank --state CO --metric mountain --mountain-magnitude-min 1.5 --limit 20
+uv run househunter rank --level county --metric cost-of-living --cost-of-living-index-max 100
+uv run househunter rank --level county --metric home-costs --home-sqft-for-1m-min 2500
 uv run househunter rank --level county --state CO
 uv run househunter rank --level county --metric community-conditions --order best
 uv run househunter inspect 08013012101
@@ -86,9 +104,10 @@ addresses.
 ```text
 ./scripts/dev [--port PORT] [--no-open] [--state CO] [--skip-prepare]
 househunter sources [--json]
-househunter download [--source fema|fema_counties|chrr|all]
+househunter download [--source fema|fema_counties|chrr|bea_rpp|all]
+househunter import-home-market FILE --acknowledge-personal-use
 househunter build [--state CO]
-househunter rank [--state CO] [--county STCOFIPS] [--level tract|county] [--metric risk|community-conditions|mountain] [--mountain-magnitude-min NONNEGATIVE] [--order best|worst] [--limit N] [--include-unranked]
+househunter rank [--state CO] [--county STCOFIPS] [--level tract|county] [--metric risk|community-conditions|mountain|cost-of-living|home-costs] [--mountain-magnitude-min N] [--max-community-conditions-group 1..10] [--cost-of-living-index-min N] [--cost-of-living-index-max N] [--home-sqft-for-1m-min N] [--home-sqft-for-1m-max N] [--housing-built-2000-plus-pct-min 0..100] [--housing-built-2000-plus-pct-max 0..100] [--order best|worst] [--limit N] [--include-unranked]
 househunter inspect TRACT_FIPS|COUNTY_FIPS
 househunter lookup "1670 Broadway, Denver, CO" [--allow-approximate]
 househunter export --format parquet|csv|json [--level tract|county] [--output PATH]
@@ -151,6 +170,27 @@ HouseHunter does not substitute approximate county aggregates.
 The magnitude does not claim property views, trail quality, drive time, or guaranteed
 public access.
 
+For Cost of Living, HouseHunter preserves BEA's source values without clamping.
+Only the map colors clamp visually at 80 and 120. The pinned ACS county-to-CBSA
+relationship assigns metropolitan counties to BEA MARPP rows; all other in-scope
+counties, including micropolitan counties, use BEA geography `00999`, the U.S.
+Nonmetropolitan Portion. Puerto Rico and other territories are outside scope for RPP.
+
+For Home Costs, a row is rankable only when `quality_flag == 0` and median listing
+price per square foot is finite and positive. HouseHunter calculates the unrounded
+`1_000_000 / median_listing_price_per_square_foot`, publishes square feet rounded to
+the nearest whole number, then assigns tied national percentiles as
+`100 * count(eligible value <= this value) / eligible county count`. National
+calibration occurs before a state-scoped build. Rejected rows retain provenance but
+publish null ranking values and an explicit status. Tracts inherit county market
+values; they never imply tract-level market precision.
+
+Housing-stock percentages use ACS B25034 estimates directly at each published grain:
+built 2020+ is `E002 / E001`, built 2010+ is `(E002 + E003) / E001`, and built 2000+
+is `(E002 + E003 + E004) / E001`. Counties use county estimates, not averages of
+tract percentages. ACS sentinels and zero denominators become null with an explicit
+status; v1 does not invent a combined percentage margin of error.
+
 Read [DATA_SOURCES.md](DATA_SOURCES.md) for source provenance, release maintenance, and
 limitations.
 
@@ -167,18 +207,31 @@ npm test
 npm run build
 ```
 
-The map-only `GET /api/v2/map/scores?level=tract|county` contract is schema
-version 3. It returns equal-length, column-oriented `place_id`, `risk_score`,
-`community_conditions_group`, and `mountain_magnitude` arrays in ascending unique
-`place_id` order. Its `build_id`, `level`, and `scope` identify the snapshot.
+Runtime snapshots use schema 10. Schema-9 snapshots are rejected with a rebuild
+instruction. The compatible full `GET /api/v2/map/scores?level=tract|county` contract
+uses map schema 4 and returns aligned `place_id`, `risk_score`,
+`community_conditions_group`, `mountain_magnitude`, `cost_of_living_index`,
+`home_buying_power_percentile`, `home_sqft_for_1m`, and
+`housing_built_2000_plus_pct` arrays in ascending unique `place_id` order.
+
+The browser starts from schema-4 `GET /api/v2/map/scores/core`, which contains only
+the first four columns plus build-bound add-on URLs. It fetches the Cost of Living
+array or the Home Costs/housing-stock arrays only when that layer or one of its
+filters is first used. Every add-on independently validates schema, build, scope,
+level, ordered IDs, aligned lengths, nulls, and numeric domains before merging. The
+full endpoint remains available for local clients.
+
+Each payload's `build_id`, `level`, and `scope` identify the snapshot.
 Coverage-status fields remain available from place, county, detail, and export
 interfaces; they are intentionally absent from this compact rendering payload.
 All public HTTP routes are under `/api/v2`; `/api/v1/*` is intentionally unsupported.
-List endpoints filter with nonnegative `mountain_magnitude_min` and
-`mountain_magnitude_max` bounds, reject inverted or nonfinite ranges, and impose no
-upper magnitude limit. The map uses a visual domain of M0–M5 for tracts and M0–M4 for
-counties without capping stored values; common M0–M4 values keep the same colors across
-grains.
+Place and county lists support symmetric bounds for Mountain Magnitude, Cost of Living,
+square feet for $1M, and built-2000+ share, plus the compatible exact
+`community_conditions_group` and additive `max_community_conditions_group`. Explicit
+metric bounds exclude null rows even with `include_unranked`; exact and maximum group
+filters both apply when supplied. Bounds reject nonfinite, out-of-domain, and inverted
+ranges. The map uses a visual domain of M0–M5 for tracts and M0–M4 for counties without
+capping stored values; common M0–M4 values keep the same colors across grains.
 
 The real-data interaction benchmark is kept separate from fixture CI because its
 timings are machine-sensitive:
@@ -190,7 +243,11 @@ npm run test:perf
 
 It records canonical Chromium and WebKit evidence at 1600×900 and DPR 2 and
 enforces the fixed gesture, settle, pick, detail, startup, long-task, and payload
-ceilings.
+ceilings. The schema-4 full national payload must remain at or below 5.7 MB decoded
+and 1.3 MB gzip. The initial core payload retains the prior 3.5 MB/1.1 MB envelope;
+the new arrays use the lazy fallback so they do not worsen initial interaction. The
+separate pre-existing Chromium pick-tail and WebKit gesture-tail debt remains tracked
+under PLAN-65; its thresholds are not weakened by this feature.
 
 At runtime, same-origin loader and renderer workers keep topology parsing,
 projection, exact `Path2D` picking, and DPR-aware rasterization off the main
@@ -211,7 +268,7 @@ uv run househunter mountain rescore-v1 --source-lock config/mountain/source-lock
 The single-purpose migration validates the v1 release, source identity, raw blocks,
 components, internal scores, and aggregates, then derives v2 from the validated raw
 block columns. It never trusts persisted aggregate scores or edits v1 artifacts in
-place. Full release, compact release, and schema-9 snapshot candidates are staged and
+place. Full release, compact release, and schema-10 snapshot candidates are staged and
 validated before any pointer changes. A small atomic journal makes an interrupted
 pointer commit forward-recoverable: rerunning the same command completes the same v2
 transaction. A v1, mixed, symlinked, partial, compact-only, foreign, or source-drifted
@@ -279,7 +336,7 @@ does not require those inputs.
 Prepared builds use one bounded pool of one to four worker processes. `--resume` reuses
 only checksum-valid shards for the same pack and pipeline; `--fresh` clears only the
 marked work directory for that pack. A successful promoted prepared build rebuilds the
-schema-9 normal snapshot, removes obsolete owned v2 releases and work shards, publishes
+schema-10 normal snapshot, removes obsolete owned v2 releases and work shards, publishes
 the validated under-50-MiB managed compact fallback, and writes a timing report under
 `data/mountain/reports/`. Release schema 2 binds the unchanged
 `mountain_pipeline_v1`, validation-only internal `mountain_score_v1`, public

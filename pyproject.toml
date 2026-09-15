@@ -51,6 +51,7 @@ packages = ["src/househunter"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "config/sources.yml" = "househunter/assets/sources.yml"
+"config/home-market/release-lock.json" = "househunter/assets/home_market_release_lock.json"
 "web/dist" = "househunter/static"
 
 [tool.pytest.ini_options]

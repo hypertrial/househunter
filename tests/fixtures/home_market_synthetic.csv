@@ -1,0 +1,2 @@
+month_date_yyyymm,county_fips,county_name,median_listing_price,active_listing_count,median_listing_price_per_square_foot,median_square_feet,total_listing_count,quality_flag
+202608,01001,Synthetic County,500000,10,200,2000,12,0

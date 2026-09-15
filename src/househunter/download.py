@@ -398,7 +398,7 @@ def _write_source_manifest(
         {
             "source": [source_key],
             "version": [source["version"]],
-            "release": [source["release"]],
+            "release": [str(source["release"])],
             "url": [source["item_url"]],
             "retrieved_at": [retrieved_at or datetime.now(UTC)],
             "sha256": [logical_sha],
@@ -435,7 +435,7 @@ def _validate_source_manifest(
     try:
         manifest = pl.read_parquet(path)
     except (OSError, pl.exceptions.PolarsError) as exc:
-        raise SourceContractError(f"Cannot read FEMA source manifest: {exc}") from exc
+        raise SourceContractError(f"Cannot read source manifest: {exc}") from exc
     required = {
         "source",
         "version",
@@ -451,18 +451,18 @@ def _validate_source_manifest(
     missing = required - set(manifest.columns)
     if missing:
         raise SourceContractError(
-            f"FEMA source manifest is missing columns: {', '.join(sorted(missing))}"
+            f"Source manifest is missing columns: {', '.join(sorted(missing))}"
         )
     if "source" not in manifest.columns:
-        raise SourceContractError("FEMA source manifest is missing columns: source")
+        raise SourceContractError("Source manifest is missing columns: source")
     matched = manifest.filter(pl.col("source") == source_key)
     if matched.height != 1:
-        raise SourceContractError(f"FEMA source manifest must contain one {source_key} row")
+        raise SourceContractError(f"Source manifest must contain one {source_key} row")
     row = matched.row(0, named=True)
     expected = {
         "source": source_key,
         "version": source["version"],
-        "release": source["release"],
+        "release": str(source["release"]),
         "url": source["item_url"],
         "sha256": logical_sha,
         "file_sha256": sha256_file(output),
@@ -472,10 +472,10 @@ def _validate_source_manifest(
     }
     mismatches = {key: row[key] for key, value in expected.items() if row[key] != value}
     if mismatches:
-        raise SourceContractError(f"FEMA source manifest does not match the cache: {mismatches}")
+        raise SourceContractError(f"Source manifest does not match the cache: {mismatches}")
     retrieved_at = row["retrieved_at"]
     if not isinstance(retrieved_at, datetime):
-        raise SourceContractError("FEMA source manifest has an invalid retrieval timestamp")
+        raise SourceContractError("Source manifest has an invalid retrieval timestamp")
     return retrieved_at
 
 
@@ -753,6 +753,7 @@ def _source_status(
 
 def source_statuses(paths: RuntimePaths) -> list[SourceStatus]:
     from .chrr import source_status as chrr_source_status
+    from .cost_of_living import source_status as bea_source_status
 
     return [
         _source_status(
@@ -768,4 +769,5 @@ def source_statuses(paths: RuntimePaths) -> list[SourceStatus]:
             validate_cache=validate_cached_fema_counties,
         ),
         chrr_source_status(paths),
+        bea_source_status(paths),
     ]

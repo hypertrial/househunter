@@ -51,7 +51,7 @@ def test_run_once_records_post_exit_storage_and_swap(
     (snapshot / "build.json").write_text(
         json.dumps(
             {
-                "schema_version": 9,
+                "schema_version": 10,
                 "build_id": "build",
                 "mountain_release_id": "release",
                 "mountain_magnitude_version": "mountain_magnitude_v2",

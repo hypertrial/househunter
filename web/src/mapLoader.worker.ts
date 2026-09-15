@@ -2,9 +2,11 @@
 
 import type { Topology } from "topojson-specification";
 import { featuresFrom } from "./mapGeometry";
-import { decodeMapScores } from "./mapScores";
+import {
+  decodeMapScoreAddon, decodeMapScores, loadedMapAddons, mergeMapScoreAddon,
+} from "./mapScores";
 import type { LoaderBootstrap, LoaderCommand, LoaderEvent, ProfileEntry } from "./mapWorkerProtocol";
-import type { MapAssetEntry, MapManifest, MapScores } from "./types";
+import type { MapAssetEntry, MapManifest, MapScoreAddon, MapScoreAddonKind, MapScores } from "./types";
 
 declare const self: DedicatedWorkerGlobalScope;
 
@@ -14,6 +16,10 @@ let activeGeneration = 0;
 let sequence = 0;
 const pending = new Map<string, { state: string; priority: number; order: number; generation: number }>();
 const inFlight = new Set<string>();
+let loadedScores: MapScores | null = null;
+let loadedAddOns = new Set<MapScoreAddonKind>();
+const addOnTasks = new Map<MapScoreAddonKind, Promise<void>>();
+const pendingAddOns = new Set<MapScoreAddonKind>();
 
 function post(event: LoaderEvent) {
   rendererPort?.postMessage(event);
@@ -39,10 +45,32 @@ function nationalAsset(value: MapManifest, level: string): MapAssetEntry | undef
   return value.files.find((asset) => asset.level === level && asset.lod === "national");
 }
 
+function addOnUrl(scores: MapScores, kind: MapScoreAddonKind): string {
+  const url = kind === "cost-of-living"
+    ? scores.add_ons?.cost_of_living
+    : scores.add_ons?.home_costs;
+  if (!url) throw new Error(`Map score ${kind} add-on is unavailable`);
+  return url;
+}
+
+async function fetchAddOn(scores: MapScores, kind: MapScoreAddonKind): Promise<MapScoreAddon> {
+  const started = performance.now();
+  const addon = decodeMapScoreAddon(await json<unknown>(addOnUrl(scores, kind)), scores, kind);
+  profile(activeGeneration, {
+    name: "score-addon-ready", start: started, duration: performance.now() - started,
+    details: { kind },
+  });
+  return addon;
+}
+
 async function load(command: Extract<LoaderCommand, { type: "LOAD" }>) {
   activeGeneration = command.datasetGeneration;
   manifest = null;
   pending.clear();
+  loadedScores = null;
+  loadedAddOns.clear();
+  addOnTasks.clear();
+  pendingAddOns.clear();
   const started = performance.now();
   try {
     const loadedManifest = await json<MapManifest>(command.manifestUrl);
@@ -56,6 +84,8 @@ async function load(command: Extract<LoaderCommand, { type: "LOAD" }>) {
           command.expectedBuildId,
           command.level,
         );
+        loadedAddOns = new Set(loadedMapAddons(loaded));
+        loadedScores = loaded;
         profile(command.datasetGeneration, {
           name: "scores-parsed", start: scoreStarted, duration: performance.now() - scoreStarted,
           details: { count: loaded.columns.place_id.length },
@@ -98,12 +128,41 @@ async function load(command: Extract<LoaderCommand, { type: "LOAD" }>) {
       name: "topology-loaded", start: geometryStarted, duration: performance.now() - geometryStarted,
       details: { states: states.length, features: features.length },
     });
-    post({ type: "DATASET", datasetGeneration: command.datasetGeneration, manifest: loadedManifest, scores, states, features });
+    post({ type: "DATASET", datasetGeneration: command.datasetGeneration, manifest: loadedManifest, scores, loadedAddOns: [...loadedAddOns], states, features });
+    for (const kind of pendingAddOns) {
+      pendingAddOns.delete(kind);
+      requestAddOn({ type: "ADDON", datasetGeneration: command.datasetGeneration, kind });
+    }
   } catch (caught) {
     if (command.datasetGeneration !== activeGeneration) return;
     const message = caught instanceof Error ? caught.message : "Map loading failed";
     post({ type: "ERROR", datasetGeneration: command.datasetGeneration, kind: "geometry", message });
   }
+}
+
+function requestAddOn(command: Extract<LoaderCommand, { type: "ADDON" }>) {
+  if (command.datasetGeneration !== activeGeneration || loadedAddOns.has(command.kind)) return;
+  if (!loadedScores) {
+    pendingAddOns.add(command.kind);
+    return;
+  }
+  if (addOnTasks.has(command.kind)) return;
+  const task = fetchAddOn(loadedScores, command.kind)
+    .then((addon) => {
+      if (command.datasetGeneration !== activeGeneration) return;
+      loadedScores = mergeMapScoreAddon(loadedScores!, addon);
+      loadedAddOns.add(command.kind);
+      post({ type: "ADDON", datasetGeneration: command.datasetGeneration, kind: command.kind, scores: loadedScores });
+    })
+    .catch((caught) => {
+      if (command.datasetGeneration !== activeGeneration) return;
+      post({
+        type: "ADDON_ERROR", datasetGeneration: command.datasetGeneration, kind: command.kind,
+        message: caught instanceof Error ? caught.message : "Map score add-on failed to load",
+      });
+    })
+    .finally(() => addOnTasks.delete(command.kind));
+  addOnTasks.set(command.kind, task);
 }
 
 function detailAsset(state: string): MapAssetEntry | undefined {
@@ -157,6 +216,7 @@ function queueDetails(command: Extract<LoaderCommand, { type: "DETAIL" }>) {
 function connected(event: MessageEvent<LoaderCommand>) {
   const command = event.data;
   if (command.type === "LOAD") void load(command);
+  else if (command.type === "ADDON") requestAddOn(command);
   else if (command.type === "DETAIL") queueDetails(command);
   else {
     pending.clear();

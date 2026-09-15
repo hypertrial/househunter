@@ -3,6 +3,10 @@ set -eu
 cd "$(dirname "$0")/.."
 uv run ruff check .
 uv run pytest
+release_check_dir="$(mktemp -d "${TMPDIR:-/tmp}/househunter-release-check.XXXXXX")"
+trap 'rm -rf "$release_check_dir"' EXIT
+uv build --out-dir "$release_check_dir"
+uv run python scripts/check_private_data_boundary.py --distribution-dir "$release_check_dir"
 npm --prefix web ci
 npm --prefix web test
 npm --prefix web run build

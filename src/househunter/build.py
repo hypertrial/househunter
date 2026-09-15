@@ -19,7 +19,25 @@ from .config import (
     load_config,
     sha256_bytes,
 )
-from .contracts import COUNTY_METHODOLOGY_NOTICE, METHODOLOGY_NOTICE
+from .contracts import (
+    COST_OF_LIVING_COVERAGE_STATUSES,
+    COUNTY_METHODOLOGY_NOTICE,
+    HOME_COSTS_COVERAGE_STATUSES,
+    HOUSING_STOCK_COVERAGE_STATUSES,
+    METHODOLOGY_NOTICE,
+    MapScoreColumns,
+)
+from .cost_of_living import build_processed as build_cost_of_living
+from .dimensions import (
+    COST_OF_LIVING_ATTRIBUTION,
+    HOME_MARKET_METHODOLOGY_NOTICE,
+    HOUSING_STOCK_ATTRIBUTION,
+    SUMMARY_DIMENSION_COLUMNS,
+    attach_dimensions_fail_open,
+    empty_cost_source,
+    empty_home_source,
+    empty_housing_sources,
+)
 from .download import validate_cached_fema, validate_cached_fema_counties
 from .errors import HouseHunterError
 from .geography import (
@@ -30,24 +48,300 @@ from .geography import (
     UNKNOWN_STATE,
 )
 from .hazards import HAZARD_COLUMNS, with_hazard_columns
+from .home_market import load_current_release, load_release_lock
+from .housing_stock import HousingStockBundle, validate_housing_stock_assets
 
 Progress = Callable[[int, str], None]
 Cancelled = Callable[[], bool]
 
-BUILD_SCHEMA_VERSION = 9
+BUILD_SCHEMA_VERSION = 10
 MOUNTAIN_RUNTIME_GEOGRAPHY_VERSION = "mountain_runtime_geography_v1"
 _CONNECTICUT_UNMATCHED_ZERO_POPULATION_TRACTS = frozenset(
     {"09001990000", "09007990100", "09009990000", "09011990100"}
 )
+_SNAPSHOT_TABLES = {
+    "places": ("places.parquet", ("place_id",)),
+    "tract_contributions": (
+        "tract_contributions.parquet",
+        ("place_id", "tract_id"),
+    ),
+    "counties": ("counties.parquet", ("place_id",)),
+    "chrr_county": ("chrr_county.parquet", ("county_fips",)),
+    "cost_of_living": (
+        "cost_of_living.parquet",
+        ("cost_of_living_geography_id",),
+    ),
+    "home_market": ("home_market.parquet", ("county_fips",)),
+    "housing_stock_tract": ("housing_stock_tract.parquet", ("tract_id",)),
+    "housing_stock_county": ("housing_stock_county.parquet", ("county_fips",)),
+    "housing_stock_county_msa": (
+        "housing_stock_county_msa.parquet",
+        ("county_fips",),
+    ),
+}
 _SNAPSHOT_FILES = (
     "build.json",
-    "places.parquet",
-    "tract_contributions.parquet",
-    "counties.parquet",
-    "chrr_county.parquet",
+    *(record[0] for record in _SNAPSHOT_TABLES.values()),
     "househunter.duckdb",
 )
+SNAPSHOT_FILES = _SNAPSHOT_FILES
 _CURRENT_MOUNTAIN = object()
+
+
+def _housing_stock_reference_identity() -> tuple[
+    HousingStockBundle | None, dict[str, object], dict[str, str] | None
+]:
+    try:
+        bundle = validate_housing_stock_assets()
+    except (HouseHunterError, KeyError, TypeError, ValueError, AttributeError) as exc:
+        return (
+            None,
+            {
+                "available": False,
+                "checksum": sha256_bytes(b"housing-stock:asset-unavailable"),
+                "release_year": "unavailable",
+                "omb_delineation": "unavailable",
+                "coverage_status": "asset_unavailable",
+            },
+            {
+                "source": "housing_stock",
+                "status": "asset_unavailable",
+                "message": str(exc),
+            },
+        )
+    provenance = {
+        "schema_version": bundle.manifest["schema_version"],
+        "release_year": bundle.manifest["release_year"],
+        "omb_delineation": bundle.manifest["omb_delineation"],
+        "source_lock_sha256": bundle.manifest["source_lock_sha256"],
+        "artifact_sha256": {
+            key: record["sha256"] for key, record in bundle.manifest["files"].items()
+        },
+    }
+    return (
+        bundle,
+        {
+            "available": True,
+            "checksum": sha256_bytes(canonical_json(provenance)),
+            "release_year": bundle.manifest["release_year"],
+            "omb_delineation": bundle.manifest["omb_delineation"],
+            "coverage_status": "complete",
+        },
+        None,
+    )
+
+
+def _load_optional_dimension_inputs(
+    paths: RuntimePaths, config: dict[str, object]
+) -> dict[str, object]:
+    warnings: list[dict[str, str]] = []
+    housing, housing_identity, housing_warning = _housing_stock_reference_identity()
+    if housing_warning is not None:
+        warnings.append(housing_warning)
+
+    bea_source_value = config.get("bea_rpp")
+    bea_source = bea_source_value if isinstance(bea_source_value, dict) else None
+    rpp: pl.DataFrame | None = None
+    bea_digest = sha256_bytes(b"bea-rpp:source-unavailable")
+    bea_error: str | None = None
+    if bea_source is None:
+        bea_error = "BEA RPP source configuration is unavailable"
+    else:
+        try:
+            rpp, bea_digest = build_cost_of_living(paths)
+        except (HouseHunterError, OSError, KeyError, TypeError, ValueError) as exc:
+            bea_error = str(exc)
+    if bea_error is not None:
+        warnings.append(
+            {
+                "source": "bea_rpp",
+                "status": "source_unavailable",
+                "message": bea_error,
+            }
+        )
+    elif housing is None:
+        warnings.append(
+            {
+                "source": "bea_rpp",
+                "status": "source_unavailable",
+                "message": "County-to-CBSA reference asset is unavailable",
+            }
+        )
+
+    default_home_attribution = "https://www.realtor.com/research/data/"
+    default_home_notice = "For personal local use only."
+    home_lock: dict[str, object] | None = None
+    home: pl.DataFrame | None = None
+    home_manifest: dict[str, object] | None = None
+    home_stale: bool | None = None
+    home_error: str | None = None
+    try:
+        loaded_lock = load_release_lock()
+        home_lock = loaded_lock
+        current_home = load_current_release(paths)
+        if current_home is not None:
+            home = current_home.frame
+            home_manifest = current_home.manifest
+            home_stale = current_home.stale
+    except (HouseHunterError, OSError, KeyError, TypeError, ValueError) as exc:
+        home_error = str(exc)
+        warnings.append(
+            {
+                "source": "home_market",
+                "status": "source_unavailable",
+                "message": home_error,
+            }
+        )
+    if home_lock is not None:
+        home_attribution = str(home_lock["source_page"])
+        home_notice = str(home_lock["usage_notice"])
+    else:
+        home_attribution = default_home_attribution
+        home_notice = default_home_notice
+    if home is None and home_error is None:
+        warnings.append(
+            {
+                "source": "home_market",
+                "status": "source_unavailable",
+                "message": (
+                    "No validated local home-market import; run "
+                    "`househunter import-home-market FILE --acknowledge-personal-use`"
+                ),
+            }
+        )
+    home_digest = sha256_bytes(b"home-market:source-unavailable")
+    if home_manifest is not None:
+        home_digest = sha256_bytes(
+            canonical_json(
+                {
+                    "source_sha256": home_manifest["source_sha256"],
+                    "logical_sha256": home_manifest["logical_sha256"],
+                    "month": home_manifest["month"],
+                }
+            )
+        )
+
+    if housing is None:
+        housing_tracts, housing_counties, housing_county_msa = empty_housing_sources()
+    else:
+        housing_tracts = housing.tracts
+        housing_counties = housing.counties
+        housing_county_msa = housing.county_msa
+    return {
+        "housing": housing,
+        "housing_identity": housing_identity,
+        "rpp": rpp,
+        "bea_source": bea_source,
+        "bea_digest": bea_digest,
+        "bea_error": bea_error,
+        "home": home,
+        "home_manifest": home_manifest,
+        "home_stale": home_stale,
+        "home_error": home_error,
+        "home_attribution": home_attribution,
+        "home_usage_notice": home_notice,
+        "home_digest": home_digest,
+        "warnings": warnings,
+        "source_tables": {
+            "cost_of_living": rpp if rpp is not None else empty_cost_source(),
+            "home_market": home if home is not None else empty_home_source(),
+            "housing_stock_tract": housing_tracts,
+            "housing_stock_county": housing_counties,
+            "housing_stock_county_msa": housing_county_msa,
+        },
+    }
+
+
+def _layer_descriptors(
+    *,
+    config: dict[str, object],
+    mountain_identity: dict[str, str],
+    optional: dict[str, object],
+) -> list[dict[str, object]]:
+    fema = config["fema"]
+    chrr = config["chrr"]
+    bea = optional["bea_source"]
+    housing_identity = optional["housing_identity"]
+    enrichment = optional.get("enrichment_availability", {})
+    cost_available = bool(enrichment.get("cost_of_living", False))
+    housing_available = bool(enrichment.get("housing_stock", False))
+    market_available = bool(enrichment.get("home_market", False))
+    home_manifest = optional["home_manifest"]
+    home_availability = "available" if market_available else "unavailable"
+    home_vintage = (
+        f"Realtor.com {home_manifest['month']}; ACS 2024 five-year"
+        if isinstance(home_manifest, dict)
+        else "Realtor.com unavailable; ACS 2024 five-year"
+    )
+    return [
+        {
+            "key": "risk",
+            "display_name": "Natural Disaster Risk",
+            "source": "FEMA National Risk Index",
+            "direction": "lower",
+            "availability": "available",
+            "vintage": str(fema["version"]),
+            "geography": "FEMA tract or county",
+            "attribution": str(fema["item_url"]),
+            "notice": METHODOLOGY_NOTICE,
+        },
+        {
+            "key": "community-conditions",
+            "display_name": "Community Conditions",
+            "source": "County Health Rankings & Roadmaps",
+            "direction": "lower",
+            "availability": "available",
+            "vintage": str(chrr["version"]),
+            "geography": "County; inherited by tracts",
+            "attribution": str(chrr["item_url"]),
+            "notice": "Groups are source-published county Community Conditions groups.",
+        },
+        {
+            "key": "mountain",
+            "display_name": "Mountain Magnitude",
+            "source": "HouseHunter",
+            "direction": "higher",
+            "availability": (
+                "unavailable" if mountain_identity["release_id"] == "unavailable" else "available"
+            ),
+            "vintage": mountain_identity["data_release"],
+            "geography": "HouseHunter tract and county aggregates",
+            "attribution": "HouseHunter Mountain Magnitude methodology",
+            "notice": "Higher values indicate greater nearby mountain magnitude.",
+        },
+        {
+            "key": "cost-of-living",
+            "display_name": "Cost of Living",
+            "source": "BEA Regional Price Parities",
+            "direction": "lower",
+            "availability": ("available" if cost_available else "unavailable"),
+            "vintage": (str(bea["release_year"]) if isinstance(bea, dict) else "unavailable"),
+            "geography": (
+                "BEA MSA or U.S. nonmetropolitan portion; inherited by tracts; "
+                f"county-to-MSA assignment uses {housing_identity['omb_delineation']}"
+            ),
+            "attribution": COST_OF_LIVING_ATTRIBUTION,
+            "notice": "U.S. = 100. Lower values indicate lower regional prices.",
+        },
+        {
+            "key": "home-costs",
+            "display_name": "Home Costs",
+            "source": "Realtor.com Research Data and U.S. Census Bureau ACS",
+            "direction": "higher",
+            "availability": home_availability,
+            "vintage": home_vintage,
+            "geography": (
+                "Market: county, inherited by tracts; housing stock: direct tract and "
+                "county estimates"
+            ),
+            "attribution": (f"{optional['home_attribution']}; {HOUSING_STOCK_ATTRIBUTION}"),
+            "notice": (
+                f"{HOME_MARKET_METHODOLOGY_NOTICE} {optional['home_usage_notice']} "
+                f"Housing-stock context is "
+                f"{'available' if housing_available else 'unavailable'}."
+            ),
+        },
+    ]
 
 
 def logical_checksum(frame: pl.DataFrame, columns: list[str], sort_by: list[str]) -> str:
@@ -58,6 +352,17 @@ def logical_checksum(frame: pl.DataFrame, columns: list[str], sort_by: list[str]
 def _cancelled(cancelled: Cancelled | None) -> None:
     if cancelled and cancelled():
         raise InterruptedError("Build cancelled")
+
+
+def _secure_snapshot_artifacts(target: Path) -> None:
+    """Keep local-only snapshot data private to the current OS account."""
+    if target.is_symlink() or not target.is_dir():
+        raise HouseHunterError(f"Snapshot directory is not a private directory: {target}")
+    target.chmod(0o700)
+    for artifact in target.iterdir():
+        if artifact.is_symlink() or not artifact.is_file():
+            raise HouseHunterError(f"Unexpected snapshot artifact: {artifact}")
+        artifact.chmod(0o600)
 
 
 def _county_display_expr() -> pl.Expr:
@@ -352,25 +657,15 @@ def compute_scores(
 
 def _write_duckdb(
     path: Path,
-    places: Path,
-    contributions: Path,
-    counties: Path,
-    chrr_counties: Path,
+    tables: dict[str, Path],
     metadata: dict[str, object],
 ) -> None:
     connection = duckdb.connect(str(path))
     try:
-        connection.execute("CREATE TABLE places AS SELECT * FROM read_parquet(?)", [str(places)])
-        connection.execute(
-            "CREATE TABLE tract_contributions AS SELECT * FROM read_parquet(?)",
-            [str(contributions)],
-        )
-        connection.execute(
-            "CREATE TABLE counties AS SELECT * FROM read_parquet(?)", [str(counties)]
-        )
-        connection.execute(
-            "CREATE TABLE chrr_county AS SELECT * FROM read_parquet(?)", [str(chrr_counties)]
-        )
+        for table, parquet in tables.items():
+            connection.execute(
+                f"CREATE TABLE {table} AS SELECT * FROM read_parquet(?)", [str(parquet)]
+            )
         connection.execute("CREATE INDEX places_id_idx ON places(place_id)")
         connection.execute("CREATE INDEX places_state_idx ON places(state)")
         connection.execute("CREATE INDEX places_county_idx ON places(county_fips)")
@@ -378,6 +673,16 @@ def _write_duckdb(
         connection.execute("CREATE INDEX counties_id_idx ON counties(place_id)")
         connection.execute("CREATE INDEX counties_state_idx ON counties(state)")
         connection.execute("CREATE INDEX chrr_county_id_idx ON chrr_county(county_fips)")
+        connection.execute(
+            "CREATE INDEX cost_of_living_id_idx ON cost_of_living(cost_of_living_geography_id)"
+        )
+        connection.execute("CREATE INDEX home_market_id_idx ON home_market(county_fips)")
+        connection.execute(
+            "CREATE INDEX housing_stock_tract_id_idx ON housing_stock_tract(tract_id)"
+        )
+        connection.execute(
+            "CREATE INDEX housing_stock_county_id_idx ON housing_stock_county(county_fips)"
+        )
         connection.execute(
             "CREATE TABLE build_metadata AS SELECT ? AS metadata_json",
             [json.dumps(metadata, sort_keys=True)],
@@ -404,12 +709,14 @@ def _snapshot_signature(target: Path) -> tuple[tuple[int, int, int, int, int], .
 def _validate_snapshot_artifacts(target: Path) -> bool:
     try:
         metadata = json.loads((target / "build.json").read_text())
-        places = pl.read_parquet(target / "places.parquet")
-        contributions = pl.read_parquet(target / "tract_contributions.parquet")
-        counties = pl.read_parquet(target / "counties.parquet")
-        chrr_counties = pl.read_parquet(target / "chrr_county.parquet")
+        frames = {
+            table: pl.read_parquet(target / record[0]) for table, record in _SNAPSHOT_TABLES.items()
+        }
     except (OSError, json.JSONDecodeError, pl.exceptions.PolarsError):
         return False
+    places = frames["places"]
+    counties = frames["counties"]
+    chrr_counties = frames["chrr_county"]
     if metadata.get("schema_version") != BUILD_SCHEMA_VERSION:
         return False
     if not isinstance(metadata.get("mountain_release_id"), str) or not isinstance(
@@ -422,7 +729,37 @@ def _validate_snapshot_artifacts(target: Path) -> bool:
             or "mountain_magnitude_version" not in frame.columns
             or "mountain_score" in frame.columns
             or "mountain_score_version" in frame.columns
+            or not set(SUMMARY_DIMENSION_COLUMNS).issubset(frame.columns)
         ):
+            return False
+        if (
+            not set(frame["cost_of_living_coverage_status"].unique()).issubset(
+                COST_OF_LIVING_COVERAGE_STATUSES
+            )
+            or not set(frame["home_costs_coverage_status"].unique()).issubset(
+                HOME_COSTS_COVERAGE_STATUSES
+            )
+            or not set(frame["housing_stock_coverage_status"].unique()).issubset(
+                HOUSING_STOCK_COVERAGE_STATUSES
+            )
+        ):
+            return False
+        try:
+            MapScoreColumns.model_validate(
+                frame.select(
+                    "place_id",
+                    "risk_score",
+                    "community_conditions_group",
+                    "mountain_magnitude",
+                    "cost_of_living_index",
+                    "home_buying_power_percentile",
+                    "home_sqft_for_1m",
+                    "housing_built_2000_plus_pct",
+                )
+                .sort("place_id")
+                .to_dict(as_series=False)
+            )
+        except ValueError:
             return False
     if metadata.get("place_count") != places.height:
         return False
@@ -430,6 +767,49 @@ def _validate_snapshot_artifacts(target: Path) -> bool:
         return False
     if metadata.get("chrr_county_count") != chrr_counties.height:
         return False
+    if metadata.get("normalized_source_counts") != {
+        table: frames[table].height
+        for table in (
+            "cost_of_living",
+            "home_market",
+            "housing_stock_tract",
+            "housing_stock_county",
+            "housing_stock_county_msa",
+        )
+    }:
+        return False
+    home_market = frames["home_market"]
+    if home_market.height:
+        eligible = home_market.filter(pl.col("home_costs_coverage_status") == "complete")
+        rejected = home_market.filter(pl.col("home_costs_coverage_status") != "complete")
+        if (
+            eligible.is_empty()
+            or eligible.filter(
+                pl.col("home_sqft_for_1m_unrounded").is_null()
+                | pl.col("home_sqft_for_1m").is_null()
+                | pl.col("home_buying_power_percentile").is_null()
+            ).height
+            or rejected.filter(
+                pl.col("home_sqft_for_1m_unrounded").is_not_null()
+                | pl.col("home_sqft_for_1m").is_not_null()
+                | pl.col("home_buying_power_percentile").is_not_null()
+            ).height
+        ):
+            return False
+        expected = eligible.with_columns(
+            (
+                pl.col("home_sqft_for_1m_unrounded").rank(method="max") * 100.0 / eligible.height
+            ).alias("_expected_percentile"),
+            pl.col("home_sqft_for_1m_unrounded")
+            .round(0)
+            .cast(pl.Int64)
+            .alias("_expected_square_feet"),
+        )
+        if expected.filter(
+            ((pl.col("home_buying_power_percentile") - pl.col("_expected_percentile")).abs() > 1e-9)
+            | (pl.col("home_sqft_for_1m") != pl.col("_expected_square_feet"))
+        ).height:
+            return False
     if (
         metadata.get("ranked_place_count")
         != places.filter(pl.col("coverage_status") == "complete").height
@@ -441,24 +821,16 @@ def _validate_snapshot_artifacts(target: Path) -> bool:
     ):
         return False
     checksums = metadata.get("logical_checksums", {})
-    if checksums != {
-        "places": logical_checksum(places, places.columns, ["place_id"]),
-        "tract_contributions": logical_checksum(
-            contributions, contributions.columns, ["place_id", "tract_id"]
-        ),
-        "counties": logical_checksum(counties, counties.columns, ["place_id"]),
-        "chrr_county": logical_checksum(chrr_counties, chrr_counties.columns, ["county_fips"]),
-    }:
+    expected_checksums = {
+        table: logical_checksum(frame, frame.columns, list(_SNAPSHOT_TABLES[table][1]))
+        for table, frame in frames.items()
+    }
+    if checksums != expected_checksums:
         return False
     try:
         connection = duckdb.connect(str(target / "househunter.duckdb"), read_only=True)
         try:
-            for table, filename in (
-                ("places", "places.parquet"),
-                ("tract_contributions", "tract_contributions.parquet"),
-                ("counties", "counties.parquet"),
-                ("chrr_county", "chrr_county.parquet"),
-            ):
+            for table, (filename, _) in _SNAPSHOT_TABLES.items():
                 parquet = str(target / filename)
                 if (
                     connection.execute(f"DESCRIBE {table}").fetchall()
@@ -559,7 +931,21 @@ def build_snapshot(
     fema, fema_sha = validate_cached_fema(fema_path, source)
     counties, county_sha = validate_cached_fema_counties(county_path, county_source)
     chrr_counties, chrr_sha = build_processed(paths)
+    chrr_source_row_count = chrr_counties.height
+    optional = _load_optional_dimension_inputs(paths, config)
+    housing_stock_identity = optional["housing_identity"]
     input_hashes = {"fema": fema_sha, "fema_counties": county_sha, "chrr": chrr_sha}
+    input_hashes["housing_stock"] = str(housing_stock_identity["checksum"])
+    input_hashes["bea_rpp"] = str(optional["bea_digest"])
+    input_hashes["home_market"] = str(optional["home_digest"])
+    bea_source_value = optional["bea_source"]
+    bea_release = (
+        bea_source_value["release_year"] if isinstance(bea_source_value, dict) else "unavailable"
+    )
+    home_manifest_value = optional["home_manifest"]
+    home_release = (
+        home_manifest_value["month"] if isinstance(home_manifest_value, dict) else "unavailable"
+    )
     source_vintages = {
         "fema": source["version"],
         "fema_release": source["release"],
@@ -568,6 +954,10 @@ def build_snapshot(
         "chrr": chrr_source["version"],
         "chrr_release_year": chrr_source["release_year"],
         "mountain_runtime_geography": MOUNTAIN_RUNTIME_GEOGRAPHY_VERSION,
+        "housing_stock": housing_stock_identity["release_year"],
+        "omb_delineation": housing_stock_identity["omb_delineation"],
+        "bea_rpp": bea_release,
+        "home_market": home_release,
     }
     if mountain_release is _CURRENT_MOUNTAIN:
         mountain_release = current_compact_release(paths)
@@ -610,6 +1000,7 @@ def build_snapshot(
             raise HouseHunterError(
                 f"Existing immutable build failed validation: {target}; move it aside and rebuild"
             )
+        _secure_snapshot_artifacts(target)
         if publish:
             _publish_current(paths, target, build_id, scope)
         if progress:
@@ -629,6 +1020,20 @@ def build_snapshot(
     )
     if attached_mountain != mountain_identity:
         raise HouseHunterError("Mountain release changed during snapshot build")
+    scored, county_scored, enrichment_availability, enrichment_warnings = (
+        attach_dimensions_fail_open(
+            scored,
+            county_scored,
+            rpp=optional["rpp"],
+            home=optional["home"],
+            housing=optional["housing"],
+            bea_source=optional["bea_source"],
+            home_attribution=str(optional["home_attribution"]),
+            home_usage_notice=str(optional["home_usage_notice"]),
+        )
+    )
+    optional["enrichment_availability"] = enrichment_availability
+    optional["warnings"].extend(enrichment_warnings)
     if state:
         scored = scored.filter(pl.col("state") == state)
         contributions = contributions.join(scored.select("place_id"), on="place_id", how="semi")
@@ -647,17 +1052,120 @@ def build_snapshot(
         raise HouseHunterError(
             "Internal validation failed: ranked counties do not have full coverage"
         )
-    place_columns = scored.columns
-    contribution_columns = contributions.columns
-    county_columns = county_scored.columns
-    checksums = {
-        "places": logical_checksum(scored, place_columns, ["place_id"]),
-        "tract_contributions": logical_checksum(
-            contributions, contribution_columns, ["place_id", "tract_id"]
-        ),
-        "counties": logical_checksum(county_scored, county_columns, ["place_id"]),
-        "chrr_county": logical_checksum(chrr_counties, chrr_counties.columns, ["county_fips"]),
+    source_tables = optional["source_tables"]
+    snapshot_frames = {
+        "places": scored,
+        "tract_contributions": contributions,
+        "counties": county_scored,
+        "chrr_county": chrr_counties,
+        **source_tables,
     }
+    checksums = {
+        table: logical_checksum(
+            frame,
+            frame.columns,
+            list(_SNAPSHOT_TABLES[table][1]),
+        )
+        for table, frame in snapshot_frames.items()
+    }
+    enrichment_availability = optional["enrichment_availability"]
+    bea_available = bool(enrichment_availability["cost_of_living"])
+    home_available = bool(enrichment_availability["home_market"])
+    housing_available = bool(enrichment_availability["housing_stock"])
+    bea_loaded = optional["rpp"] is not None
+    home_loaded = optional["home"] is not None
+    housing_loaded = optional["housing"] is not None
+    home_manifest = optional["home_manifest"]
+    source_descriptors = [
+        {
+            "source": "fema",
+            "version": str(source["version"]),
+            "release": str(source["release"]),
+            "cached": True,
+            "sha256": fema_sha,
+            "row_count": fema.height,
+            "stale": None,
+            "attribution": str(source["item_url"]),
+            "usage_notice": None,
+            "coverage_status": "complete",
+            "error": None,
+        },
+        {
+            "source": "fema_counties",
+            "version": str(county_source["version"]),
+            "release": str(county_source["release"]),
+            "cached": True,
+            "sha256": county_sha,
+            "row_count": counties.height,
+            "stale": None,
+            "attribution": str(county_source["item_url"]),
+            "usage_notice": None,
+            "coverage_status": "complete",
+            "error": None,
+        },
+        {
+            "source": "chrr",
+            "version": str(chrr_source["version"]),
+            "release": str(chrr_source["release"]),
+            "cached": True,
+            "sha256": chrr_sha,
+            "row_count": chrr_source_row_count,
+            "stale": None,
+            "attribution": str(chrr_source["item_url"]),
+            "usage_notice": None,
+            "coverage_status": "complete",
+            "error": None,
+        },
+        {
+            "source": "bea_rpp",
+            "version": (
+                str(bea_source_value["version"])
+                if isinstance(bea_source_value, dict)
+                else "unavailable"
+            ),
+            "release": bea_release,
+            "cached": bea_loaded,
+            "sha256": str(optional["bea_digest"]) if bea_loaded else None,
+            "row_count": optional["rpp"].height if bea_loaded else None,
+            "stale": None,
+            "attribution": COST_OF_LIVING_ATTRIBUTION,
+            "usage_notice": None,
+            "coverage_status": "complete" if bea_available else "source_unavailable",
+            "error": optional["bea_error"],
+        },
+        {
+            "source": "home_market",
+            "version": home_release,
+            "release": home_release if home_available else None,
+            "cached": home_loaded,
+            "sha256": (
+                str(home_manifest["source_sha256"]) if isinstance(home_manifest, dict) else None
+            ),
+            "row_count": optional["home"].height if home_loaded else None,
+            "stale": optional["home_stale"],
+            "attribution": str(optional["home_attribution"]),
+            "usage_notice": str(optional["home_usage_notice"]),
+            "coverage_status": "complete" if home_available else "source_unavailable",
+            "error": optional["home_error"],
+        },
+        {
+            "source": "housing_stock",
+            "version": (
+                str(housing_stock_identity["release_year"]) if housing_loaded else "unavailable"
+            ),
+            "release": (housing_stock_identity["release_year"] if housing_loaded else None),
+            "cached": housing_loaded,
+            "sha256": (str(housing_stock_identity["checksum"]) if housing_loaded else None),
+            "row_count": (
+                optional["source_tables"]["housing_stock_tract"].height if housing_loaded else None
+            ),
+            "stale": None,
+            "attribution": HOUSING_STOCK_ATTRIBUTION,
+            "usage_notice": None,
+            "coverage_status": "complete" if housing_available else "asset_unavailable",
+            "error": None,
+        },
+    ]
     metadata: dict[str, object] = {
         "schema_version": BUILD_SCHEMA_VERSION,
         "build_id": build_id,
@@ -671,6 +1179,16 @@ def build_snapshot(
         "chrr_grouped_count": chrr_counties.filter(
             pl.col("community_conditions_group").is_not_null()
         ).height,
+        "normalized_source_counts": {
+            table: snapshot_frames[table].height
+            for table in (
+                "cost_of_living",
+                "home_market",
+                "housing_stock_tract",
+                "housing_stock_county",
+                "housing_stock_county_msa",
+            )
+        },
         "source_vintages": source_vintages,
         "input_checksums": input_hashes,
         "logical_checksums": checksums,
@@ -678,33 +1196,42 @@ def build_snapshot(
         "county_methodology_notice": COUNTY_METHODOLOGY_NOTICE,
         "mountain_release_id": mountain_identity["release_id"],
         "mountain_magnitude_version": mountain_identity["magnitude_version"],
+        "housing_stock_reference": housing_stock_identity,
+        "layers": _layer_descriptors(
+            config=config, mountain_identity=mountain_identity, optional=optional
+        ),
+        "sources": source_descriptors,
+        "detail_notices": [
+            HOME_MARKET_METHODOLOGY_NOTICE,
+            str(optional["home_usage_notice"]),
+        ],
+        "optional_source_warnings": optional["warnings"],
     }
     temporary = paths.builds / f".{build_id}.{os.getpid()}.tmp"
     if temporary.exists():
         shutil.rmtree(temporary)
-    temporary.mkdir()
+    temporary.mkdir(mode=0o700)
     try:
-        places_output = temporary / "places.parquet"
-        contributions_output = temporary / "tract_contributions.parquet"
-        counties_output = temporary / "counties.parquet"
-        chrr_output = temporary / "chrr_county.parquet"
-        scored.write_parquet(places_output, compression="zstd", statistics=True)
-        contributions.write_parquet(contributions_output, compression="zstd", statistics=True)
-        county_scored.write_parquet(counties_output, compression="zstd", statistics=True)
-        chrr_counties.write_parquet(chrr_output, compression="zstd", statistics=True)
-        (temporary / "build.json").write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
+        table_paths: dict[str, Path] = {}
+        for table, frame in snapshot_frames.items():
+            output = temporary / _SNAPSHOT_TABLES[table][0]
+            frame.write_parquet(output, compression="zstd", statistics=True)
+            output.chmod(0o600)
+            table_paths[table] = output
+        metadata_path = temporary / "build.json"
+        metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
+        metadata_path.chmod(0o600)
         if progress:
             progress(75, "Creating read-only query snapshot")
         _write_duckdb(
             temporary / "househunter.duckdb",
-            places_output,
-            contributions_output,
-            counties_output,
-            chrr_output,
+            table_paths,
             metadata,
         )
+        (temporary / "househunter.duckdb").chmod(0o600)
         _cancelled(cancelled)
         os.replace(temporary, target)
+        _secure_snapshot_artifacts(target)
     except BaseException:
         if temporary.exists():
             shutil.rmtree(temporary)
@@ -727,7 +1254,7 @@ def _publish_current(paths: RuntimePaths, target: Path, build_id: str, scope: st
 
 
 def publish_snapshot(paths: RuntimePaths, target: Path) -> None:
-    """Validate and atomically publish an already staged schema-9 snapshot."""
+    """Validate and atomically publish an already staged schema-10 snapshot."""
     if (
         paths.builds.is_symlink()
         or target.is_symlink()

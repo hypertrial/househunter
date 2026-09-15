@@ -16,6 +16,14 @@ export const COMMUNITY_GROUP_COLORS = [
   "#cf992d", "#c97e39", "#c36641", "#ba583f", "#b14a3c",
 ] as const;
 
+export const METRIC_UI = {
+  fema: { name: "Natural Disaster Risk", source: "FEMA NRI", descriptorKey: "risk" },
+  "community-conditions": { name: "Community Conditions", source: "CHR&R", descriptorKey: "community-conditions" },
+  mountain: { name: "Mountain Magnitude", source: "HouseHunter", descriptorKey: "mountain" },
+  "cost-of-living": { name: "Cost of Living", source: "BEA RPP", descriptorKey: "cost-of-living" },
+  "home-costs": { name: "Home Costs", source: "Realtor.com / ACS", descriptorKey: "home-costs" },
+} as const satisfies Record<Metric, { name: string; source: string; descriptorKey: string }>;
+
 export const MOUNTAIN_BAND_COLORS = [
   "#440154", "#482878", "#3e4989", "#31688e", "#26828e", "#1f9e89",
   "#35b779", "#6ece58", "#b5de2b", "#fde725", "#fff4a8",
@@ -64,6 +72,8 @@ export const FEMA_COLOR_SCALE = colorScale(FEMA_ANCHORS);
 export const COMMUNITY_COLOR_SCALE = colorScale(COMMUNITY_GROUP_COLORS);
 export const MOUNTAIN_COLOR_SCALE = MOUNTAIN_BAND_COLORS;
 export const COUNTY_MOUNTAIN_COLOR_SCALE = MOUNTAIN_BAND_COLORS.slice(0, 9);
+export const COST_OF_LIVING_COLOR_SCALE = colorScale(FEMA_ANCHORS);
+export const HOME_COSTS_COLOR_SCALE = colorScale([...FEMA_ANCHORS].reverse());
 
 export const METRIC_COLOR_SCALES = {
   fema: {
@@ -80,6 +90,16 @@ export const METRIC_COLOR_SCALES = {
     minimum: 0, maximum: 5, ticks: [0, 1, 2, 3, 4, 5],
     distinguishAt: [1, 2, 3, 4],
     colors: MOUNTAIN_COLOR_SCALE, gradient: gradient(MOUNTAIN_COLOR_SCALE.slice(0, -1)),
+  },
+  "cost-of-living": {
+    minimum: 80, maximum: 120, ticks: [80, 90, 100, 110, 120],
+    distinguishAt: [100],
+    colors: COST_OF_LIVING_COLOR_SCALE, gradient: gradient(COST_OF_LIVING_COLOR_SCALE),
+  },
+  "home-costs": {
+    minimum: 0, maximum: 100, ticks: [0, 20, 40, 60, 80, 100],
+    distinguishAt: [],
+    colors: HOME_COSTS_COLOR_SCALE, gradient: gradient(HOME_COSTS_COLOR_SCALE),
   },
 } as const satisfies Record<Metric, {
   minimum: number;
@@ -140,6 +160,15 @@ export function mountainColor(value: number | null, level: Geography = "tract"):
   return MOUNTAIN_BAND_COLORS[Math.min(Math.floor(value * 2), maximum * 2)];
 }
 
+export function costOfLivingColor(value: number | null): string | null {
+  if (value === null || !Number.isFinite(value)) return null;
+  return scaleColor(Math.max(80, Math.min(120, value)), METRIC_COLOR_SCALES["cost-of-living"]);
+}
+
+export function homeBuyingPowerColor(value: number | null): string | null {
+  return scaleColor(value, METRIC_COLOR_SCALES["home-costs"]);
+}
+
 function scaleColor(
   value: number | null,
   scale: {
@@ -170,28 +199,24 @@ export function metricColor(
   metric: Metric,
   level: Geography = "tract",
 ): string | null {
-  return metricValueColor(
-    score?.risk_score ?? null,
-    score?.community_conditions_group ?? null,
-    score?.mountain_magnitude ?? null,
-    metric,
-    level,
-  );
+  const value = metric === "fema" ? score?.risk_score
+    : metric === "community-conditions" ? score?.community_conditions_group
+      : metric === "mountain" ? score?.mountain_magnitude
+        : metric === "cost-of-living" ? score?.cost_of_living_index
+          : score?.home_buying_power_percentile;
+  return metricValueColor(value ?? null, metric, level);
 }
 
 export function metricValueColor(
-  riskScore: number | null,
-  communityGroup: number | null,
-  mountainMagnitude: number | null,
+  value: number | null,
   metric: Metric,
   level: Geography = "tract",
 ): string | null {
-  if (metric === "community-conditions") {
-    return communityGroupColor(communityGroup);
-  }
-  return metric === "mountain"
-    ? mountainColor(mountainMagnitude, level)
-    : scoreColor(riskScore);
+  if (metric === "community-conditions") return communityGroupColor(value);
+  if (metric === "mountain") return mountainColor(value, level);
+  if (metric === "cost-of-living") return costOfLivingColor(value);
+  if (metric === "home-costs") return homeBuyingPowerColor(value);
+  return scoreColor(value);
 }
 
 export interface CameraState {
@@ -234,8 +259,7 @@ export function readHash(hash: string) {
   const level: Geography = params.get("level") === "county" ? "county" : "tract";
   const metricValue = params.get("metric");
   const metric: Metric = metricValue === "community-conditions" || metricValue === "mountain"
-    ? metricValue
-    : "fema";
+    || metricValue === "cost-of-living" || metricValue === "home-costs" ? metricValue : "fema";
   const requestedState = params.get("state") || "";
   const state = requestedState in STATE_FIPS
     ? requestedState as keyof typeof STATE_FIPS
@@ -254,6 +278,12 @@ export function readHash(hash: string) {
     const value = Number(raw);
     return Number.isFinite(value) ? Math.max(min, Math.min(max, value)) : fallback;
   };
+  const optionalNumber = (name: string, min: number, max = Number.POSITIVE_INFINITY) => {
+    const raw = params.get(name);
+    if (raw === null || raw.trim() === "") return null;
+    const value = Number(raw);
+    return Number.isFinite(value) && value >= min && value <= max ? value : null;
+  };
   return {
     level,
     metric,
@@ -261,12 +291,14 @@ export function readHash(hash: string) {
     county: level === "tract" ? county : "",
     place,
     unranked: params.get("unranked") === "1",
-    mountainMagnitudeMin: (() => {
-      const raw = params.get("mountain_magnitude_min");
-      if (raw === null || raw.trim() === "") return null;
-      const value = Number(raw);
-      return Number.isFinite(value) && value >= 0 ? value : null;
+    mountainMagnitudeMin: optionalNumber("mountain_magnitude_min", 0),
+    communityConditionsGroupMax: (() => {
+      const value = optionalNumber("max_community_conditions_group", 1, 10);
+      return value !== null && Number.isInteger(value) ? value : null;
     })(),
+    costOfLivingIndexMax: optionalNumber("cost_of_living_index_max", 0),
+    homeSqftFor1mMin: optionalNumber("home_sqft_for_1m_min", 0),
+    housingBuilt2000PlusPctMin: optionalNumber("housing_built_2000_plus_pct_min", 0, 100),
     camera: {
       cx: number("cx", 0.5, 0, 1),
       cy: number("cy", 0.5, 0, 1),

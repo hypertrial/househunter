@@ -2,8 +2,14 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App, { communityLabel, mapFocusTarget, mapTooltipClass, mountainLabel, mountainRarityLabel, scoreBand, scoreLabel, scorePillLabel, sortedHazardPercentiles, STATE_ABBREVIATIONS } from "./App";
 import RiskMap from "./RiskMap";
-import { cameraFromTransform, COMMUNITY_COLOR_SCALE, COMMUNITY_GROUP_COLORS, communityGroupColor, COUNTY_MOUNTAIN_COLOR_SCALE, FEMA_COLOR_SCALE, MAP_COLORS, METRIC_COLOR_SCALES, metricColor, metricColorScale, MOUNTAIN_BAND_COLORS, MOUNTAIN_COLOR_SCALE, MOUNTAIN_COLORS, mountainColor, readHash, relativeTransform, scoreColor, transformFromCamera } from "./map";
-import type { HazardPercentile, MapScore, PlaceSummary } from "./types";
+import { cameraFromTransform, COMMUNITY_COLOR_SCALE, COMMUNITY_GROUP_COLORS, communityGroupColor, costOfLivingColor, COUNTY_MOUNTAIN_COLOR_SCALE, FEMA_COLOR_SCALE, homeBuyingPowerColor, MAP_COLORS, METRIC_COLOR_SCALES, metricColor, metricColorScale, MOUNTAIN_BAND_COLORS, MOUNTAIN_COLOR_SCALE, MOUNTAIN_COLORS, mountainColor, readHash, relativeTransform, scoreColor, transformFromCamera } from "./map";
+import type { HazardPercentile, MapFilters, MapScore, PlaceSummary } from "./types";
+
+const mapFilters: MapFilters = {
+  state: "", county: "", showUnavailable: false, mountainMagnitudeMin: null,
+  communityConditionsGroupMax: null, costOfLivingIndexMax: null,
+  homeSqftFor1mMin: null, housingBuilt2000PlusPctMin: null,
+};
 
 const tract: PlaceSummary = {
   place_id: "08013012101", name: "08013012101", state: "CO", place_type: "tract",
@@ -17,6 +23,22 @@ const tract: PlaceSummary = {
   restricted_mountain_km2_30: 1, closed_mountain_km2_30: 2, unknown_mountain_km2_30: 1,
   nearest_mountain_trail_km: 3.5, mountain_trail_km_10: 4, mountain_trail_km_25: 9,
   trail_access_raw: 6, trail_access_pct: 70, mountain_population_coverage: 1, mountain_coverage_status: "complete",
+  cost_of_living_index: 107.2, cost_of_living_goods_index: 102.1,
+  cost_of_living_housing_rents_index: 124.5, cost_of_living_utilities_index: 98.4,
+  cost_of_living_other_services_index: 105.6, cost_of_living_geography_type: "metropolitan",
+  cost_of_living_geography_id: "14500", cost_of_living_geography_name: "Boulder, CO",
+  cost_of_living_release_year: 2024, cost_of_living_coverage_status: "complete",
+  cost_of_living_attribution: "BEA RPP",
+  home_sqft_for_1m: 2100, home_buying_power_percentile: 42,
+  home_median_listing_price: 725000, home_median_listing_price_per_square_foot: 476.19,
+  home_median_square_feet: 1850, home_active_listing_count: 430,
+  home_market_month: "2026-08", home_costs_coverage_status: "complete",
+  home_market_attribution: "Realtor.com Research Data",
+  home_market_usage_notice: "For personal local use only.",
+  housing_stock_total_units_estimate: 145000, housing_built_2000_plus_pct: 32.5,
+  housing_built_2010_plus_pct: 18.2, housing_built_2020_plus_pct: 4.1,
+  housing_median_year_built: 1988, housing_stock_release_year: 2024,
+  housing_stock_coverage_status: "complete", housing_stock_attribution: "ACS 2024",
 };
 const county: PlaceSummary = { ...tract, place_id: "08013", name: "Boulder", place_type: "county", risk_score: 18.5 };
 const hazards = [{ code: "WFIR", label: "Wildfire", percentile: 80.5 }, { code: "TSUN", label: "Tsunami", percentile: null }];
@@ -34,16 +56,30 @@ const manifest = {
     { key: "counties-national", filename: "counties.hash.topojson.gz", level: "county", lod: "national", jurisdiction: null, feature_count: 1, bounds: [-106, 38, -105, 39], compressed_size: 1, sha256: "x" },
   ],
 };
+const layers = [
+  { key: "risk", display_name: "Natural Disaster Risk", source: "FEMA NRI", direction: "lower", availability: "available", vintage: "December 2025", geography: "tract and county", attribution: "FEMA NRI", notice: "Not property-level risk." },
+  { key: "community-conditions", display_name: "Community Conditions", source: "CHR&R", direction: "lower", availability: "available", vintage: "2025", geography: "county; inherited by tracts", attribution: "CHR&R", notice: "Groups are not percentiles." },
+  { key: "mountain", display_name: "Mountain Magnitude", source: "HouseHunter", direction: "higher", availability: "available", vintage: "fixture", geography: "tract and county", attribution: "HouseHunter", notice: "Separate peer groups." },
+  { key: "cost-of-living", display_name: "Cost of Living", source: "BEA RPP", direction: "lower", availability: "available", vintage: "2024", geography: "metropolitan or U.S. nonmetropolitan; inherited by tracts", attribution: "U.S. Bureau of Economic Analysis", notice: "U.S. = 100." },
+  { key: "home-costs", display_name: "Home Costs", source: "Realtor.com / ACS", direction: "higher", availability: "available", vintage: "2026-08 / ACS 2024", geography: "county market; tract and county housing stock", attribution: "Realtor.com Research Data; U.S. Census Bureau", notice: "Personal local use only." },
+];
+const sources = [{ source: "home_market", version: "2026-08", release: "2026-08", cached: true, sha256: "fixture", row_count: 1, stale: false, attribution: "Realtor.com Research Data", usage_notice: "For personal local use only.", coverage_status: "complete", error: null }];
 
 function response(body: unknown) { return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } }); }
+function selectLayer(value: string) {
+  fireEvent.change(screen.getByRole("combobox", { name: "Map layer" }), { target: { value } });
+}
 
 function mockFetch(
   build = true,
   buildScope: { kind: "national" | "state"; state: string | null } = { kind: "national", state: null },
+  homeAvailable = true,
+  homeStale = false,
+  detailOverrides: Partial<PlaceSummary> = {},
 ) {
   return vi.fn(async (input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://127.0.0.1");
-    if (url.pathname === "/api/v2/meta") return response({ app_version: "2.0.0", mutation_token: "token", reference_assets_ready: true, reference_assets_error: null, map_assets: { ready: true, error: null, schema_version: 1, release: "v1.20", manifest_url: "/map-assets/manifest.json" }, build: build ? { build_id: "fixture", place_count: 1, ranked_place_count: 1, county_count: 1, ranked_county_count: 1, source_vintages: { fema: "December 2025" }, scope: buildScope } : null });
+    if (url.pathname === "/api/v2/meta") return response({ app_version: "2.0.0", mutation_token: "token", reference_assets_ready: true, reference_assets_error: null, map_assets: { ready: true, error: null, schema_version: 1, release: "v1.20", manifest_url: "/map-assets/manifest.json" }, layers: homeAvailable ? layers : layers.map((layer) => layer.key === "home-costs" ? { ...layer, availability: "unavailable", vintage: "unavailable", notice: "Import an approved Realtor.com county file." } : layer), build: build ? { build_id: "fixture", place_count: 1, ranked_place_count: 1, county_count: 1, ranked_county_count: 1, source_vintages: { fema: "December 2025" }, sources: sources.map((source) => ({ ...source, stale: homeStale })), scope: buildScope } : null });
     if (url.pathname === "/map-assets/manifest.json") return response(manifest);
     if (url.pathname.includes("states.hash")) {
       const state = buildScope.state || "CO";
@@ -51,10 +87,10 @@ function mockFetch(
     }
     if (url.pathname.includes("tracts.hash") || url.pathname.includes("tracts-co.hash")) return response(topology(tract.place_id));
     if (url.pathname.includes("counties.hash")) return response(topology(county.place_id));
-    if (url.pathname === "/api/v2/map/scores") return response({ schema_version: 3, build_id: "fixture", level: url.searchParams.get("level"), scope: buildScope, columns: { place_id: [url.searchParams.get("level") === "county" ? county.place_id : tract.place_id], risk_score: [url.searchParams.get("level") === "county" ? county.risk_score : tract.risk_score], community_conditions_group: [2], mountain_magnitude: [2.3213] } });
+    if (url.pathname === "/api/v2/map/scores" || url.pathname === "/api/v2/map/scores/core") return response({ schema_version: 4, build_id: "fixture", level: url.searchParams.get("level"), scope: buildScope, columns: { place_id: [url.searchParams.get("level") === "county" ? county.place_id : tract.place_id], risk_score: [url.searchParams.get("level") === "county" ? county.risk_score : tract.risk_score], community_conditions_group: [2], mountain_magnitude: [2.3213], cost_of_living_index: [107.2], home_buying_power_percentile: [homeAvailable ? 42 : null], home_sqft_for_1m: [homeAvailable ? 2100 : null], housing_built_2000_plus_pct: [32.5] } });
     if (url.pathname === "/api/v2/places" || url.pathname === "/api/v2/counties") return response({ total: 1, items: [url.pathname.includes("counties") ? county : tract] });
-    if (url.pathname === `/api/v2/places/${tract.place_id}` || url.pathname === `/api/v2/counties/${county.place_id}`) return response({ summary: url.pathname.includes("counties") ? county : tract, total_weighted_housing: 0, coverage_ratio: 1, methodology_notice: "Published FEMA percentile; not property-level risk.", tract_contributions: [], hazard_percentiles: hazards, member_tract_count: url.pathname.includes("counties") ? 12 : null });
-    if (url.pathname === "/api/v2/lookup") return response({ status: "resolved", query: "1 Main", matched_address: "1 MAIN", tract_id: tract.place_id, detail: { summary: tract, total_weighted_housing: 0, coverage_ratio: 1, methodology_notice: "Published FEMA percentile.", tract_contributions: [], hazard_percentiles: hazards, member_tract_count: null }, provider: "census", precision: "house", approximate: false, attribution: null });
+    if (url.pathname === `/api/v2/places/${tract.place_id}` || url.pathname === `/api/v2/counties/${county.place_id}`) return response({ summary: { ...(url.pathname.includes("counties") ? county : tract), ...detailOverrides }, total_weighted_housing: 0, coverage_ratio: 1, methodology_notice: "Published FEMA percentile; not property-level risk.", source_notices: ["Asking-market indicator, not a sale price."], tract_contributions: [], hazard_percentiles: hazards, member_tract_count: url.pathname.includes("counties") ? 12 : null });
+    if (url.pathname === "/api/v2/lookup") return response({ status: "resolved", query: "1 Main", matched_address: "1 MAIN", tract_id: tract.place_id, detail: { summary: { ...tract, ...detailOverrides }, total_weighted_housing: 0, coverage_ratio: 1, methodology_notice: "Published FEMA percentile.", source_notices: ["Asking-market indicator, not a sale price."], tract_contributions: [], hazard_percentiles: hazards, member_tract_count: null }, provider: "census", precision: "house", approximate: false, attribution: null });
     return response({});
   });
 }
@@ -134,7 +170,7 @@ class MockWorker {
           try {
             const result = await fetch(init.scoreUrl);
             const body = await result.json() as { schema_version?: number; build_id?: string; level?: string; columns?: { place_id?: string[] } };
-            if (!result.ok || body.schema_version !== 3 || body.build_id !== init.expectedBuildId || body.level !== init.level) {
+            if (!result.ok || body.schema_version !== 4 || body.build_id !== init.expectedBuildId || body.level !== init.level) {
               throw new Error("Map scores do not match the current build");
             }
             this.scoreCount = body.columns?.place_id?.length || 0;
@@ -210,7 +246,7 @@ describe("score semantics", () => {
     expect(sortedHazardPercentiles(values).map((item) => item.code)).toEqual(["WFIR", "AVLN", "TSUN"]);
   });
   it("validates and clamps URL map state", () => {
-    expect(readHash("#level=county&state=co&county=123&place=08013&cx=4&cy=-2&z=99")).toEqual({ level: "county", metric: "fema", state: "", county: "", place: "08013", unranked: false, mountainMagnitudeMin: null, camera: { cx: 1, cy: 0, z: 12 } });
+    expect(readHash("#level=county&state=co&county=123&place=08013&cx=4&cy=-2&z=99")).toEqual({ level: "county", metric: "fema", state: "", county: "", place: "08013", unranked: false, mountainMagnitudeMin: null, communityConditionsGroupMax: null, costOfLivingIndexMax: null, homeSqftFor1mMin: null, housingBuilt2000PlusPctMin: null, camera: { cx: 1, cy: 0, z: 12 } });
     expect(readHash("#level=tract&state=ZZ&county=08013&place=08013012101")).toMatchObject({ state: "", county: "", place: "08013012101" });
     expect(readHash("#level=tract&state=CO&county=01001&place=01001000100")).toMatchObject({ state: "CO", county: "", place: "" });
     expect(readHash("#metric=community-conditions").metric).toBe("community-conditions");
@@ -218,6 +254,14 @@ describe("score semantics", () => {
     expect(readHash("#metric=mountain&mountain_magnitude_min=100").mountainMagnitudeMin).toBe(100);
     expect(readHash("#metric=mountain&mountain_magnitude_min=-1").mountainMagnitudeMin).toBeNull();
     expect(readHash("#metric=mountain&mountain_magnitude_min=Infinity").mountainMagnitudeMin).toBeNull();
+    expect(readHash("#metric=cost-of-living&max_community_conditions_group=4&cost_of_living_index_max=99.5&home_sqft_for_1m_min=2400&housing_built_2000_plus_pct_min=35")).toMatchObject({
+      metric: "cost-of-living", communityConditionsGroupMax: 4, costOfLivingIndexMax: 99.5,
+      homeSqftFor1mMin: 2400, housingBuilt2000PlusPctMin: 35,
+    });
+    expect(readHash("#metric=home-costs").metric).toBe("home-costs");
+    expect(readHash("#max_community_conditions_group=11").communityConditionsGroupMax).toBeNull();
+    expect(readHash("#housing_built_2000_plus_pct_min=101").housingBuilt2000PlusPctMin).toBeNull();
+    expect(readHash("#cost_of_living_index_max=-1").costOfLivingIndexMax).toBeNull();
     expect(readHash("#metric=quality").metric).toBe("fema");
   });
   it("uses bounded fixed-domain color scales and honest null labels", () => {
@@ -233,6 +277,12 @@ describe("score semantics", () => {
     });
     expect(METRIC_COLOR_SCALES.mountain).toMatchObject({
       minimum: 0, maximum: 5, ticks: [0, 1, 2, 3, 4, 5],
+    });
+    expect(METRIC_COLOR_SCALES["cost-of-living"]).toMatchObject({
+      minimum: 80, maximum: 120, ticks: [80, 90, 100, 110, 120],
+    });
+    expect(METRIC_COLOR_SCALES["home-costs"]).toMatchObject({
+      minimum: 0, maximum: 100, ticks: [0, 20, 40, 60, 80, 100],
     });
     expect(metricColorScale("mountain", "county")).toMatchObject({
       minimum: 0, maximum: 4, ticks: [0, 1, 2, 3, 4],
@@ -271,6 +321,13 @@ describe("score semantics", () => {
     expect(communityGroupColor(10)).toBe("#b14a3c");
     expect(communityGroupColor(1.5)).toBeNull();
     expect(communityGroupColor(null)).toBeNull();
+    expect(costOfLivingColor(80)).toBe(costOfLivingColor(70));
+    expect(costOfLivingColor(120)).toBe(costOfLivingColor(130));
+    expect(costOfLivingColor(80)).not.toBe(costOfLivingColor(120));
+    expect(costOfLivingColor(null)).toBeNull();
+    expect(homeBuyingPowerColor(0)).not.toBe(homeBuyingPowerColor(100));
+    expect(homeBuyingPowerColor(-1)).toBeNull();
+    expect(homeBuyingPowerColor(101)).toBeNull();
     expect(communityLabel({ ...county, community_conditions_group: null })).toBe("Not grouped");
     expect(mountainLabel(tract)).toBe("M2.32");
     expect(mountainRarityLabel(0, "county")).toBe("≈ top 100% of U.S. counties by base exposure");
@@ -353,12 +410,18 @@ describe("score semantics", () => {
       risk_score: 21.25,
       community_conditions_group: 2,
       mountain_magnitude: 2.3213,
+      cost_of_living_index: 107.2,
+      home_buying_power_percentile: 42,
+      home_sqft_for_1m: 2100,
+      housing_built_2000_plus_pct: 32.5,
     };
     expect(metricColor(row, "fema")).toBe(scoreColor(21.25));
     expect(metricColor({ ...row, mountain_magnitude: 0 }, "fema")).toBe(scoreColor(21.25));
     expect(metricColor(row, "mountain")).toBe(mountainColor(2.3213));
     expect(metricColor({ ...row, risk_score: 100 }, "mountain")).toBe(mountainColor(2.3213));
     expect(metricColor(row, "community-conditions")).toBe(communityGroupColor(2));
+    expect(metricColor(row, "cost-of-living")).toBe(costOfLivingColor(107.2));
+    expect(metricColor(row, "home-costs")).toBe(homeBuyingPowerColor(42));
     expect(metricColor(null, "fema")).toBeNull();
   });
   it("computes the gesture delta from the last committed camera", () => {
@@ -386,7 +449,7 @@ it("continues zooming from a camera restored from the URL", async () => {
   const onCamera = vi.fn();
   render(<RiskMap
     manifestUrl="/map-assets/manifest.json" scoreUrl="/api/v2/map/scores?level=tract" expectedBuildId="fixture" level="tract"
-    selected="" state="" county="" showUnranked={false} focusTarget={null}
+    selected="" filters={mapFilters} focusTarget={null}
     initialCamera={{ cx: 0.5, cy: 0.5, z: 5 }} onSelect={() => undefined}
     onPreview={() => undefined} onCamera={onCamera} onStatus={() => undefined}
   />);
@@ -414,7 +477,7 @@ it("preserves the normalized camera through a responsive resize", async () => {
   const onCamera = vi.fn();
   render(<RiskMap
     manifestUrl="/map-assets/manifest.json" scoreUrl="/api/v2/map/scores?level=tract" expectedBuildId="fixture" level="tract"
-    selected="" state="" county="" showUnranked={false} focusTarget={null}
+    selected="" filters={mapFilters} focusTarget={null}
     initialCamera={{ cx: 0.37, cy: 0.61, z: 2 }} onSelect={() => undefined}
     onPreview={() => undefined} onCamera={onCamera} onStatus={() => undefined}
   />);
@@ -440,8 +503,8 @@ it("pans with pointer-only Chrome input without activating a geography", async (
   const onCamera = vi.fn();
   render(<RiskMap
     manifestUrl="/map-assets/manifest.json" scoreUrl="/api/v2/map/scores?level=tract"
-    expectedBuildId="fixture" level="tract" selected="" state="" county=""
-    showUnranked={false} focusTarget={null} initialCamera={{ cx: 0.5, cy: 0.5, z: 2 }}
+    expectedBuildId="fixture" level="tract" selected="" filters={mapFilters}
+    focusTarget={null} initialCamera={{ cx: 0.5, cy: 0.5, z: 2 }}
     onSelect={() => undefined} onPreview={() => undefined} onCamera={onCamera}
     onStatus={() => undefined}
   />);
@@ -490,7 +553,7 @@ it("ignores a stale score response after changing geography level", async () => 
   const baseFetch = mockFetch();
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://127.0.0.1");
-    if (url.pathname === "/api/v2/map/scores") {
+    if (url.pathname === "/api/v2/map/scores/core") {
       return url.searchParams.get("level") === "county" ? countyResponse : tractResponse;
     }
     return baseFetch(input);
@@ -498,9 +561,9 @@ it("ignores a stale score response after changing geography level", async () => 
   render(<App />);
   await screen.findByText("HouseHunter");
   fireEvent.click(screen.getByRole("button", { name: "Counties" }));
-  resolveCounty(response({ schema_version: 3, build_id: "fixture", level: "county", scope: { kind: "national", state: null }, columns: { place_id: [county.place_id], risk_score: [county.risk_score], community_conditions_group: [2], mountain_magnitude: [2.3213] } }));
+  resolveCounty(response({ schema_version: 4, build_id: "fixture", level: "county", scope: { kind: "national", state: null }, columns: { place_id: [county.place_id], risk_score: [county.risk_score], community_conditions_group: [2], mountain_magnitude: [2.3213], cost_of_living_index: [107.2], home_buying_power_percentile: [42], home_sqft_for_1m: [2100], housing_built_2000_plus_pct: [32.5] } }));
   await waitFor(() => expect(screen.getByTitle("fixture")).toHaveTextContent("counties"));
-  await act(async () => resolveTract(response({ schema_version: 3, build_id: "fixture", level: "tract", scope: { kind: "national", state: null }, columns: { place_id: [tract.place_id], risk_score: [tract.risk_score], community_conditions_group: [2], mountain_magnitude: [2.3213] } })));
+  await act(async () => resolveTract(response({ schema_version: 4, build_id: "fixture", level: "tract", scope: { kind: "national", state: null }, columns: { place_id: [tract.place_id], risk_score: [tract.risk_score], community_conditions_group: [2], mountain_magnitude: [2.3213], cost_of_living_index: [107.2], home_buying_power_percentile: [42], home_sqft_for_1m: [2100], housing_built_2000_plus_pct: [32.5] } })));
   expect(screen.getByTitle("fixture")).not.toHaveTextContent("tracts ready");
   expect(screen.getByRole("button", { name: "Counties" })).toHaveAttribute("aria-pressed", "true");
 });
@@ -513,7 +576,7 @@ it("ignores a stale score failure after the replacement level succeeds", async (
   const baseFetch = mockFetch();
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://127.0.0.1");
-    if (url.pathname === "/api/v2/map/scores") {
+    if (url.pathname === "/api/v2/map/scores/core") {
       return url.searchParams.get("level") === "county" ? countyResponse : tractResponse;
     }
     return baseFetch(input);
@@ -521,7 +584,7 @@ it("ignores a stale score failure after the replacement level succeeds", async (
   render(<App />);
   await screen.findByText("HouseHunter");
   fireEvent.click(screen.getByRole("button", { name: "Counties" }));
-  resolveCounty(response({ schema_version: 3, build_id: "fixture", level: "county", scope: { kind: "national", state: null }, columns: { place_id: [county.place_id], risk_score: [county.risk_score], community_conditions_group: [2], mountain_magnitude: [2.3213] } }));
+  resolveCounty(response({ schema_version: 4, build_id: "fixture", level: "county", scope: { kind: "national", state: null }, columns: { place_id: [county.place_id], risk_score: [county.risk_score], community_conditions_group: [2], mountain_magnitude: [2.3213], cost_of_living_index: [107.2], home_buying_power_percentile: [42], home_sqft_for_1m: [2100], housing_built_2000_plus_pct: [32.5] } }));
   await waitFor(() => expect(screen.getByTitle("fixture")).toHaveTextContent("counties"));
   await act(async () => rejectTract(new Error("obsolete tract request failed")));
   expect(screen.queryByText("Scores could not be loaded")).not.toBeInTheDocument();
@@ -534,7 +597,7 @@ it("loads the replacement level after a score failure and marks it busy until in
   const baseFetch = mockFetch();
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://127.0.0.1");
-    if (url.pathname !== "/api/v2/map/scores") return baseFetch(input);
+    if (url.pathname !== "/api/v2/map/scores/core") return baseFetch(input);
     if (url.searchParams.get("level") === "county") return countyResponse;
     return new Response(JSON.stringify({ detail: "tract scores unavailable" }), {
       status: 503,
@@ -550,7 +613,7 @@ it("loads the replacement level after a score failure and marks it busy until in
   expect(screen.queryByText("Scores could not be loaded")).not.toBeInTheDocument();
 
   resolveCounty(response({
-    schema_version: 3,
+    schema_version: 4,
     build_id: "fixture",
     level: "county",
     scope: { kind: "national", state: null },
@@ -559,6 +622,10 @@ it("loads the replacement level after a score failure and marks it busy until in
       risk_score: [county.risk_score],
       community_conditions_group: [2],
       mountain_magnitude: [2.3213],
+      cost_of_living_index: [107.2],
+      home_buying_power_percentile: [42],
+      home_sqft_for_1m: [2100],
+      housing_built_2000_plus_pct: [32.5],
     },
   }));
   await waitFor(() => expect(map).toHaveAttribute("aria-busy", "false"));
@@ -713,8 +780,8 @@ it("presents an outline frame without declaring the map visible or accepting pic
   const onInteractiveCommit = vi.fn();
   render(<RiskMap
     manifestUrl="/map-assets/manifest.json" scoreUrl="/api/v2/map/scores?level=tract"
-    expectedBuildId="fixture" level="tract" selected="" state="" county=""
-    showUnranked={false} focusTarget={null} initialCamera={{ cx: 0.5, cy: 0.5, z: 1 }}
+    expectedBuildId="fixture" level="tract" selected="" filters={mapFilters}
+    focusTarget={null} initialCamera={{ cx: 0.5, cy: 0.5, z: 1 }}
     onSelect={() => undefined} onPreview={() => undefined} onCamera={() => undefined}
     onStatus={onStatus} onVisibleCommit={onVisibleCommit} onInteractiveCommit={onInteractiveCommit}
   />);
@@ -753,8 +820,8 @@ it("retries a place focus after a non-interactive outline cannot resolve it", as
   vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>(() => undefined)));
   render(<RiskMap
     manifestUrl="/map-assets/manifest.json" scoreUrl="/api/v2/map/scores?level=tract"
-    expectedBuildId="fixture" level="tract" selected="" state="" county=""
-    showUnranked={false} focusTarget={{ kind: "place", id: tract.place_id, nonce: 12 }}
+    expectedBuildId="fixture" level="tract" selected="" filters={mapFilters}
+    focusTarget={{ kind: "place", id: tract.place_id, nonce: 12 }}
     initialCamera={{ cx: 0.5, cy: 0.5, z: 1 }} onSelect={() => undefined}
     onPreview={() => undefined} onCamera={() => undefined} onStatus={() => undefined}
   />);
@@ -825,8 +892,8 @@ it("requests focus once per nonce even when focus itself commits more frames", a
   vi.stubGlobal("fetch", mockFetch());
   render(<RiskMap
     manifestUrl="/map-assets/manifest.json" scoreUrl="/api/v2/map/scores?level=tract"
-    expectedBuildId="fixture" level="tract" selected="" state="" county=""
-    showUnranked={false} focusTarget={{ kind: "state", id: "CO", nonce: 9 }}
+    expectedBuildId="fixture" level="tract" selected="" filters={mapFilters}
+    focusTarget={{ kind: "state", id: "CO", nonce: 9 }}
     initialCamera={{ cx: 0.5, cy: 0.5, z: 1 }} onSelect={() => undefined}
     onPreview={() => undefined} onCamera={() => undefined} onStatus={() => undefined}
   />);
@@ -890,13 +957,171 @@ it("renders the map as the only primary UI with all retained controls", async ()
   expect(screen.queryByText("Next")).not.toBeInTheDocument();
 });
 
+it("offers all five independent layers in the keyboard-accessible menu", async () => {
+  vi.stubGlobal("fetch", mockFetch());
+  render(<App />);
+  await screen.findByText("HouseHunter");
+  const menu = screen.getByRole("combobox", { name: "Map layer" });
+  expect(within(menu).getAllByRole("option").map((option) => option.textContent)).toEqual([
+    "Natural Disaster Risk — FEMA NRI",
+    "Community Conditions — CHR&R",
+    "Mountain Magnitude — HouseHunter",
+    "Cost of Living — BEA RPP",
+    "Home Costs — Realtor.com / ACS",
+  ]);
+});
+
+it("applies every cross-layer filter atomically and persists it in the URL", async () => {
+  vi.stubGlobal("fetch", mockFetch());
+  render(<App />);
+  await screen.findAllByText("1 tracts interactive", {}, { timeout: 3000 });
+  fireEvent.click(screen.getByRole("button", { name: "Filters" }));
+  fireEvent.change(screen.getByLabelText("Minimum Mountain Magnitude"), { target: { value: "1.5" } });
+  fireEvent.change(screen.getByLabelText("Maximum Community Conditions group"), { target: { value: "4" } });
+  fireEvent.change(screen.getByLabelText("Maximum Cost of Living RPP"), { target: { value: "99.5" } });
+  fireEvent.change(screen.getByLabelText("Minimum square feet for $1M"), { target: { value: "2400" } });
+  fireEvent.change(screen.getByLabelText("Minimum built 2000+ share (%)"), { target: { value: "35" } });
+  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+  await waitFor(() => expect(window.location.hash).toContain("housing_built_2000_plus_pct_min=35"));
+  expect(window.location.hash).toContain("max_community_conditions_group=4");
+  expect(window.location.hash).toContain("cost_of_living_index_max=99.5");
+  expect(window.location.hash).toContain("home_sqft_for_1m_min=2400");
+  const semantic = workerMessages.filter(({ value }) => value.type === "SET_SEMANTICS").at(-1)?.value.semantics;
+  expect(semantic).toMatchObject({
+    mountainMagnitudeMin: 1.5, communityConditionsGroupMax: 4,
+    costOfLivingIndexMax: 99.5, homeSqftFor1mMin: 2400,
+    housingBuilt2000PlusPctMin: 35,
+  });
+});
+
+it("renders Cost of Living and Home Costs legends and a five-card detail", async () => {
+  vi.stubGlobal("fetch", mockFetch());
+  render(<App />);
+  await screen.findAllByText("1 tracts interactive", {}, { timeout: 3000 });
+  selectLayer("cost-of-living");
+  const costLegend = await screen.findByLabelText(
+    "Cost of Living color scale from 80 to 120, lower is better, U.S. equals 100",
+  );
+  expect(within(costLegend).getByText("100 · U.S.")).toBeVisible();
+  expect(costLegend).toHaveTextContent("BEA RPP · 2024");
+  selectLayer("home-costs");
+  expect(await screen.findByLabelText(
+    "Home Costs national buying power percentile color scale, higher is better",
+  )).toHaveTextContent("asking-market indicator");
+  fireEvent.click(screen.getByRole("button", { name: "Search" }));
+  fireEvent.change(screen.getByLabelText("Street address"), { target: { value: "1 Main St, Boulder, CO" } });
+  fireEvent.click(screen.getByRole("button", { name: "Find tract" }));
+  const drawer = await screen.findByRole("dialog", { name: "Tract detail" });
+  const cards = drawer.querySelectorAll(".metric-card");
+  expect(cards).toHaveLength(5);
+  expect(cards[0]).toHaveAttribute("aria-label", "Home Costs");
+  expect(cards[0]).toHaveClass("active");
+  expect(within(drawer).getByLabelText("Cost of Living")).toHaveTextContent("BEA Boulder, CO MSA");
+  expect(within(drawer).getByLabelText("Home Costs")).toHaveTextContent("Built 2000+33%");
+  expect(within(drawer).getByLabelText("Home Costs")).toHaveTextContent("ACS 2024 five-year estimates");
+  expect(within(drawer).getByText("Asking-market indicator, not a sale price.")).toBeVisible();
+});
+
+it("reports unavailable ACS housing-stock assets without claiming direct estimates", async () => {
+  vi.stubGlobal("fetch", mockFetch(true, { kind: "national", state: null }, true, false, {
+    housing_stock_total_units_estimate: null,
+    housing_built_2000_plus_pct: null,
+    housing_built_2010_plus_pct: null,
+    housing_built_2020_plus_pct: null,
+    housing_median_year_built: null,
+    housing_stock_release_year: null,
+    housing_stock_coverage_status: "asset_unavailable",
+  }));
+  render(<App />);
+  await screen.findByText("HouseHunter");
+  selectLayer("home-costs");
+  fireEvent.click(screen.getByRole("button", { name: "Search" }));
+  expect(screen.getByText(/result shows tract context, never a property marker/i)).toBeVisible();
+  fireEvent.change(screen.getByLabelText("Street address"), { target: { value: "1 Main St, Boulder, CO" } });
+  fireEvent.click(screen.getByRole("button", { name: "Find tract" }));
+  const homeCard = await within(await screen.findByRole("dialog", { name: "Tract detail" }))
+    .findByLabelText("Home Costs");
+  expect(homeCard).toHaveTextContent("Housing stock coverage: asset unavailable (ACS housing-stock asset)");
+  expect(homeCard).not.toHaveTextContent("Housing stock uses direct");
+});
+
+it("surfaces a stale Home Costs market release in the information panel", async () => {
+  vi.stubGlobal("fetch", mockFetch(true, { kind: "national", state: null }, true, true));
+  render(<App />);
+  await screen.findByText("HouseHunter");
+  fireEvent.click(screen.getByRole("button", { name: "Information" }));
+  const staleNotice = (await screen.findByText("Home Costs market release is stale.", { exact: false }))
+    .closest("p");
+  expect(staleNotice).toHaveTextContent("2026-08 release is older than 62 days");
+});
+
+it("carries live Home Costs staleness from metadata into tract details", async () => {
+  vi.stubGlobal("fetch", mockFetch(true, { kind: "national", state: null }, true, true));
+  render(<App />);
+  await screen.findByText("HouseHunter");
+  selectLayer("home-costs");
+  fireEvent.click(screen.getByRole("button", { name: "Search" }));
+  fireEvent.change(screen.getByLabelText("Street address"), {
+    target: { value: "1 Main St, Boulder, CO" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Find tract" }));
+
+  const homeCard = await within(await screen.findByRole("dialog", { name: "Tract detail" }))
+    .findByLabelText("Home Costs");
+  expect(homeCard).toHaveTextContent("Market release is stale.");
+});
+
+it("orders Home Costs extremes by square feet with most before least", async () => {
+  const baseFetch = mockFetch();
+  const directions: string[] = [];
+  vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+    const url = new URL(String(input), "http://127.0.0.1");
+    if (url.pathname === "/api/v2/places"
+      && url.searchParams.get("sort") === "home_sqft_for_1m") {
+      const direction = url.searchParams.get("direction") || "";
+      directions.push(direction);
+      const item = direction === "desc"
+        ? { ...tract, name: "Most buying power", home_sqft_for_1m: 5000 }
+        : { ...tract, name: "Least buying power", home_sqft_for_1m: 1000 };
+      return Promise.resolve(response({ total: 1, items: [item] }));
+    }
+    return baseFetch(input);
+  }));
+  render(<App />);
+  await screen.findByText("HouseHunter");
+  selectLayer("home-costs");
+  fireEvent.click(screen.getByRole("button", { name: "Most / Least" }));
+  const panel = await screen.findByRole("region", { name: "Most and least square feet for $1M" });
+  const most = await within(panel).findByRole("heading", { name: "Most square feet for $1M" });
+  const least = within(panel).getByRole("heading", { name: "Least square feet for $1M" });
+  expect(most.closest("section")).toHaveTextContent(/Most buying power.*5,000 sq ft \/ \$1M/s);
+  expect(least.closest("section")).toHaveTextContent(/Least buying power.*1,000 sq ft \/ \$1M/s);
+  expect(directions.sort()).toEqual(["asc", "desc"]);
+});
+
+it("keeps an unavailable Home Costs layer selectable and explains the local import", async () => {
+  vi.stubGlobal("fetch", mockFetch(true, { kind: "national", state: null }, false));
+  render(<App />);
+  await screen.findByText("HouseHunter");
+  selectLayer("home-costs");
+  const legend = await screen.findByLabelText(
+    "Home Costs national buying power percentile color scale, higher is better",
+  );
+  expect(screen.getByRole("combobox", { name: "Map layer" })).toHaveValue("home-costs");
+  expect(legend).toHaveTextContent("Unavailable in this snapshot");
+  fireEvent.click(screen.getByRole("button", { name: "Information" }));
+  expect(screen.getByRole("region", { name: "About this map" })).toHaveTextContent(
+    "househunter import-home-market FILE --acknowledge-personal-use",
+  );
+});
+
 it("keeps the committed legend and accessible map description aligned during metric rendering", async () => {
   vi.stubGlobal("fetch", mockFetch());
   render(<App />);
   await screen.findAllByText("1 tracts interactive", {}, { timeout: 3000 });
   const canvas = screen.getByRole("img", { name: /focusable USA tract risk map/i });
 
-  fireEvent.click(screen.getByRole("button", { name: "Mountain Magnitude" }));
+  selectLayer("mountain");
 
   expect(screen.getByText("Updating Mountain Magnitude map…")).toBeVisible();
   expect(canvas).toHaveAttribute("aria-busy", "true");
@@ -918,8 +1143,8 @@ it("commits only the final metric after rapid successive map changes", async () 
   await screen.findAllByText("1 tracts interactive", {}, { timeout: 3000 });
   const canvas = screen.getByRole("img", { name: /focusable USA tract risk map/i });
 
-  fireEvent.click(screen.getByRole("button", { name: "Mountain Magnitude" }));
-  fireEvent.click(screen.getByRole("button", { name: "Community Conditions" }));
+  selectLayer("mountain");
+  selectLayer("community-conditions");
 
   expect(canvas).toHaveAttribute("aria-busy", "true");
   expect(screen.getByLabelText("Continuous score color scale, lower is better")).toBeVisible();
@@ -941,7 +1166,7 @@ it("finishes a metric transition when active filters leave no interactive geogra
   fireEvent.click(screen.getByRole("button", { name: "Filters" }));
   fireEvent.change(screen.getByLabelText("Minimum Mountain Magnitude"), { target: { value: "100" } });
   fireEvent.click(screen.getByRole("button", { name: "Apply" }));
-  fireEvent.click(screen.getByRole("button", { name: "Mountain Magnitude" }));
+  selectLayer("mountain");
 
   const canvas = screen.getByRole("img", { name: /focusable USA tract/i });
   expect(await screen.findByLabelText(
@@ -951,7 +1176,7 @@ it("finishes a metric transition when active filters leave no interactive geogra
   expect(document.querySelector(".map-updating")).not.toBeInTheDocument();
 });
 
-it("reports effective filters and does not expose an ineffective Community checkbox", async () => {
+it("scopes show-unavailable to the active layer and keeps cross-layer filters", async () => {
   vi.stubGlobal("fetch", mockFetch());
   render(<App />);
   await screen.findByText("HouseHunter");
@@ -961,18 +1186,19 @@ it("reports effective filters and does not expose an ineffective Community check
   fireEvent.click(screen.getByRole("button", { name: "Apply" }));
   expect(screen.getByRole("button", { name: "Filters · On" })).toBeVisible();
 
-  fireEvent.click(screen.getByRole("button", { name: "Community Conditions" }));
+  selectLayer("community-conditions");
   expect(screen.getByRole("button", { name: "Filters" })).toBeVisible();
   fireEvent.click(screen.getByRole("button", { name: "Filters" }));
-  expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
-  expect(screen.getByText("Not-grouped geographies always remain visible on this layer.")).toBeVisible();
+  expect(screen.getByRole("checkbox", { name: "Show Community-ungrouped geographies" }))
+    .not.toBeChecked();
+  expect(screen.getByText(/Explicit metric thresholds always exclude unavailable values/)).toBeVisible();
   fireEvent.click(screen.getByRole("button", { name: "Filters" }));
 
-  fireEvent.click(screen.getByRole("button", { name: "Mountain Magnitude" }));
-  expect(screen.getByRole("button", { name: "Filters · On" })).toBeVisible();
-  fireEvent.click(screen.getByRole("button", { name: "Filters · On" }));
+  selectLayer("mountain");
+  expect(screen.getByRole("button", { name: "Filters" })).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "Filters" }));
   expect(screen.getByRole("checkbox", { name: "Show Mountain-unavailable geographies" }))
-    .toBeChecked();
+    .not.toBeChecked();
 });
 
 it("shows fresh loading feedback and does not refetch when closing extremes", async () => {
@@ -1006,8 +1232,8 @@ it("switches to Community Conditions and browses county groups without changing 
   vi.stubGlobal("fetch", mockFetch());
   render(<App />);
   await screen.findByText("HouseHunter");
-  expect(screen.getByRole("button", { name: "FEMA Risk" })).toHaveAttribute("aria-pressed", "true");
-  fireEvent.click(screen.getByRole("button", { name: "Community Conditions" }));
+  expect(screen.getByRole("combobox", { name: "Map layer" })).toHaveValue("fema");
+  selectLayer("community-conditions");
   await waitFor(() => expect(window.location.hash).toContain("metric=community-conditions"));
   const legend = await screen.findByLabelText(
     "Continuous Community Conditions color scale, Group 1 is healthiest",
@@ -1034,7 +1260,7 @@ it("switches to Community Conditions and browses county groups without changing 
   expect(within(drawer).getByLabelText("FEMA risk")).toBeVisible();
   expect(within(drawer).getByLabelText("Community Conditions")).toHaveClass("active");
   expect(within(drawer).getByText("Group 2 of 10")).toBeVisible();
-  expect(within(drawer).getByText(/Better conditions/)).toBeVisible();
+  expect(within(drawer).getByText(/County geography/)).toBeVisible();
 });
 
 it("shows an empty Community Conditions range for an ungrouped territory", async () => {
@@ -1053,7 +1279,7 @@ it("shows an empty Community Conditions range for an ungrouped territory", async
 
   render(<App />);
   await screen.findByText("HouseHunter");
-  fireEvent.click(screen.getByRole("button", { name: "Community Conditions" }));
+  selectLayer("community-conditions");
   fireEvent.click(screen.getByRole("button", { name: "Best / Worst" }));
   const panel = await screen.findByRole("region", { name: "Best and worst Community Conditions" });
 
@@ -1066,7 +1292,7 @@ it("maps and filters Mountain Magnitude with an honest expandable breakdown", as
   render(<App />);
   await screen.findByText("HouseHunter");
 
-  fireEvent.click(screen.getByRole("button", { name: "Mountain Magnitude" }));
+  selectLayer("mountain");
   const legend = await screen.findByLabelText(
     "Stepped Mountain Magnitude color scale for U.S. tracts, higher means fewer equal-or-higher peers",
   );
@@ -1108,7 +1334,7 @@ it("uses grain-specific magnitude legends without changing shared half-magnitude
   render(<App />);
   await screen.findByText("HouseHunter");
 
-  fireEvent.click(screen.getByRole("button", { name: "Mountain Magnitude" }));
+  selectLayer("mountain");
   const tractLegend = await screen.findByLabelText(
     "Stepped Mountain Magnitude color scale for U.S. tracts, higher means fewer equal-or-higher peers",
   );
@@ -1145,7 +1371,7 @@ it("discards a stale Community Conditions page after returning to group summarie
   }));
   render(<App />);
   await screen.findByText("HouseHunter");
-  fireEvent.click(screen.getByRole("button", { name: "Community Conditions" }));
+  selectLayer("community-conditions");
   fireEvent.click(screen.getByRole("button", { name: "Best / Worst" }));
   const panel = await screen.findByRole("region", { name: "Best and worst Community Conditions" });
   fireEvent.click((await within(panel).findAllByRole("button", { name: "Browse all" }))[0]);
@@ -1214,6 +1440,7 @@ it("looks up a street address and opens tract detail", async () => {
 
 it("navigates between tract and county detail workflows", async () => {
   vi.stubGlobal("fetch", mockFetch()); render(<App />); await screen.findByText("HouseHunter");
+  selectLayer("home-costs");
   fireEvent.click(screen.getByRole("button", { name: "Search" }));
   fireEvent.change(screen.getByLabelText("Street address"), { target: { value: "1 Main St, Boulder, CO" } });
   fireEvent.click(screen.getByRole("button", { name: "Find tract" }));
@@ -1222,6 +1449,7 @@ it("navigates between tract and county detail workflows", async () => {
   const countyDrawer = await screen.findByRole("dialog", { name: "County detail" });
   expect(await within(countyDrawer).findByText("Wildfire")).toBeVisible();
   expect(within(countyDrawer).getByText("No rating")).toBeVisible();
+  expect(within(countyDrawer).getByLabelText("Home Costs")).toHaveTextContent("County market geography");
   fireEvent.click(await within(countyDrawer).findByRole("button", { name: "View 12 tracts" }));
   await waitFor(() => expect(screen.getByRole("button", { name: "Tracts" })).toHaveAttribute("aria-pressed", "true"));
   expect(screen.queryByRole("dialog", { name: "County detail" })).not.toBeInTheDocument();

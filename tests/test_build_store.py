@@ -11,13 +11,16 @@ import yaml
 from househunter.build import (
     BUILD_SCHEMA_VERSION,
     MOUNTAIN_RUNTIME_GEOGRAPHY_VERSION,
+    SNAPSHOT_FILES,
     _attach_current_mountain,
     _cached_snapshot_artifacts_valid,
     build_snapshot,
 )
 from househunter.config import RuntimePaths
+from househunter.dimensions import attach_dimensions as attach_test_dimensions
 from househunter.errors import BuildNotFoundError, HouseHunterError
 from househunter.geography import STATE_BY_FIPS
+from househunter.housing_stock import HousingStockBundle
 from househunter.mountain import (
     IN_SCOPE_STATES,
     MOUNTAIN_RUNTIME_COLUMNS,
@@ -26,6 +29,72 @@ from househunter.mountain import (
     write_release,
 )
 from househunter.store import Store
+
+
+def _install_dimension_fixture(monkeypatch: pytest.MonkeyPatch) -> None:
+    rpp = pl.DataFrame(
+        {
+            "cost_of_living_geography_id": ["00999", "33860"],
+            "cost_of_living_geography_name": [
+                "U.S. Nonmetropolitan Portion",
+                "Montgomery, AL MSA",
+            ],
+            "cost_of_living_index": [90.0, 110.0],
+            "cost_of_living_goods_index": [91.0, 111.0],
+            "cost_of_living_housing_rents_index": [92.0, 112.0],
+            "cost_of_living_utilities_index": [93.0, 113.0],
+            "cost_of_living_other_services_index": [94.0, 114.0],
+            "cost_of_living_release_year": [2024, 2024],
+        }
+    )
+    home = pl.DataFrame(
+        {
+            "county_fips": ["01001", "02001"],
+            "home_sqft_for_1m": [1000, 2000],
+            "home_buying_power_percentile": [50.0, 100.0],
+            "home_median_listing_price": [500000.0, 600000.0],
+            "home_median_listing_price_per_square_foot": [1000.0, 500.0],
+            "home_median_square_feet": [1200.0, 1400.0],
+            "home_active_listing_count": [10.0, 20.0],
+            "home_market_month": ["2026-08", "2026-08"],
+            "home_costs_coverage_status": ["complete", "complete"],
+        }
+    )
+
+    def attach(places: pl.DataFrame, counties: pl.DataFrame, **kwargs: object):
+        housing = kwargs["housing"]
+        assert isinstance(housing, HousingStockBundle)
+        alaska_county = housing.counties.filter(pl.col("county_fips") == "01001").with_columns(
+            pl.lit("02001").alias("county_fips"),
+            pl.lit(60.0).alias("housing_built_2000_plus_pct"),
+        )
+        alaska_tract = housing.tracts.head(1).with_columns(
+            pl.lit("02001000100").alias("tract_id"),
+            pl.lit(60.0).alias("housing_built_2000_plus_pct"),
+        )
+        housing = HousingStockBundle(
+            manifest=housing.manifest,
+            tracts=pl.concat([housing.tracts, alaska_tract]).sort("tract_id"),
+            counties=pl.concat([housing.counties, alaska_county]).sort("county_fips"),
+            county_msa=housing.county_msa,
+        )
+        attached = attach_test_dimensions(
+            places,
+            counties,
+            rpp=rpp,
+            home=home,
+            housing=housing,
+            bea_source={"expected_msa_count": 1, "nonmetropolitan_geofips": "00999"},
+            home_attribution="Realtor.com Research Data",
+            home_usage_notice="Personal local use only",
+        )
+        return (
+            *attached,
+            {"cost_of_living": True, "home_market": True, "housing_stock": True},
+            [],
+        )
+
+    monkeypatch.setattr("househunter.build.attach_dimensions_fail_open", attach)
 
 
 def _promote_mountain_fixture(paths: RuntimePaths, root: Path) -> None:
@@ -133,7 +202,40 @@ def test_build_is_content_addressed_and_queryable(
     second_metadata = json.loads((second / "build.json").read_text())
     assert first == second
     assert first_metadata["schema_version"] == BUILD_SCHEMA_VERSION
+    assert first_metadata["housing_stock_reference"]["available"] is True
+    assert first_metadata["housing_stock_reference"]["release_year"] == 2024
+    assert first_metadata["housing_stock_reference"]["omb_delineation"] == (
+        "OMB Bulletin No. 23-01"
+    )
+    assert first_metadata["source_vintages"]["omb_delineation"] == "OMB Bulletin No. 23-01"
+    assert {warning["source"] for warning in first_metadata["optional_source_warnings"]} == {
+        "bea_rpp",
+        "home_market",
+    }
+    assert {layer["key"] for layer in first_metadata["layers"]} == {
+        "risk",
+        "community-conditions",
+        "mountain",
+        "cost-of-living",
+        "home-costs",
+    }
+    layers = {layer["key"]: layer for layer in first_metadata["layers"]}
+    assert layers["home-costs"]["availability"] == "unavailable"
+    assert "direct tract and county" in layers["home-costs"]["geography"]
+    assert "OMB Bulletin No. 23-01" in layers["cost-of-living"]["geography"]
     assert first_metadata["logical_checksums"] == second_metadata["logical_checksums"]
+    assert all((first / filename).is_file() for filename in SNAPSHOT_FILES)
+    assert paths.data.stat().st_mode & 0o077 == 0
+    assert paths.builds.stat().st_mode & 0o077 == 0
+    assert first.stat().st_mode & 0o077 == 0
+    assert all((first / filename).stat().st_mode & 0o077 == 0 for filename in SNAPSHOT_FILES)
+    assert {
+        "cost_of_living",
+        "home_market",
+        "housing_stock_tract",
+        "housing_stock_county",
+        "housing_stock_county_msa",
+    } <= set(first_metadata["logical_checksums"])
     with Store(paths) as store:
         rows = store.list_places(limit=10)
         assert [item["place_id"] for item in rows["items"]] == [
@@ -168,6 +270,51 @@ def test_build_is_content_addressed_and_queryable(
             "01001000200",
             "01001000300",
         }
+
+
+def test_unavailable_housing_stock_asset_does_not_block_core_snapshot(
+    fixture_environment: tuple[RuntimePaths, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _ = fixture_environment
+
+    def unavailable() -> None:
+        raise HouseHunterError("injected missing housing bundle")
+
+    monkeypatch.setattr("househunter.build.validate_housing_stock_assets", unavailable)
+    output = build_snapshot(paths)
+    metadata = json.loads((output / "build.json").read_text())
+
+    assert metadata["housing_stock_reference"]["available"] is False
+    assert metadata["housing_stock_reference"]["coverage_status"] == "asset_unavailable"
+    assert metadata["source_vintages"]["housing_stock"] == "unavailable"
+    assert metadata["optional_source_warnings"][0] == {
+        "source": "housing_stock",
+        "status": "asset_unavailable",
+        "message": "injected missing housing bundle",
+    }
+    assert {warning["source"] for warning in metadata["optional_source_warnings"]} == {
+        "housing_stock",
+        "bea_rpp",
+        "home_market",
+    }
+    with Store(paths) as store:
+        assert store.list_places(limit=1)["items"]
+
+
+def test_malformed_housing_stock_manifest_does_not_block_core_snapshot(
+    fixture_environment: tuple[RuntimePaths, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _ = fixture_environment
+
+    def malformed() -> None:
+        raise KeyError("release_year")
+
+    monkeypatch.setattr("househunter.build.validate_housing_stock_assets", malformed)
+    output = build_snapshot(paths)
+    metadata = json.loads((output / "build.json").read_text())
+
+    assert metadata["housing_stock_reference"]["coverage_status"] == "asset_unavailable"
+    assert "release_year" in metadata["optional_source_warnings"][0]["message"]
 
 
 def test_build_identity_includes_source_vintages(
@@ -217,7 +364,7 @@ def test_build_joins_promoted_mountain_release_and_changes_identity(
         ] == ["02001000100"]
 
 
-def test_store_magnitude_filter_sort_ties_nulls_and_map_schema_three(
+def test_store_magnitude_filter_sort_ties_nulls_and_map_schema_four(
     fixture_environment: tuple[RuntimePaths, Path],
 ) -> None:
     paths, root = fixture_environment
@@ -257,15 +404,34 @@ def test_store_magnitude_filter_sort_ties_nulls_and_map_schema_three(
             store.list_places(sort="mountain_score")
 
         payload = store.map_scores("tract")
-        assert payload["schema_version"] == 3
+        assert payload["schema_version"] == 4
         assert set(payload["columns"]) == {
             "place_id",
             "risk_score",
             "community_conditions_group",
             "mountain_magnitude",
+            "cost_of_living_index",
+            "home_buying_power_percentile",
+            "home_sqft_for_1m",
+            "housing_built_2000_plus_pct",
         }
         assert "mountain_score" not in payload["columns"]
         assert len({len(values) for values in payload["columns"].values()}) == 1
+        core = store.map_scores_core("tract")
+        assert set(core["columns"]) == {
+            "place_id",
+            "risk_score",
+            "community_conditions_group",
+            "mountain_magnitude",
+        }
+        assert core["columns"]["place_id"] == payload["columns"]["place_id"]
+        cost = store.map_scores_addon("tract", "cost-of-living")
+        home = store.map_scores_addon("tract", "home-costs")
+        assert cost["schema_version"] == home["schema_version"] == 1
+        assert cost["columns"]["cost_of_living_index"] == payload["columns"]["cost_of_living_index"]
+        assert home["columns"]["home_sqft_for_1m"] == payload["columns"]["home_sqft_for_1m"]
+        with pytest.raises(HouseHunterError, match="Map score add-on"):
+            store.map_scores_addon("tract", "unknown")
 
 
 @pytest.mark.parametrize(
@@ -291,6 +457,85 @@ def test_store_rejects_invalid_magnitude_bounds(
             mountain_magnitude_min=minimum,
             mountain_magnitude_max=maximum,
         )
+
+
+def test_store_combines_dimension_filters_sorts_and_null_rules(
+    fixture_environment: tuple[RuntimePaths, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _ = fixture_environment
+    _install_dimension_fixture(monkeypatch)
+    build_snapshot(paths)
+
+    with Store(paths) as store:
+        best_home = store.list_counties(sort="home_sqft_for_1m", direction="desc")["items"]
+        lowest_cost = store.list_counties(sort="cost_of_living_index", direction="asc")["items"]
+        combined = store.list_counties(
+            max_community_conditions_group=2,
+            cost_of_living_index_max=100,
+            home_sqft_for_1m_min=1500,
+            housing_built_2000_plus_pct_min=0,
+            include_unranked=True,
+        )
+        contradictory_groups = store.list_places(
+            community_conditions_group=5,
+            max_community_conditions_group=2,
+            include_unranked=True,
+        )
+        explicit_bound = store.list_places(
+            home_sqft_for_1m_min=0,
+            include_unranked=True,
+        )
+
+    assert [row["place_id"] for row in best_home] == ["02001", "01001"]
+    assert [row["place_id"] for row in lowest_cost] == ["02001", "01001"]
+    assert [row["place_id"] for row in combined["items"]] == ["02001"]
+    assert contradictory_groups["total"] == 0
+    assert explicit_bound["total"] == 4
+    assert all(row["home_sqft_for_1m"] is not None for row in explicit_bound["items"])
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"cost_of_living_index_min": float("nan")}, "Cost of Living"),
+        ({"cost_of_living_index_min": 2.0, "cost_of_living_index_max": 1.0}, "minimum"),
+        ({"home_sqft_for_1m_max": float("inf")}, "Home square feet"),
+        ({"home_sqft_for_1m_min": 2.0, "home_sqft_for_1m_max": 1.0}, "minimum"),
+        ({"housing_built_2000_plus_pct_min": -0.1}, "Built-2000"),
+        ({"housing_built_2000_plus_pct_max": 100.1}, "Built-2000"),
+        (
+            {
+                "housing_built_2000_plus_pct_min": 2.0,
+                "housing_built_2000_plus_pct_max": 1.0,
+            },
+            "minimum",
+        ),
+        ({"max_community_conditions_group": 0}, "Maximum Community"),
+    ],
+)
+def test_store_rejects_invalid_dimension_bounds(
+    fixture_environment: tuple[RuntimePaths, object],
+    kwargs: dict[str, float | int],
+    message: str,
+) -> None:
+    paths, _ = fixture_environment
+    build_snapshot(paths)
+    with Store(paths) as store, pytest.raises(HouseHunterError, match=message):
+        store.list_places(**kwargs)
+
+
+def test_state_snapshot_preserves_national_home_percentile(
+    fixture_environment: tuple[RuntimePaths, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _ = fixture_environment
+    _install_dimension_fixture(monkeypatch)
+
+    build_snapshot(paths, state="AK")
+
+    with Store(paths) as store:
+        summary = store.county_detail("02001")["summary"]
+    assert summary["home_buying_power_percentile"] == 100.0
+    assert summary["home_sqft_for_1m"] == 2000
 
 
 def test_snapshot_and_all_exports_exclude_legacy_mountain_score_fields(
@@ -606,6 +851,19 @@ def test_legacy_build_schema_is_not_reused(
     metadata_path.write_text(json.dumps(metadata))
     with pytest.raises(HouseHunterError, match="immutable build failed validation"):
         build_snapshot(paths)
+
+
+def test_schema_nine_current_pointer_requires_a_rebuild(
+    fixture_environment: tuple[RuntimePaths, object],
+) -> None:
+    paths, _ = fixture_environment
+    build_snapshot(paths)
+    pointer = json.loads(paths.current.read_text())
+    pointer["schema_version"] = 9
+    paths.current.write_text(json.dumps(pointer))
+
+    with pytest.raises(BuildNotFoundError, match=r"Snapshot schema 9.*rebuild.*schema 10"):
+        Store(paths)
 
 
 def test_unknown_state_is_rejected(fixture_environment: tuple[RuntimePaths, object]) -> None:

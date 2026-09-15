@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
 
+from .acquisition import download_optional_bea
 from .build import build_snapshot
 from .chrr import download_chrr
 from .config import RuntimePaths
@@ -90,17 +91,22 @@ class JobManager:
                 if job.status.kind == "download":
                     download_fema(
                         self.paths,
-                        progress=lambda value, message: progress(value * 40 // 100, message),
+                        progress=lambda value, message: progress(value * 35 // 100, message),
                         cancelled=job.cancel.is_set,
                     )
                     download_fema_counties(
                         self.paths,
-                        progress=lambda value, message: progress(40 + value * 30 // 100, message),
+                        progress=lambda value, message: progress(35 + value * 25 // 100, message),
                         cancelled=job.cancel.is_set,
                     )
                     download_chrr(
                         self.paths,
-                        progress=lambda value, message: progress(70 + value * 30 // 100, message),
+                        progress=lambda value, message: progress(60 + value * 25 // 100, message),
+                        cancelled=job.cancel.is_set,
+                    )
+                    download_optional_bea(
+                        self.paths,
+                        progress=lambda value, message: progress(85 + value * 15 // 100, message),
                         cancelled=job.cancel.is_set,
                     )
                 elif job.status.kind == "build":

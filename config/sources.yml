@@ -1,4 +1,36 @@
 schema_version: 1
+bea_rpp:
+  name: BEA Regional Price Parities by Metropolitan Statistical Area
+  archive_url: https://apps.bea.gov/regional/zip/MARPP.zip
+  item_url: https://www.bea.gov/data/prices-inflation/regional-price-parities-state-and-metro-area
+  terms_url: https://www.bea.gov/open-data
+  version: 2024 Regional Price Parities
+  release: 2024
+  release_year: 2024
+  expected_size: 146479
+  archive_sha256: 5dbf2e6ac2af222cc9abc205586c9b480344d89392752eb689c3ec823a34c83e
+  normalized_logical_sha256: fb8abcc48e12fd24e82be5725c6cbddb5e6443d87d00015c4814bdb7405f4aa9
+  table_filename: MARPP_MSA_2008_2024.csv
+  table_size: 455899
+  header_sha256: 2d08cb976140d2df0214af286d802de96341b74046bd48e2595b354367647427
+  required_columns:
+    - GeoFIPS
+    - GeoName
+    - Region
+    - TableName
+    - LineCode
+    - IndustryClassification
+    - Description
+    - Unit
+    - "2024"
+  expected_msa_count: 387
+  nonmetropolitan_geofips: "00999"
+  line_codes:
+    "1": All items
+    "2": Goods
+    "3": "Services: Housing rents"
+    "4": "Services: Utilities"
+    "5": "Services: Other"
 chrr:
   name: County Health Rankings & Roadmaps 2025 Community Conditions Health Group
   layer_url: https://p3eplmys2rvchkjx.svcs.arcgis.com/P3ePLMYs2RVChkJx/arcgis/rest/services/County%20Health%20Rankings%202025/FeatureServer/2

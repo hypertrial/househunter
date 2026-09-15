@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import shutil
 from pathlib import Path
 from typing import Any
 
 import duckdb
 
-from .build import BUILD_SCHEMA_VERSION, snapshot_artifacts_are_valid
+from .build import BUILD_SCHEMA_VERSION, SNAPSHOT_FILES, snapshot_artifacts_are_valid
 from .config import RuntimePaths
 from .contracts import COUNTY_METHODOLOGY_NOTICE, METHODOLOGY_NOTICE
+from .dimensions import SUMMARY_DIMENSION_COLUMNS
 from .errors import AmbiguousPlaceError, BuildNotFoundError, HouseHunterError
 from .hazards import hazard_percentiles_from_record, hazard_select_sql
 
@@ -67,7 +69,33 @@ SUMMARY_KEYS = [
     "trail_access_pct",
     "mountain_population_coverage",
     "mountain_coverage_status",
+    *SUMMARY_DIMENSION_COLUMNS,
 ]
+SUMMARY_COLUMNS = ", ".join(SUMMARY_KEYS)
+BUILD_ID_PATTERN = re.compile(r"(?:national|[a-z]{2})-[0-9a-f]{16}")
+
+
+def _validated_build(build: Path, expected_build_id: str) -> tuple[Path, dict[str, Any]]:
+    required = [build / filename for filename in SNAPSHOT_FILES]
+    if (
+        build.is_symlink()
+        or not build.is_dir()
+        or any(not path.is_file() or path.is_symlink() for path in required)
+    ):
+        raise BuildNotFoundError(f"Published build is incomplete: {build}")
+    try:
+        metadata = json.loads((build / "build.json").read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise BuildNotFoundError(f"Build metadata is invalid: {exc}") from exc
+    if (
+        metadata.get("schema_version") != BUILD_SCHEMA_VERSION
+        or metadata.get("build_id") != expected_build_id
+        or build.name != expected_build_id
+    ):
+        raise BuildNotFoundError("Build directory and metadata disagree")
+    if not snapshot_artifacts_are_valid(build):
+        raise BuildNotFoundError("Published build artifacts do not match their canonical data")
+    return build, metadata
 
 
 def current_build(paths: RuntimePaths) -> tuple[Path, dict[str, Any]]:
@@ -80,35 +108,32 @@ def current_build(paths: RuntimePaths) -> tuple[Path, dict[str, Any]]:
         raise BuildNotFoundError(f"Current build pointer is invalid: {exc}") from exc
     if not build.is_relative_to(paths.builds.resolve()):
         raise BuildNotFoundError("Current build pointer escapes the build directory")
-    required = [
-        build / "househunter.duckdb",
-        build / "build.json",
-        build / "places.parquet",
-        build / "tract_contributions.parquet",
-        build / "counties.parquet",
-        build / "chrr_county.parquet",
-    ]
-    if not build.is_dir() or any(not path.is_file() or path.is_symlink() for path in required):
-        raise BuildNotFoundError(f"Published build is incomplete: {build}")
-    try:
-        metadata = json.loads((build / "build.json").read_text())
-    except (OSError, json.JSONDecodeError) as exc:
-        raise BuildNotFoundError(f"Build metadata is invalid: {exc}") from exc
-    if (
-        pointer.get("schema_version") != BUILD_SCHEMA_VERSION
-        or metadata.get("schema_version") != BUILD_SCHEMA_VERSION
-        or metadata.get("build_id") != pointer.get("build_id")
-    ):
-        raise BuildNotFoundError("Current pointer and build metadata disagree")
-    if not snapshot_artifacts_are_valid(build):
-        raise BuildNotFoundError("Published build artifacts do not match their canonical data")
-    return build, metadata
+    pointer_schema = pointer.get("schema_version")
+    if pointer_schema != BUILD_SCHEMA_VERSION:
+        raise BuildNotFoundError(
+            f"Snapshot schema {pointer_schema!r} is unsupported; rebuild with "
+            f"`househunter build` to create schema {BUILD_SCHEMA_VERSION}"
+        )
+    return _validated_build(build, str(pointer.get("build_id", "")))
+
+
+def retained_build(paths: RuntimePaths, build_id: str) -> tuple[Path, dict[str, Any]]:
+    """Open a validated immutable build named by a previously advertised payload URL."""
+    if paths.builds.is_symlink() or BUILD_ID_PATTERN.fullmatch(build_id) is None:
+        raise BuildNotFoundError("Retained build identity is invalid")
+    builds_root = paths.builds.resolve()
+    build = (paths.builds / build_id).resolve()
+    if not build.is_relative_to(builds_root):
+        raise BuildNotFoundError("Retained build escapes the build directory")
+    return _validated_build(build, build_id)
 
 
 class Store:
-    def __init__(self, paths: RuntimePaths) -> None:
+    def __init__(self, paths: RuntimePaths, *, build_id: str | None = None) -> None:
         self.paths = paths
-        self.build, self.metadata = current_build(paths)
+        self.build, self.metadata = (
+            retained_build(paths, build_id) if build_id is not None else current_build(paths)
+        )
         self.connection = duckdb.connect(str(self.build / "househunter.duckdb"), read_only=True)
 
     def close(self) -> None:
@@ -132,8 +157,15 @@ class Store:
         min_score: float | None = None,
         max_score: float | None = None,
         community_conditions_group: int | None = None,
+        max_community_conditions_group: int | None = None,
         mountain_magnitude_min: float | None = None,
         mountain_magnitude_max: float | None = None,
+        cost_of_living_index_min: float | None = None,
+        cost_of_living_index_max: float | None = None,
+        home_sqft_for_1m_min: float | None = None,
+        home_sqft_for_1m_max: float | None = None,
+        housing_built_2000_plus_pct_min: float | None = None,
+        housing_built_2000_plus_pct_max: float | None = None,
         include_unranked: bool = False,
         sort: str = "risk_score",
         direction: str = "asc",
@@ -148,6 +180,10 @@ class Store:
             "population": "population_2020",
             "community_conditions_group": "community_conditions_group",
             "mountain_magnitude": "mountain_magnitude",
+            "cost_of_living_index": "cost_of_living_index",
+            "home_sqft_for_1m": "home_sqft_for_1m",
+            "home_buying_power_percentile": "home_buying_power_percentile",
+            "housing_built_2000_plus_pct": "housing_built_2000_plus_pct",
         }
         if sort not in sort_columns:
             raise HouseHunterError(f"Unsupported sort column: {sort}")
@@ -161,6 +197,10 @@ class Store:
             raise HouseHunterError("County filter must be a 5-digit FIPS code")
         if community_conditions_group is not None and not 1 <= community_conditions_group <= 10:
             raise HouseHunterError("Community Conditions group must be between 1 and 10")
+        if max_community_conditions_group is not None and not (
+            1 <= max_community_conditions_group <= 10
+        ):
+            raise HouseHunterError("Maximum Community Conditions group must be between 1 and 10")
         magnitude_bounds = (mountain_magnitude_min, mountain_magnitude_max)
         if any(
             value is not None and (not math.isfinite(value) or value < 0)
@@ -173,14 +213,57 @@ class Store:
             and mountain_magnitude_min > mountain_magnitude_max
         ):
             raise HouseHunterError("Mountain Magnitude minimum cannot exceed maximum")
+        metric_bounds = (
+            (
+                "Cost of Living",
+                cost_of_living_index_min,
+                cost_of_living_index_max,
+                0.0,
+                None,
+            ),
+            (
+                "Home square feet",
+                home_sqft_for_1m_min,
+                home_sqft_for_1m_max,
+                0.0,
+                None,
+            ),
+            (
+                "Built-2000+ share",
+                housing_built_2000_plus_pct_min,
+                housing_built_2000_plus_pct_max,
+                0.0,
+                100.0,
+            ),
+        )
+        for label, minimum, maximum, floor, ceiling in metric_bounds:
+            for value in (minimum, maximum):
+                if value is not None and (
+                    not math.isfinite(value)
+                    or value < floor
+                    or (ceiling is not None and value > ceiling)
+                ):
+                    range_suffix = f" and at most {ceiling:g}" if ceiling is not None else ""
+                    raise HouseHunterError(
+                        f"{label} bounds must be finite, nonnegative{range_suffix}"
+                    )
+            if minimum is not None and maximum is not None and minimum > maximum:
+                raise HouseHunterError(f"{label} minimum cannot exceed maximum")
         limit = max(1, min(limit, 500))
         offset = max(0, offset)
         clauses: list[str] = []
         parameters: list[Any] = []
         if not include_unranked:
+            rank_column = {
+                "mountain_magnitude": "mountain_magnitude",
+                "cost_of_living_index": "cost_of_living_index",
+                "home_sqft_for_1m": "home_sqft_for_1m",
+                "home_buying_power_percentile": "home_buying_power_percentile",
+                "housing_built_2000_plus_pct": "housing_built_2000_plus_pct",
+            }.get(sort)
             clauses.append(
-                "mountain_magnitude IS NOT NULL"
-                if sort == "mountain_magnitude"
+                f"{rank_column} IS NOT NULL"
+                if rank_column is not None
                 else "coverage_status = 'complete'"
             )
         if search:
@@ -199,6 +282,9 @@ class Store:
         if community_conditions_group is not None:
             clauses.append("community_conditions_group = ?")
             parameters.append(community_conditions_group)
+        if max_community_conditions_group is not None:
+            clauses.append("community_conditions_group <= ?")
+            parameters.append(max_community_conditions_group)
         for column, operator, value in (
             ("population_2020", ">=", min_population),
             ("population_2020", "<=", max_population),
@@ -206,6 +292,20 @@ class Store:
             ("risk_score", "<=", max_score),
             ("mountain_magnitude", ">=", mountain_magnitude_min),
             ("mountain_magnitude", "<=", mountain_magnitude_max),
+            ("cost_of_living_index", ">=", cost_of_living_index_min),
+            ("cost_of_living_index", "<=", cost_of_living_index_max),
+            ("home_sqft_for_1m", ">=", home_sqft_for_1m_min),
+            ("home_sqft_for_1m", "<=", home_sqft_for_1m_max),
+            (
+                "housing_built_2000_plus_pct",
+                ">=",
+                housing_built_2000_plus_pct_min,
+            ),
+            (
+                "housing_built_2000_plus_pct",
+                "<=",
+                housing_built_2000_plus_pct_max,
+            ),
         ):
             if value is not None:
                 clauses.append(f"{column} {operator} ?")
@@ -215,9 +315,7 @@ class Store:
             f"SELECT count(*) FROM {table}{where}", parameters
         ).fetchone()[0]
         null_order = "NULLS LAST"
-        tie_breaker = (
-            "name ASC, place_id ASC" if sort == "community_conditions_group" else "place_id ASC"
-        )
+        tie_breaker = "place_id ASC"
         query = (
             f"SELECT {SUMMARY_COLUMNS} FROM {table}{where} "
             f"ORDER BY {sort_columns[sort]} {direction.upper()} {null_order}, "
@@ -239,8 +337,15 @@ class Store:
         min_score: float | None = None,
         max_score: float | None = None,
         community_conditions_group: int | None = None,
+        max_community_conditions_group: int | None = None,
         mountain_magnitude_min: float | None = None,
         mountain_magnitude_max: float | None = None,
+        cost_of_living_index_min: float | None = None,
+        cost_of_living_index_max: float | None = None,
+        home_sqft_for_1m_min: float | None = None,
+        home_sqft_for_1m_max: float | None = None,
+        housing_built_2000_plus_pct_min: float | None = None,
+        housing_built_2000_plus_pct_max: float | None = None,
         include_unranked: bool = False,
         sort: str = "risk_score",
         direction: str = "asc",
@@ -257,8 +362,15 @@ class Store:
             min_score=min_score,
             max_score=max_score,
             community_conditions_group=community_conditions_group,
+            max_community_conditions_group=max_community_conditions_group,
             mountain_magnitude_min=mountain_magnitude_min,
             mountain_magnitude_max=mountain_magnitude_max,
+            cost_of_living_index_min=cost_of_living_index_min,
+            cost_of_living_index_max=cost_of_living_index_max,
+            home_sqft_for_1m_min=home_sqft_for_1m_min,
+            home_sqft_for_1m_max=home_sqft_for_1m_max,
+            housing_built_2000_plus_pct_min=housing_built_2000_plus_pct_min,
+            housing_built_2000_plus_pct_max=housing_built_2000_plus_pct_max,
             include_unranked=include_unranked,
             sort=sort,
             direction=direction,
@@ -275,8 +387,15 @@ class Store:
         min_score: float | None = None,
         max_score: float | None = None,
         community_conditions_group: int | None = None,
+        max_community_conditions_group: int | None = None,
         mountain_magnitude_min: float | None = None,
         mountain_magnitude_max: float | None = None,
+        cost_of_living_index_min: float | None = None,
+        cost_of_living_index_max: float | None = None,
+        home_sqft_for_1m_min: float | None = None,
+        home_sqft_for_1m_max: float | None = None,
+        housing_built_2000_plus_pct_min: float | None = None,
+        housing_built_2000_plus_pct_max: float | None = None,
         include_unranked: bool = False,
         sort: str = "risk_score",
         direction: str = "asc",
@@ -290,8 +409,15 @@ class Store:
             min_score=min_score,
             max_score=max_score,
             community_conditions_group=community_conditions_group,
+            max_community_conditions_group=max_community_conditions_group,
             mountain_magnitude_min=mountain_magnitude_min,
             mountain_magnitude_max=mountain_magnitude_max,
+            cost_of_living_index_min=cost_of_living_index_min,
+            cost_of_living_index_max=cost_of_living_index_max,
+            home_sqft_for_1m_min=home_sqft_for_1m_min,
+            home_sqft_for_1m_max=home_sqft_for_1m_max,
+            housing_built_2000_plus_pct_min=housing_built_2000_plus_pct_min,
+            housing_built_2000_plus_pct_max=housing_built_2000_plus_pct_max,
             include_unranked=include_unranked,
             sort=sort,
             direction=direction,
@@ -300,26 +426,68 @@ class Store:
         )
 
     def map_scores(self, level: str) -> dict[str, Any]:
+        return self._map_score_payload(
+            level,
+            (
+                "place_id",
+                "risk_score",
+                "community_conditions_group",
+                "mountain_magnitude",
+                "cost_of_living_index",
+                "home_buying_power_percentile",
+                "home_sqft_for_1m",
+                "housing_built_2000_plus_pct",
+            ),
+        )
+
+    def map_scores_core(self, level: str) -> dict[str, Any]:
+        return self._map_score_payload(
+            level,
+            (
+                "place_id",
+                "risk_score",
+                "community_conditions_group",
+                "mountain_magnitude",
+            ),
+        )
+
+    def map_scores_addon(self, level: str, kind: str) -> dict[str, Any]:
+        columns = {
+            "cost-of-living": ("place_id", "cost_of_living_index"),
+            "home-costs": (
+                "place_id",
+                "home_buying_power_percentile",
+                "home_sqft_for_1m",
+                "housing_built_2000_plus_pct",
+            ),
+        }.get(kind)
+        if columns is None:
+            raise HouseHunterError("Map score add-on must be cost-of-living or home-costs")
+        payload = self._map_score_payload(level, columns, schema_version=1)
+        payload["kind"] = kind
+        return payload
+
+    def _map_score_payload(
+        self,
+        level: str,
+        map_columns: tuple[str, ...],
+        *,
+        schema_version: int = 4,
+    ) -> dict[str, Any]:
         table = {"tract": "places", "county": "counties"}.get(level)
         if table is None:
             raise HouseHunterError("Map level must be tract or county")
         rows = self.connection.execute(
-            f"SELECT place_id, risk_score, community_conditions_group, mountain_magnitude "
-            f"FROM {table} ORDER BY place_id"
+            f"SELECT {', '.join(map_columns)} FROM {table} ORDER BY place_id"
         ).fetchall()
         columns: dict[str, list[Any]] = {
-            "place_id": [],
-            "risk_score": [],
-            "community_conditions_group": [],
-            "mountain_magnitude": [],
+            column: [] for column in map_columns
         }
-        for place_id, risk_score, group, mountain_magnitude in rows:
-            columns["place_id"].append(place_id)
-            columns["risk_score"].append(risk_score)
-            columns["community_conditions_group"].append(group)
-            columns["mountain_magnitude"].append(mountain_magnitude)
+        for row in rows:
+            for column, value in zip(map_columns, row, strict=True):
+                columns[column].append(value)
         return {
-            "schema_version": 3,
+            "schema_version": schema_version,
             "build_id": self.metadata["build_id"],
             "level": level,
             "scope": self.metadata["scope"],
@@ -417,6 +585,7 @@ class Store:
             "tract_contributions": contributions,
             "hazard_percentiles": hazard_percentiles_from_record(record),
             "member_tract_count": member_tract_count,
+            "source_notices": list(self.metadata.get("detail_notices", [])),
         }
 
     def export(self, format: str, output: Path, *, table: str = "places") -> Path:

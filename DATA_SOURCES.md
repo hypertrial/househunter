@@ -3,6 +3,139 @@
 HouseHunter v2 pins data vintages. It never discovers or accepts an automatic “latest”
 release. A source update requires review, validation, and a HouseHunter release.
 
+## Cost of Living — BEA Regional Price Parities
+
+HouseHunter pins the 2024 BEA metropolitan-area Regional Price Parities archive
+in `config/sources.yml`. The map value is the all-items RPP, where the United
+States equals 100; goods, housing rents, utilities, and other services are
+retained for details and exports. Counties in metropolitan statistical areas
+inherit that MSA's values. All other counties in the 50 states and District of
+Columbia, including micropolitan counties, inherit BEA's single U.S.
+Nonmetropolitan Portion value. Puerto Rico and other territories are outside
+scope. A future annual release requires an explicit checksum and schema review.
+
+The initial lock is `MARPP.zip`, 146,479 bytes, SHA-256
+`5dbf2e6ac2af222cc9abc205586c9b480344d89392752eb689c3ec823a34c83e`.
+The normalized table contains the exact MARPP line codes 1–5 and 387 MSAs plus
+geography `00999`. Values are preserved as published; 80–120 is only a visual
+map domain. BEA is optional: a network, checksum, schema, or cache failure emits
+a source warning and stable null/status columns while the FEMA snapshot remains
+publishable. There is no state fallback.
+
+### Updating BEA RPP
+
+1. Review BEA's release page and confirm that MARPP geography, line-code meaning,
+   units, and the U.S. nonmetropolitan row are unchanged.
+2. Download the candidate archive outside the repository. Record its release year,
+   filename, bytes, SHA-256, contained table filename/bytes/header SHA-256, MSA count,
+   and a canonical normalized checksum in `config/sources.yml`.
+3. Re-run exact line-code, MSA/nonmetro, territory, county assignment, tract
+   inheritance, schema-drift, checksum, and representative value tests from a clean
+   runtime data root.
+4. Review coverage against the pinned ACS county-to-CBSA asset, update spot checks and
+   documentation, run both verification scripts, and ship the lock change only with a
+   new HouseHunter release. Never select an annual release automatically.
+
+## Housing stock — ACS 2024 five-year estimates
+
+The maintainer-only reference generator uses the raw B25034 and B25035 table
+files pinned in `config/housing-stock/source-lock-2024.json`. It emits compact
+tract, county, and county-to-CBSA reference assets with a manifest. Normal
+downloads, builds, and application startup read only those bundled assets and
+must never contact Census. County shares are calculated from county estimates;
+tract shares use tract estimates directly. Missing-value sentinels and zero
+denominators produce explicit null statuses rather than invented values.
+The county-to-CBSA relationship comes from B25034's pinned summary-level 313
+geography records, using OMB Bulletin No. 23-01 delineations; it is not fetched
+from an additional live crosswalk.
+
+Built 2020+ is `B25034_E002 / B25034_E001`; built 2010+ adds `E003`; built
+2000+ also adds `E004`. Source estimates and the component margins of error are
+retained in the bundled audit tables. HouseHunter does not calculate a combined
+percentage margin of error. Puerto Rico may retain ACS housing-stock context even
+though its Cost of Living and current-market Home Costs fields are unavailable.
+
+### Updating the ACS housing-stock bundle
+
+1. Review the new ACS five-year table schemas and the OMB delineation used by the
+   summary-level 313 county-to-CBSA records. Add a new pinned source lock; do not edit
+   the meaning of the 2024 lock in place.
+2. Record raw byte size, SHA-256, header SHA-256, row counts, required columns,
+   geography counts, relationship counts, and expected BEA MSA matches.
+3. Run the maintainer-only generator, never a normal prepare/build flow:
+
+   ```console
+   uv run python scripts/generate_housing_stock_assets.py \
+     --source-lock config/housing-stock/source-lock-2024.json \
+     --output src/househunter/assets/housing_stock
+   ```
+
+4. Review the generated manifest and diffs; reproduce the bundle from the same raw
+   locks in a separate output directory and compare every hash. Exercise GEO_ID,
+   sentinel, zero-denominator, direct-county formula, and no-network runtime tests.
+5. Run release/package validation and both verification scripts before shipping the
+   new public reference assets. Raw Census tables stay outside the repository.
+
+## Home Costs — private local market import
+
+The Realtor.com county inventory file is never downloaded automatically. A
+user must import a locally obtained file with
+`househunter import-home-market FILE --acknowledge-personal-use`, and the file
+must exactly match an entry in the append-only reviewed-release lock bundled at
+`config/home-market/release-lock.json`. The build installs that lock as
+`househunter/assets/home_market_release_lock.json` so local imports work from a
+wheel without packaging any market rows.
+
+The selected policy assumes personal local use despite the restrictions in
+[Realtor.com's general terms](https://www.realtor.com/terms-of-service/). This
+is a product constraint, not a determination that reuse is legally permitted.
+Neither source rows nor derived market snapshots may be committed, packaged,
+uploaded, or published. Derived values are limited to the loopback API/UI and
+user-triggered local exports with attribution, vintage, and this notice.
+
+An accepted import must match one reviewed entry's filename, byte size, full SHA-256,
+header SHA-256, single release month, unique valid county FIPS, row count, logical
+checksum, and recorded quality counts. County IDs must belong to the bundled ACS 2024
+50-state/DC county-equivalent universe; territories, retired codes, and invented codes
+are rejected before national percentile calibration. Imports are capped at 64 MiB, reject symlinks,
+normalize into a new immutable release, validate it, and atomically replace
+`data/home-market/current.json`; cancellation or failure leaves the prior pointer
+unchanged. Older approved releases remain usable but become stale after 62 days. The
+loopback metadata API derives that flag from the snapshot release month at request time,
+so an immutable build cannot freeze a release in the fresh state.
+
+Only `quality_flag == 0` rows with finite positive median listing price per square foot
+are rankable. Flagged and invalid rows remain in the normalized local table for audit,
+but publish null map/ranking values and explicit statuses. HouseHunter calculates
+square feet for $1M from the unrounded quotient, rounds only the published square-foot
+value, and calibrates equal-weight tied percentiles across all eligible national
+counties before applying a state build scope. Source county text is never authoritative;
+the app displays its canonical county name.
+
+### Reviewing and importing a new market month
+
+1. Obtain the county file from the Realtor.com Research Data portal under the owner's
+   selected personal-use workflow. Keep it outside the checkout and any package or
+   distribution directory.
+2. Review its terms, month, filename, bytes, full/header/logical hashes, exact header,
+   unique FIPS, single-month rule, row count, quality-flag count, null-price count, and
+   representative calculations. Do not log or paste real rows into tickets or tests.
+3. Append—never replace—the reviewed entry in
+   `config/home-market/release-lock.json`, including source-page attribution and review
+   date. Use synthetic fixtures for all committed tests.
+4. Run the import explicitly:
+
+   ```console
+   househunter import-home-market FILE --acknowledge-personal-use
+   househunter build
+   ```
+
+5. Confirm `househunter sources`, `/api/v2/sources`, `/api/v2/meta`, local exports,
+   national percentile samples, stale state, and rollback behavior. Then run
+   `scripts/check_private_data_boundary.py`, package inspection, and both verification
+   scripts. Delete temporary copies when the review is complete. Never add this source
+   to `download --source all`.
+
 ## FEMA National Risk Index tracts
 
 - Dataset: National Risk Index Census Tracts
@@ -146,7 +279,7 @@ population-weighted lower-rank ECDF per component; no tile or state percentile o
 aggregate is cached. A generated schema-2 candidate is written inside the release
 filesystem, validated by independently reconstructing block percentiles, the internal
 composite, tract/county bases, both same-grain peer calibrations, and final magnitudes,
-then renamed to its content identity. The timed path finishes only after the schema-9
+then renamed to its content identity. The timed path finishes only after the schema-10
 HouseHunter snapshot is rebuilt and queryable. It also publishes one content-addressed
 compact fallback under `data/mountain/compact/`.
 

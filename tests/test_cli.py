@@ -42,6 +42,71 @@ def test_mountain_rank_uses_high_scores_for_best_and_low_scores_for_worst(
     assert directions == ["desc", "asc"]
 
 
+@pytest.mark.parametrize(
+    ("metric", "expected_sort", "best_direction", "worst_direction"),
+    [
+        ("cost-of-living", "cost_of_living_index", "asc", "desc"),
+        ("home-costs", "home_sqft_for_1m", "desc", "asc"),
+    ],
+)
+def test_new_dimension_rank_directions_and_cross_filters(
+    monkeypatch: pytest.MonkeyPatch,
+    metric: str,
+    expected_sort: str,
+    best_direction: str,
+    worst_direction: str,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    class FakeStore:
+        def __init__(self, paths: RuntimePaths) -> None:
+            pass
+
+        def __enter__(self) -> FakeStore:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            pass
+
+        def list_places(self, **kwargs: object) -> dict[str, object]:
+            calls.append(kwargs)
+            return {"items": []}
+
+    monkeypatch.setattr(cli_module, "Store", FakeStore)
+    runner = CliRunner()
+    filters = [
+        "--max-community-conditions-group",
+        "3",
+        "--cost-of-living-index-min",
+        "80",
+        "--cost-of-living-index-max",
+        "120",
+        "--home-sqft-for-1m-min",
+        "1000",
+        "--home-sqft-for-1m-max",
+        "5000",
+        "--housing-built-2000-plus-pct-min",
+        "20",
+        "--housing-built-2000-plus-pct-max",
+        "80",
+    ]
+
+    best = runner.invoke(app, ["rank", "--metric", metric, "--order", "best", *filters])
+    worst = runner.invoke(app, ["rank", "--metric", metric, "--order", "worst"])
+
+    assert best.exit_code == 0, best.output
+    assert worst.exit_code == 0, worst.output
+    assert calls[0]["sort"] == calls[1]["sort"] == expected_sort
+    assert [calls[0]["direction"], calls[1]["direction"]] == [
+        best_direction,
+        worst_direction,
+    ]
+    assert calls[0]["max_community_conditions_group"] == 3
+    assert calls[0]["cost_of_living_index_min"] == 80
+    assert calls[0]["home_sqft_for_1m_max"] == 5000
+    assert calls[0]["housing_built_2000_plus_pct_min"] == 20
+
+
 def test_mountain_snapshot_rebuild_restores_previous_pointer_on_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -150,6 +215,19 @@ def test_cli_build_rank_inspect_export_and_sources(
     assert "MAGNITUDE" in mountain.output
     assert "01001000100" in mountain.output
 
+    cost = runner.invoke(
+        app,
+        ["rank", "--metric", "cost-of-living", "--state", "AL", "--include-unranked"],
+    )
+    home = runner.invoke(
+        app,
+        ["rank", "--metric", "home-costs", "--state", "AL", "--include-unranked"],
+    )
+    assert cost.exit_code == 0, cost.output
+    assert home.exit_code == 0, home.output
+    assert "RPP" in cost.output
+    assert "SQFT/$1M" in home.output
+
     county_filter = runner.invoke(app, ["rank", "--county", "01001"])
     assert county_filter.exit_code == 0
     assert "02001000100" not in county_filter.output
@@ -185,6 +263,10 @@ def test_cli_build_rank_inspect_export_and_sources(
     assert "community_conditions_group" in header
     assert "community_conditions_geography" in header
     assert "chrr_release_year" in header
+    assert "cost_of_living_index" in header
+    assert "home_sqft_for_1m" in header
+    assert "home_market_usage_notice" in header
+    assert "housing_built_2000_plus_pct" in header
 
     for level, expected_id in (("tract", "01001000100"), ("county", "01001")):
         json_output = tmp_path / f"{level}.json"

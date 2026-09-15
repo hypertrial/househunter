@@ -10,7 +10,7 @@ import type {
   RendererCommand,
   RendererEvent,
 } from "./mapWorkerProtocol";
-import type { Geography, MapScore, Metric } from "./types";
+import type { Geography, MapFilters, MapScore, MapScoreAddonKind, Metric } from "./types";
 
 export type FocusTarget = MapFocusTarget;
 
@@ -32,12 +32,10 @@ interface Props {
   displayMetric?: Metric;
   busy?: boolean;
   selected: string;
-  state: string;
-  county: string;
-  showUnranked: boolean;
-  mountainMagnitudeMin?: number | null;
+  filters: MapFilters;
   neutralOnly?: boolean;
   retryGeneration?: number;
+  addonRetry?: { kind: MapScoreAddonKind; nonce: number } | null;
   focusTarget: FocusTarget | null;
   cameraTarget?: CameraState & { nonce: number };
   initialCamera: CameraState;
@@ -47,6 +45,8 @@ interface Props {
   onStatus: (message: string) => void;
   onScoresReady?: (count: number) => void;
   onScoreError?: (message: string) => void;
+  onAddonError?: (kind: MapScoreAddonKind, message: string) => void;
+  onAddonReady?: (kind: MapScoreAddonKind) => void;
   onVisibleCommit?: (metric: Metric) => void;
   onInteractiveCommit?: (metric: Metric) => void;
 }
@@ -113,12 +113,10 @@ export default function RiskMap({
   displayMetric = metric,
   busy = displayMetric !== metric,
   selected,
-  state,
-  county,
-  showUnranked,
-  mountainMagnitudeMin = null,
+  filters,
   neutralOnly = false,
   retryGeneration = 0,
+  addonRetry = null,
   focusTarget,
   cameraTarget,
   initialCamera,
@@ -128,6 +126,8 @@ export default function RiskMap({
   onStatus,
   onScoresReady,
   onScoreError,
+  onAddonError,
+  onAddonReady,
   onVisibleCommit,
   onInteractiveCommit,
 }: Props) {
@@ -161,10 +161,12 @@ export default function RiskMap({
   const settleStartedRef = useRef(new Map<number, number>());
   const callbackRef = useRef({
     onSelect, onPreview, onCamera, onStatus, onScoresReady, onScoreError,
+    onAddonError, onAddonReady,
     onVisibleCommit, onInteractiveCommit,
   });
   callbackRef.current = {
     onSelect, onPreview, onCamera, onStatus, onScoresReady, onScoreError,
+    onAddonError, onAddonReady,
     onVisibleCommit, onInteractiveCommit,
   };
   focusTargetRef.current = focusTarget;
@@ -175,8 +177,8 @@ export default function RiskMap({
   const [presentedVersion, setPresentedVersion] = useState(0);
 
   const semanticValue = useMemo<MapSemantics>(() => ({
-    metric, state, county, showUnranked, mountainMagnitudeMin, neutralOnly,
-  }), [county, metric, mountainMagnitudeMin, neutralOnly, showUnranked, state]);
+    metric, ...filters, neutralOnly,
+  }), [filters, metric, neutralOnly]);
 
   const post = useCallback((command: RendererCommand, transfer: Transferable[] = []) => {
     rendererRef.current?.postMessage(command, transfer);
@@ -313,6 +315,10 @@ export default function RiskMap({
         callbackRef.current.onStatus(value.message);
       } else if (value.type === "SCORES_READY") {
         callbackRef.current.onScoresReady?.(value.count);
+      } else if (value.type === "ADDON_ERROR") {
+        callbackRef.current.onAddonError?.(value.kind, value.message);
+      } else if (value.type === "ADDON_READY") {
+        callbackRef.current.onAddonReady?.(value.kind);
       } else if (value.type === "ERROR") {
         if (value.kind === "score") callbackRef.current.onScoreError?.(value.message);
         else if (value.kind === "detail") {
@@ -473,6 +479,15 @@ export default function RiskMap({
       semantics: semanticValue,
     });
   }, [post, semanticValue]);
+
+  useEffect(() => {
+    if (!rendererRef.current || !addonRetry) return;
+    post({
+      type: "RETRY_ADDON",
+      datasetGeneration: datasetGenerationRef.current,
+      kind: addonRetry.kind,
+    });
+  }, [addonRetry, post]);
 
   useEffect(() => {
     if (!rendererRef.current) return;
@@ -704,7 +719,17 @@ export default function RiskMap({
   };
 
   const metricLabel = displayMetric === "fema" ? "risk"
-    : displayMetric === "mountain" ? "Mountain Magnitude" : "Community Conditions";
+    : displayMetric === "mountain" ? "Mountain Magnitude"
+      : displayMetric === "community-conditions" ? "Community Conditions"
+        : displayMetric === "cost-of-living" ? "Cost of Living" : "Home Costs";
+  const metricDescription = displayMetric === "fema" ? "Lower FEMA ALR_NPCTL is better."
+    : displayMetric === "mountain"
+      ? `Higher Mountain Magnitude means fewer U.S. ${pluralLevel} have equal-or-higher resident-weighted mountain exposure.`
+      : displayMetric === "community-conditions"
+        ? "Group 1 is healthiest and Group 10 least healthy; tract values are county-level."
+        : displayMetric === "cost-of-living"
+          ? "Lower BEA Regional Price Parity is better; U.S. equals 100 and tract values inherit county assignments."
+          : "Higher national home buying-power percentile is better; tract market values inherit their county.";
   return <div className="map-stage" data-level={level}>
     <div
       ref={viewportRef}
@@ -712,7 +737,7 @@ export default function RiskMap({
       role="img"
       tabIndex={0}
       aria-busy={busy}
-      aria-label={`Focusable USA ${level} ${metricLabel} map. ${displayMetric === "fema" ? "Lower FEMA ALR_NPCTL is better." : displayMetric === "mountain" ? `Higher Mountain Magnitude means fewer U.S. ${pluralLevel} have equal-or-higher resident-weighted mountain exposure.` : "Group 1 is healthiest and Group 10 least healthy; tract values are county-level."} Use arrow keys to move the focus cursor, plus and minus to zoom, and Enter to select.`}
+      aria-label={`Focusable USA ${level} ${metricLabel} map. ${metricDescription} Use arrow keys to move the focus cursor, plus and minus to zoom, and Enter to select.`}
       onKeyDown={keyboard}
     >
       <canvas ref={canvasRef} className="map-presentation" aria-hidden="true" />

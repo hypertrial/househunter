@@ -7,8 +7,17 @@ const build = {
   build_id: "national-fixture", place_count: 1, ranked_place_count: 1,
   county_count: 1, ranked_county_count: 1,
   source_vintages: { fema: "December 2025", fema_counties: "December 2025" },
+  sources: [{ source: "home_market", version: "2026-08", release: "2026-08", cached: true, sha256: "fixture", row_count: 1, stale: false, attribution: "Realtor.com Research Data", usage_notice: "For personal local use only.", coverage_status: "complete", error: null }],
   scope: { kind: "national", state: null },
 };
+
+const layers = [
+  { key: "risk", display_name: "Natural Disaster Risk", source: "FEMA NRI", direction: "lower", availability: "available", vintage: "December 2025", geography: "tract and county", attribution: "FEMA NRI", notice: "Not property-level risk." },
+  { key: "community-conditions", display_name: "Community Conditions", source: "CHR&R", direction: "lower", availability: "available", vintage: "2025", geography: "county; inherited by tracts", attribution: "CHR&R", notice: "Groups are not percentiles." },
+  { key: "mountain", display_name: "Mountain Magnitude", source: "HouseHunter", direction: "higher", availability: "available", vintage: "fixture", geography: "tract and county", attribution: "HouseHunter", notice: "Separate peer groups." },
+  { key: "cost-of-living", display_name: "Cost of Living", source: "BEA RPP", direction: "lower", availability: "available", vintage: "2024", geography: "metropolitan or U.S. nonmetropolitan; inherited by tracts", attribution: "U.S. Bureau of Economic Analysis", notice: "U.S. = 100." },
+  { key: "home-costs", display_name: "Home Costs", source: "Realtor.com / ACS", direction: "higher", availability: "available", vintage: "2026-08 / ACS 2024", geography: "county market; tract and county housing stock", attribution: "Realtor.com Research Data; U.S. Census Bureau", notice: "Personal local use only." },
+];
 
 const summary = {
   place_id: "08013012101", name: "Census tract 121.01", state: "CO", place_type: "tract",
@@ -23,6 +32,22 @@ const summary = {
   nearest_mountain_trail_km: 3.5, mountain_trail_km_10: 4, mountain_trail_km_25: 9,
   trail_access_raw: 6, trail_access_pct: 70, mountain_population_coverage: 1,
   mountain_coverage_status: "complete",
+  cost_of_living_index: 107.2, cost_of_living_goods_index: 102.1,
+  cost_of_living_housing_rents_index: 124.5, cost_of_living_utilities_index: 98.4,
+  cost_of_living_other_services_index: 105.6, cost_of_living_geography_type: "metropolitan",
+  cost_of_living_geography_id: "14500", cost_of_living_geography_name: "Boulder, CO",
+  cost_of_living_release_year: 2024, cost_of_living_coverage_status: "complete",
+  cost_of_living_attribution: "U.S. Bureau of Economic Analysis",
+  home_sqft_for_1m: 2100, home_buying_power_percentile: 42,
+  home_median_listing_price: 725000, home_median_listing_price_per_square_foot: 476.19,
+  home_median_square_feet: 1850, home_active_listing_count: 430,
+  home_market_month: "2026-08", home_costs_coverage_status: "complete",
+  home_market_attribution: "Realtor.com Research Data",
+  home_market_usage_notice: "For personal local use only.",
+  housing_stock_total_units_estimate: 145000, housing_built_2000_plus_pct: 32.5,
+  housing_built_2010_plus_pct: 18.2, housing_built_2020_plus_pct: 4.1,
+  housing_median_year_built: 1988, housing_stock_release_year: 2024,
+  housing_stock_coverage_status: "complete", housing_stock_attribution: "ACS 2024",
 };
 
 const countySummary = {
@@ -38,6 +63,7 @@ const hazards = [
 const detail = (item = summary) => ({
   summary: item, total_weighted_housing: 0, coverage_ratio: 1,
   methodology_notice: "Published FEMA ALR_NPCTL; not property-level risk.",
+  source_notices: ["Asking-market indicator, not a sale price."],
   tract_contributions: [], hazard_percentiles: hazards,
   member_tract_count: item.place_type === "county" ? 12 : null,
 });
@@ -171,7 +197,7 @@ async function installRoutes(
     if (url.pathname === "/api/v2/meta") {
       await route.fulfill({ json: {
         app_version: "2.0.0", mutation_token: "test-token", reference_assets_ready: true,
-        reference_assets_error: null, build: prepared ? build : null,
+        reference_assets_error: null, build: prepared ? build : null, layers,
         map_assets: { ready: true, error: null, schema_version: 1, release: "v1.20", manifest_url: "/map-assets/manifest.json" },
       } });
     } else if (url.pathname === "/api/v2/jobs" && route.request().method() === "POST") {
@@ -180,9 +206,16 @@ async function installRoutes(
     } else if (url.pathname === "/api/v2/jobs/one") {
       prepared = true;
       await route.fulfill({ json: { job_id: "one", state: "succeeded", progress: 100, message: "Complete", error: null } });
-    } else if (url.pathname === "/api/v2/map/scores") {
+    } else if (url.pathname === "/api/v2/map/scores/core") {
       const county = url.searchParams.get("level") === "county";
-      await route.fulfill({ json: { schema_version: 3, build_id: build.build_id, level: county ? "county" : "tract", scope: build.scope, columns: { place_id: [county ? "08013" : "08013012101"], risk_score: [county ? 18.5 : 21.25], community_conditions_group: [2], mountain_magnitude: [2.3213] } } });
+      const query = `level=${county ? "county" : "tract"}&build_id=${build.build_id}`;
+      await route.fulfill({ json: { schema_version: 4, build_id: build.build_id, level: county ? "county" : "tract", scope: build.scope, add_ons: { cost_of_living: `/api/v2/map/scores/addons/cost-of-living?${query}`, home_costs: `/api/v2/map/scores/addons/home-costs?${query}` }, columns: { place_id: [county ? "08013" : "08013012101"], risk_score: [county ? 18.5 : 21.25], community_conditions_group: [2], mountain_magnitude: [2.3213] } } });
+    } else if (url.pathname === "/api/v2/map/scores/addons/cost-of-living") {
+      const county = url.searchParams.get("level") === "county";
+      await route.fulfill({ json: { schema_version: 1, kind: "cost-of-living", build_id: build.build_id, level: county ? "county" : "tract", scope: build.scope, columns: { place_id: [county ? "08013" : "08013012101"], cost_of_living_index: [107.2] } } });
+    } else if (url.pathname === "/api/v2/map/scores/addons/home-costs") {
+      const county = url.searchParams.get("level") === "county";
+      await route.fulfill({ json: { schema_version: 1, kind: "home-costs", build_id: build.build_id, level: county ? "county" : "tract", scope: build.scope, columns: { place_id: [county ? "08013" : "08013012101"], home_buying_power_percentile: [42], home_sqft_for_1m: [2100], housing_built_2000_plus_pct: [32.5] } } });
     } else if (url.pathname === "/api/v2/places") {
       await route.fulfill({ json: { total: 1, items: [summary] } });
     } else if (url.pathname === "/api/v2/counties") {
@@ -241,7 +274,7 @@ test("keeps preparation and retained workflows inside the map shell", async ({ p
 test("renders Community Conditions as an independent county-level layer", async ({ page }) => {
   await installRoutes(page);
   await page.goto("/");
-  await page.getByRole("button", { name: "Community Conditions" }).click();
+  await page.getByRole("combobox", { name: "Map layer" }).selectOption("community-conditions");
   await expect(page).toHaveURL(/metric=community-conditions/);
   await expect(page.getByLabel("Continuous Community Conditions color scale, Group 1 is healthiest"))
     .toContainText("county-level clusters, not percentiles");
@@ -258,13 +291,13 @@ test("renders Community Conditions as an independent county-level layer", async 
   await expect(
     drawer.getByRole("region", { name: "Community Conditions", exact: true }),
   ).toHaveClass(/active/);
-  await expect(drawer).toContainText("County-level");
+  await expect(drawer).toContainText("County geography");
 });
 
 test("renders and filters the independent Mountain Magnitude layer", async ({ page }) => {
   await installRoutes(page);
   await page.goto("/");
-  await page.getByRole("button", { name: "Mountain Magnitude" }).click();
+  await page.getByRole("combobox", { name: "Map layer" }).selectOption("mountain");
   await expect(page).toHaveURL(/metric=mountain/);
   await expect(page.getByLabel(/Stepped Mountain Magnitude color scale/))
     .toContainText("not property-specific");
@@ -279,6 +312,354 @@ test("renders and filters the independent Mountain Magnitude layer", async ({ pa
   await drawer.getByText("Mountain Magnitude breakdown").click();
   await expect(drawer).toContainText("1,200 m");
   await expect(drawer).toContainText("does not measure property-specific views");
+});
+
+test("combines Cost of Living and Home Costs with the other map filters", async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.endsWith("-wide"), "Runs the complete new-layer flow once per browser engine");
+  await installRoutes(page);
+  const scoreRequests: string[] = [];
+  page.on("request", (request) => {
+    const pathname = new URL(request.url()).pathname;
+    if (pathname.startsWith("/api/v2/map/scores")) scoreRequests.push(pathname);
+  });
+  await page.goto("/");
+  await expect(page.locator(".build-pill")).toContainText("interactive");
+  expect(scoreRequests).toContain("/api/v2/map/scores/core");
+  expect(scoreRequests).not.toContain("/api/v2/map/scores/addons/cost-of-living");
+  expect(scoreRequests).not.toContain("/api/v2/map/scores/addons/home-costs");
+  const layer = page.getByRole("combobox", { name: "Map layer" });
+  await expect(layer.getByRole("option")).toHaveCount(5);
+
+  await layer.selectOption("cost-of-living");
+  await expect.poll(() => scoreRequests).toContain("/api/v2/map/scores/addons/cost-of-living");
+  const costLegend = page.getByLabel(
+    "Cost of Living color scale from 80 to 120, lower is better, U.S. equals 100",
+  );
+  await expect(costLegend).toContainText("100 · U.S.");
+  await expect(costLegend).toContainText("BEA RPP · 2024");
+  await page.getByRole("button", { name: /Filters/ }).click();
+  await page.getByLabel("Minimum Mountain Magnitude").fill("2");
+  await page.getByLabel("Maximum Community Conditions group").fill("3");
+  await page.getByLabel("Maximum Cost of Living RPP").fill("110");
+  await page.getByLabel("Minimum square feet for $1M").fill("2000");
+  await page.getByLabel("Minimum built 2000+ share (%)").fill("30");
+  await page.getByRole("button", { name: "Apply" }).click();
+  await expect.poll(() => scoreRequests).toContain("/api/v2/map/scores/addons/home-costs");
+  await expect(page).toHaveURL(/cost_of_living_index_max=110/);
+  await expect(page).toHaveURL(/home_sqft_for_1m_min=2000/);
+  await expect(page).toHaveURL(/housing_built_2000_plus_pct_min=30/);
+  await page.getByRole("button", { name: "Lowest / Highest" }).click();
+  await expect(page.getByRole("region", { name: "Lowest and highest Cost of Living RPP" }))
+    .toContainText("107.2 RPP");
+
+  await layer.selectOption("home-costs");
+  const homeLegend = page.getByLabel(
+    "Home Costs national buying power percentile color scale, higher is better",
+  );
+  await expect(homeLegend).toContainText("asking-market indicator");
+  await expect(page).toHaveURL(/metric=home-costs/);
+  await page.getByRole("button", { name: "Most / Least" }).click();
+  const range = page.getByRole("region", { name: "Most and least square feet for $1M" });
+  await range.getByRole("button", { name: /Census tract 121\.01.*2,100 sq ft \/ \$1M/ }).first().click();
+  const drawer = page.getByRole("dialog", { name: "Tract detail" });
+  await expect(drawer.locator(".metric-card")).toHaveCount(5);
+  await expect(drawer.locator(".metric-card").first()).toHaveAttribute("aria-label", "Home Costs");
+  await expect(drawer.getByRole("region", { name: "Home Costs", exact: true })).toContainText("Built 2000+33%");
+  await expect(drawer.getByRole("region", { name: "Home Costs", exact: true })).toContainText("Market values inherited from Boulder County");
+  await expect(drawer.getByRole("region", { name: "Cost of Living", exact: true })).toContainText("BEA Boulder, CO MSA");
+  await expect(drawer).toContainText("Asking-market indicator, not a sale price.");
+});
+
+test("keeps core layers interactive when a lazy map add-on fails and retries only that add-on", async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.endsWith("-wide"), "Runs the add-on recovery flow once per browser engine");
+  await installRoutes(page);
+  let allowCost = false;
+  let attempts = 0;
+  await page.route("**/api/v2/map/scores/addons/cost-of-living**", async (route) => {
+    attempts += 1;
+    if (!allowCost) {
+      await route.fulfill({ status: 503, json: { detail: "temporary cost add-on failure" } });
+    } else {
+      await route.fallback();
+    }
+  });
+  await page.goto("/");
+  await expect(page.locator(".build-pill")).toContainText("interactive");
+
+  const layer = page.getByRole("combobox", { name: "Map layer" });
+  await layer.selectOption("cost-of-living");
+  const recovery = page.getByRole("alert").filter({ hasText: "Cost of Living map data could not be loaded" });
+  await expect(recovery).toBeVisible();
+  expect(attempts).toBe(1);
+  await expect(page.getByText("Scores could not be loaded")).toHaveCount(0);
+
+  await layer.selectOption("fema");
+  await expect(page.locator(".build-pill")).toContainText("interactive");
+  const map = page.getByRole("img", { name: /Focusable USA tract risk map/ });
+  const bounds = await map.boundingBox();
+  if (!bounds) throw new Error("Map viewport has no bounds");
+  await map.click({ position: { x: bounds.width / 2, y: bounds.height / 2 } });
+  await expect(page.getByRole("dialog", { name: "Tract detail" })).toBeVisible();
+  await page.getByRole("button", { name: "Close tract detail" }).click();
+
+  await layer.selectOption("cost-of-living");
+  await page.waitForTimeout(100);
+  expect(attempts).toBe(1);
+  await expect(recovery).toBeVisible();
+  allowCost = true;
+  await recovery.getByRole("button", { name: "Retry Cost of Living" }).click();
+  await expect.poll(() => attempts).toBe(2);
+  await expect(recovery).toHaveCount(0);
+  await expect(page.locator(".build-pill")).toContainText("interactive");
+  await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+  await expect(page.locator(".map-tooltip")).toContainText("107.2 RPP");
+});
+
+test("recolors a panned map after a delayed lazy add-on arrives", async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.endsWith("-wide"), "Runs the delayed add-on cache regression once per browser engine");
+  await installRoutes(page);
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let requests = 0;
+  await page.route("**/api/v2/map/scores/addons/cost-of-living**", async (route) => {
+    requests += 1;
+    await gate;
+    await route.fallback();
+  });
+  await page.goto("/");
+  await expect(page.locator(".build-pill")).toContainText("interactive");
+  await page.getByRole("combobox", { name: "Map layer" }).selectOption("cost-of-living");
+  await expect.poll(() => requests).toBe(1);
+
+  const map = page.getByRole("img", { name: /Focusable USA tract/ });
+  const presentation = page.locator(".map-presentation");
+  await map.focus();
+  await page.keyboard.press("+");
+  await page.waitForTimeout(150);
+  const beforeSnapshot = await presentation.getAttribute("data-snapshot-id");
+  const before = await presentation.screenshot();
+
+  release();
+  await expect.poll(() => presentation.getAttribute("data-snapshot-id")).not.toBe(beforeSnapshot);
+  await expect(page.locator(".build-pill")).toContainText("interactive");
+  const after = await presentation.screenshot();
+  expect(after.equals(before)).toBe(false);
+  const bounds = await map.boundingBox();
+  if (!bounds) throw new Error("Map viewport has no bounds");
+  await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+  await expect(page.locator(".map-tooltip")).toContainText("107.2 RPP");
+});
+
+test("deep-linked lazy layers finish with one consistent style revision", async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.endsWith("-wide"), "Runs the initial add-on race once per browser engine");
+  await installRoutes(page);
+  const ids = Array.from({ length: 20_000 }, (_, index) => `08013${String(index).padStart(6, "0")}`);
+  const columns = {
+    place_id: ids,
+    risk_score: ids.map(() => 21.25),
+    community_conditions_group: ids.map(() => 2),
+    mountain_magnitude: ids.map(() => 2.3213),
+  };
+  const raceArc: number[][] = [];
+  for (let index = 0; index <= 100; index += 1) raceArc.push([-109 + 7 * index / 100, 41]);
+  for (let index = 1; index <= 100; index += 1) raceArc.push([-102, 41 - 4 * index / 100]);
+  for (let index = 1; index <= 100; index += 1) raceArc.push([-102 - 7 * index / 100, 37]);
+  for (let index = 1; index <= 100; index += 1) raceArc.push([-109, 37 + 4 * index / 100]);
+  const topology = {
+    type: "Topology",
+    objects: { geography: { type: "GeometryCollection", geometries: ids.map((id) => ({
+      type: "Polygon", id, properties: {
+        place_id: id, state: "CO", county_fips: "08013", name: `Race tract ${id}`,
+      }, arcs: [[0]],
+    })) } },
+    arcs: [raceArc],
+  };
+  await page.route("**/map-assets/tracts.topojson.gz", (route) => route.fulfill({ json: topology }));
+  await page.route("**/api/v2/map/scores/core**", (route) => route.fulfill({ json: {
+    schema_version: 4, build_id: build.build_id, level: "tract", scope: build.scope,
+    add_ons: {
+      cost_of_living: `/api/v2/map/scores/addons/cost-of-living?level=tract&build_id=${build.build_id}`,
+      home_costs: `/api/v2/map/scores/addons/home-costs?level=tract&build_id=${build.build_id}`,
+    },
+    columns,
+  } }));
+  let requests = 0;
+  await page.route("**/api/v2/map/scores/addons/cost-of-living**", async (route) => {
+    requests += 1;
+    await route.fulfill({ json: {
+      schema_version: 1, kind: "cost-of-living", build_id: build.build_id,
+      level: "tract", scope: build.scope,
+      columns: { place_id: ids, cost_of_living_index: ids.map(() => 107.2) },
+    } });
+  });
+
+  await page.goto("/?profile-map#metric=cost-of-living");
+  await expect(page.locator(".build-pill")).toContainText("interactive", { timeout: 30_000 });
+  expect(requests).toBe(1);
+  await expect.poll(() => page.evaluate((featureCount) => {
+    const profiles = window.__HOUSEHUNTER_MAP_PROFILE__ || [];
+    const addon = profiles.find((entry) => entry.name === "score-addon-ready")?.recordedAt;
+    const projections = profiles.filter((entry) => entry.name === "projection-ready"
+      && entry.details?.features === featureCount);
+    const projection = projections.at(-1)?.recordedAt;
+    if (projections.length < 1) return false;
+    return profiles.some((entry) => entry.name === "bitmap-commit"
+      && entry.metric === "cost-of-living"
+      && typeof addon === "number" && typeof projection === "number"
+      && (entry.recordedAt ?? 0) >= Math.max(addon, projection));
+  }, ids.length), { timeout: 15_000 }).toBe(true);
+  const raceTiming = await page.evaluate((featureCount) => {
+    const profiles = window.__HOUSEHUNTER_MAP_PROFILE__ || [];
+    return {
+      addon: profiles.find((entry) => entry.name === "score-addon-ready")?.recordedAt,
+      projection: profiles.find((entry) => entry.name === "projection-ready"
+        && entry.details?.features === featureCount)?.recordedAt,
+    };
+  }, ids.length);
+  expect(raceTiming.addon).toBeLessThan(raceTiming.projection as number);
+  const paint = await page.evaluate((featureCount) => {
+    const profiles = window.__HOUSEHUNTER_MAP_PROFILE__ || [];
+    const addon = profiles.find((entry) => entry.name === "score-addon-ready")?.recordedAt;
+    const projection = profiles.find((entry) => entry.name === "projection-ready"
+      && entry.details?.features === featureCount)?.recordedAt;
+    const commit = profiles.filter((entry) => entry.name === "bitmap-commit"
+      && entry.metric === "cost-of-living"
+      && typeof addon === "number" && typeof projection === "number"
+      && (entry.recordedAt ?? 0) >= Math.max(addon, projection)).at(-1);
+    const ready = profiles.find((entry) => entry.name === "bitmap-ready"
+      && entry.details?.snapshot === commit?.snapshotId);
+    return { groups: ready?.details?.groups, styles: ready?.details?.styles };
+  }, ids.length);
+  expect(paint).toEqual({ groups: Math.ceil(ids.length / 32), styles: 1 });
+});
+
+test("surfaces and retries a failed add-on required only by a cross-layer filter", async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.endsWith("-wide"), "Runs the filtered add-on recovery once per browser engine");
+  await installRoutes(page);
+  let allowHome = false;
+  let attempts = 0;
+  await page.route("**/api/v2/map/scores/addons/home-costs**", async (route) => {
+    attempts += 1;
+    if (!allowHome) {
+      await route.fulfill({ status: 503, json: { detail: "temporary Home Costs failure" } });
+    } else {
+      await route.fallback();
+    }
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: /Filters/ }).click();
+  await page.getByLabel("Minimum square feet for $1M").fill("2000");
+  await page.getByRole("button", { name: "Apply" }).click();
+
+  const recovery = page.getByRole("alert").filter({ hasText: "Home Costs map data could not be loaded" });
+  await expect(recovery).toBeVisible();
+  expect(attempts).toBe(1);
+  await expect(page.getByText("Scores could not be loaded")).toHaveCount(0);
+  await expect(page.getByRole("combobox", { name: "Map layer" })).toHaveValue("fema");
+
+  allowHome = true;
+  await recovery.getByRole("button", { name: "Retry Home Costs" }).click();
+  await expect.poll(() => attempts).toBe(2);
+  await expect(recovery).toHaveCount(0);
+  await expect(page.locator(".build-pill")).toContainText("interactive");
+  const map = page.getByRole("img", { name: /Focusable USA tract risk map/ });
+  const bounds = await map.boundingBox();
+  if (!bounds) throw new Error("Map viewport has no bounds");
+  await map.click({ position: { x: bounds.width / 2, y: bounds.height / 2 } });
+  await expect(page.getByRole("dialog", { name: "Tract detail" })).toBeVisible();
+});
+
+test("stacks and independently retries simultaneous lazy add-on failures", async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.endsWith("-wide"), "Runs dual add-on recovery once per browser engine");
+  await installRoutes(page);
+  const allowed = { cost: false, home: false };
+  const attempts = { cost: 0, home: 0 };
+  await page.route("**/api/v2/map/scores/addons/cost-of-living**", async (route) => {
+    attempts.cost += 1;
+    if (allowed.cost) await route.fallback();
+    else await route.fulfill({ status: 503, json: { detail: "temporary Cost failure" } });
+  });
+  await page.route("**/api/v2/map/scores/addons/home-costs**", async (route) => {
+    attempts.home += 1;
+    if (allowed.home) await route.fallback();
+    else await route.fulfill({ status: 503, json: { detail: "temporary Home failure" } });
+  });
+  await page.goto("/");
+  await page.getByRole("combobox", { name: "Map layer" }).selectOption("cost-of-living");
+  const cost = page.getByRole("alert").filter({ hasText: "Cost of Living map data could not be loaded" });
+  await expect(cost).toBeVisible();
+  await page.getByRole("button", { name: /Filters/ }).click();
+  await page.getByLabel("Minimum square feet for $1M").fill("2000");
+  await page.getByRole("button", { name: "Apply" }).click();
+
+  const home = page.getByRole("alert").filter({ hasText: "Home Costs map data could not be loaded" });
+  await expect(cost).toBeVisible();
+  await expect(home).toBeVisible();
+  const [costBox, homeBox] = await Promise.all([cost.boundingBox(), home.boundingBox()]);
+  if (!costBox || !homeBox) throw new Error("Recovery cards have no bounds");
+  expect(costBox.y + costBox.height <= homeBox.y || homeBox.y + homeBox.height <= costBox.y).toBe(true);
+
+  const costBeforeRetry = attempts.cost;
+  const homeBeforeCostRetry = attempts.home;
+  allowed.cost = true;
+  await cost.getByRole("button", { name: "Retry Cost of Living" }).click();
+  await expect.poll(() => attempts.cost).toBe(costBeforeRetry + 1);
+  expect(attempts.home).toBe(homeBeforeCostRetry);
+  await expect(cost).toHaveCount(0);
+  await expect(home).toBeVisible();
+  const costBeforeHomeRetry = attempts.cost;
+  const homeBeforeRetry = attempts.home;
+  allowed.home = true;
+  await home.getByRole("button", { name: "Retry Home Costs" }).click();
+  await expect.poll(() => attempts.home).toBe(homeBeforeRetry + 1);
+  expect(attempts.cost).toBe(costBeforeHomeRetry);
+  await expect(home).toHaveCount(0);
+  await expect(page.locator(".build-pill")).toContainText("interactive");
+});
+
+test("keeps ACS filtering usable when Home Costs is unavailable", async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.endsWith("-wide"), "Runs the unavailable-layer worker flow once per browser engine");
+  await installRoutes(page);
+  await page.route("**/api/v2/meta", (route) => route.fulfill({ json: {
+    app_version: "2.0.0", mutation_token: "test-token", reference_assets_ready: true,
+    reference_assets_error: null, build,
+    layers: layers.map((layer) => layer.key === "home-costs"
+      ? { ...layer, availability: "unavailable", vintage: "ACS 2024", notice: "Import an approved Realtor.com county file." }
+      : layer),
+    map_assets: { ready: true, error: null, schema_version: 1, release: "v1.20", manifest_url: "/map-assets/manifest.json" },
+  } }));
+  await page.route("**/api/v2/map/scores**", (route) => route.fulfill({ json: {
+    schema_version: 4, build_id: build.build_id, level: "tract", scope: build.scope,
+    columns: {
+      place_id: [summary.place_id], risk_score: [summary.risk_score],
+      community_conditions_group: [2], mountain_magnitude: [summary.mountain_magnitude],
+      cost_of_living_index: [summary.cost_of_living_index], home_buying_power_percentile: [null],
+      home_sqft_for_1m: [null], housing_built_2000_plus_pct: [32.5],
+    },
+  } }));
+  await page.goto("/");
+  await page.getByRole("combobox", { name: "Map layer" }).selectOption("home-costs");
+  await expect(page.getByLabel(
+    "Home Costs national buying power percentile color scale, higher is better",
+  )).toContainText("Unavailable in this snapshot");
+
+  await page.getByRole("button", { name: /Filters/ }).click();
+  await page.getByLabel("Minimum built 2000+ share (%)").fill("30");
+  await page.getByRole("checkbox", { name: "Show Home-Costs-unavailable geographies" }).check();
+  await page.getByRole("button", { name: "Apply" }).click();
+  const map = page.getByRole("img", { name: /Focusable USA tract Home Costs map/ });
+  const bounds = await map.boundingBox();
+  if (!bounds) throw new Error("Map viewport has no bounds");
+  await map.click({ position: { x: bounds.width / 2, y: bounds.height / 2 } });
+  await expect(page.getByRole("dialog", { name: "Tract detail" })).toBeVisible();
+  await page.getByRole("button", { name: "Close tract detail" }).click();
+
+  await page.getByRole("button", { name: /Filters/ }).click();
+  await page.getByLabel("Minimum square feet for $1M").fill("1");
+  await page.getByRole("button", { name: "Apply" }).click();
+  await map.click({ position: { x: bounds.width / 2, y: bounds.height / 2 } });
+  await page.waitForTimeout(100);
+  await expect(page.getByRole("dialog", { name: "Tract detail" })).toHaveCount(0);
 });
 
 test("uses explicit address confirmation and never calls a geocoder from the browser", async ({ page }) => {
@@ -546,10 +927,12 @@ test("picks polygon holes exactly and resolves overlaps in reverse source order"
   const selected: string[] = [];
   await page.route("**/map-assets/tracts.topojson.gz", (route) => route.fulfill({ json: exactPickPolygons }));
   await page.route("**/api/v2/map/scores**", (route) => route.fulfill({ json: {
-    schema_version: 3, build_id: build.build_id, level: "tract", scope: build.scope,
+    schema_version: 4, build_id: build.build_id, level: "tract", scope: build.scope,
     columns: {
       place_id: ["08013012101", "08013012102"], risk_score: [21.25, 35],
       community_conditions_group: [2, 2], mountain_magnitude: [2.3213, 2.3213],
+      cost_of_living_index: [107.2, 107.2], home_buying_power_percentile: [42, 42],
+      home_sqft_for_1m: [2100, 2100], housing_built_2000_plus_pct: [32.5, 32.5],
     },
   } }));
   await page.route("**/api/v2/places/08013012102", (route) => {
@@ -598,12 +981,16 @@ test("picks a newly exposed state before its replacement bitmap commits", async 
   await page.route("**/map-assets/states.topojson.gz", (route) => route.fulfill({ json: exposedAreaStates }));
   await page.route("**/map-assets/tracts.topojson.gz", (route) => route.fulfill({ json: exposedAreaTracts }));
   await page.route("**/api/v2/map/scores**", (route) => route.fulfill({ json: {
-    schema_version: 3, build_id: build.build_id, level: "tract", scope: build.scope,
+    schema_version: 4, build_id: build.build_id, level: "tract", scope: build.scope,
     columns: {
       place_id: [...exposedCaliforniaIds, summary.place_id],
       risk_score: [...exposedCaliforniaIds.map(() => 35), summary.risk_score],
       community_conditions_group: [...exposedCaliforniaIds.map(() => 2), 2],
       mountain_magnitude: [...exposedCaliforniaIds.map(() => 1.5), summary.mountain_magnitude],
+      cost_of_living_index: [...exposedCaliforniaIds.map(() => 103), 107.2],
+      home_buying_power_percentile: [...exposedCaliforniaIds.map(() => 55), 42],
+      home_sqft_for_1m: [...exposedCaliforniaIds.map(() => 2400), 2100],
+      housing_built_2000_plus_pct: [...exposedCaliforniaIds.map(() => 30), 32.5],
     },
   } }));
   await page.route(`**/api/v2/places/${selectedId}`, (route) => route.fulfill({ json: detail({
@@ -715,12 +1102,12 @@ test("cancels an obsolete metric paint when returning to a cached metric", async
   const canvas = page.locator(".map-presentation");
   await expect(canvas).toBeVisible();
 
-  await page.getByRole("button", { name: "Mountain Magnitude" }).click();
-  await page.getByRole("button", { name: "FEMA Risk" }).click();
+  await page.getByRole("combobox", { name: "Map layer" }).selectOption("mountain");
+  await page.getByRole("combobox", { name: "Map layer" }).selectOption("fema");
   await expect(page.locator(".build-pill")).toContainText("interactive");
   await page.waitForTimeout(350);
 
-  await expect(page.getByRole("button", { name: "FEMA Risk" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("combobox", { name: "Map layer" })).toHaveValue("fema");
   await expect(page.getByLabel("Continuous score color scale, lower is better")).toBeVisible();
   await expect(page.getByLabel(/Continuous Mountain Magnitude color scale/)).toHaveCount(0);
   expect(await page.evaluate(() => (window.__HOUSEHUNTER_MAP_PROFILE__ || [])
@@ -739,7 +1126,7 @@ test("keeps narrow map actions, status, and controls fully usable", async ({ pag
   const more = page.getByRole("button", { name: "More" });
   await expect(more).toBeVisible();
   await expect(more).toHaveAttribute("aria-expanded", "false");
-  await page.getByRole("button", { name: "Mountain Magnitude" }).click();
+  await page.getByRole("combobox", { name: "Map layer" }).selectOption("mountain");
   const mountainLegend = page.getByLabel(
     "Stepped Mountain Magnitude color scale for U.S. tracts, higher means fewer equal-or-higher peers",
   );
@@ -776,7 +1163,7 @@ test("keeps narrow map actions, status, and controls fully usable", async ({ pag
   await canvas.click({ position: { x: canvasBounds.width / 2, y: canvasBounds.height / 2 } });
   const drawer = page.getByRole("dialog", { name: "Tract detail" });
   await expect(drawer).toBeVisible();
-  await expect(drawer.locator(".metric-card")).toHaveCount(3);
+  await expect(drawer.locator(".metric-card")).toHaveCount(5);
   const detailLayout = await drawer.evaluate((element) => {
     const drawerBounds = element.getBoundingClientRect();
     const cards = [...element.querySelectorAll<HTMLElement>(".metric-card")]

@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "release_year": 2024,
+  "survey": "ACS 2024 five-year estimates",
+  "scope": "Tracts and counties in the 50 states, District of Columbia, and Puerto Rico",
+  "omb_delineation": "OMB Bulletin No. 23-01",
+  "geography_counts": {
+    "tracts": 85382,
+    "counties": 3222
+  },
+  "county_cbsa_geography": {
+    "source_table": "B25034",
+    "summary_level": "313",
+    "geo_id_prefix": "313M700US",
+    "geo_id_payload": "five-digit CBSA followed by two-digit state and three-digit county",
+    "expected_relationship_rows": 1915,
+    "expected_cbsa_count": 935,
+    "expected_bea_msa_matches": 387
+  },
+  "sources": {
+    "B25034": {
+      "url": "https://www2.census.gov/programs-surveys/acs/summary_file/2024/table-based-SF/data/5YRData/acsdt5y2024-b25034.dat",
+      "expected_size": 50103592,
+      "sha256": "806d6cb18e8e6c0855e065eca99164b07334cc32f521899aa45a4415ef7d380e",
+      "header_sha256": "adaae7a641aa477af818f70117f658cb39968947b00036b8dcefe14d8acd0413",
+      "expected_row_count": 543579,
+      "required_columns": [
+        "GEO_ID",
+        "B25034_E001",
+        "B25034_E002",
+        "B25034_E003",
+        "B25034_E004",
+        "B25034_M001",
+        "B25034_M002",
+        "B25034_M003",
+        "B25034_M004"
+      ]
+    },
+    "B25035": {
+      "url": "https://www2.census.gov/programs-surveys/acs/summary_file/2024/table-based-SF/data/5YRData/acsdt5y2024-b25035.dat",
+      "expected_size": 15421817,
+      "sha256": "a08e68670c401abd470fc8084efc3718eba9b5cb52ff612c2442d67d5665971b",
+      "header_sha256": "27e3b23fdd3affd717eeb64939bdd9db1fb4c2dcff7d98ec88389266fce313d6",
+      "expected_row_count": 543579,
+      "required_columns": [
+        "GEO_ID",
+        "B25035_E001",
+        "B25035_M001"
+      ]
+    }
+  },
+  "artifacts": {
+    "tracts": "tracts.parquet",
+    "counties": "counties.parquet",
+    "county_msa": "county_msa.parquet",
+    "manifest": "manifest.json"
+  }
+}

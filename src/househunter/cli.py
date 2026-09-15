@@ -13,10 +13,12 @@ from typing import Annotated
 import typer
 import uvicorn
 
+from .acquisition import download_optional_bea
 from .api import create_app
 from .build import build_snapshot
 from .chrr import download_chrr
 from .config import RuntimePaths, load_config, sha256_file
+from .cost_of_living import download_bea_rpp
 from .download import download_fema, download_fema_counties, source_statuses
 from .errors import AmbiguousPlaceError, HouseHunterError
 from .geocode import lookup_address
@@ -739,14 +741,17 @@ def sources(
     try:
         config = load_config()
         statuses = {item.source: item.model_dump(mode="json") for item in source_statuses(_paths())}
-        result = {
-            key: {
+        result = {}
+        for key in ("fema", "fema_counties", "chrr", "bea_rpp"):
+            source = config.get(key, {})
+            result[key] = {
                 **statuses[key],
-                "release": config[key]["release"],
-                "url": config[key]["item_url"],
+                "release": source.get("release"),
+                "url": source.get("item_url"),
             }
-            for key in ("fema", "fema_counties", "chrr")
-        }
+        from .home_market import source_status as home_market_source_status
+
+        result["home_market"] = home_market_source_status(_paths())
         if json_output:
             typer.echo(json.dumps(result, indent=2, sort_keys=True))
         else:
@@ -754,9 +759,14 @@ def sources(
                 ("fema", "FEMA NRI tracts"),
                 ("fema_counties", "FEMA NRI counties"),
                 ("chrr", "CHR&R Community Conditions counties"),
+                ("bea_rpp", "BEA Regional Price Parities"),
+                ("home_market", "Private home-market county release"),
             ):
+                version = result[key].get("version")
+                version_suffix = f" ({version})" if version else ""
                 typer.echo(
-                    f"{label} {result[key]['release']} ({result[key]['version']}): "
+                    f"{label} {result[key].get('release') or 'no release'}"
+                    f"{version_suffix}: "
                     f"{'cached' if result[key]['cached'] else 'not downloaded'}"
                 )
                 if result[key]["error"]:
@@ -767,7 +777,13 @@ def sources(
 
 @app.command()
 def download(
-    source: Annotated[str, typer.Option("--source", help="Source to download")] = "fema",
+    source: Annotated[
+        str,
+        typer.Option(
+            "--source",
+            help="fema, fema_counties, chrr, bea_rpp, or all (never home-market)",
+        ),
+    ] = "fema",
 ) -> None:
     """Download and verify pinned source data."""
     selected = source.lower().replace("-", "_")
@@ -780,12 +796,49 @@ def download(
                 output = download_fema_counties(paths, progress=_progress)
             elif selected == "chrr":
                 output = download_chrr(paths, progress=_progress)
+            elif selected == "bea_rpp":
+                output = download_bea_rpp(paths, progress=_progress)
             elif selected == "all":
                 download_fema(paths, progress=_progress)
                 download_fema_counties(paths, progress=_progress)
                 output = download_chrr(paths, progress=_progress)
+                optional_output, _ = download_optional_bea(paths, progress=_progress)
+                if optional_output is not None:
+                    output = optional_output
             else:
-                _abort(HouseHunterError("Supported sources are fema, fema_counties, chrr, and all"))
+                _abort(
+                    HouseHunterError(
+                        "Supported sources are fema, fema_counties, chrr, bea_rpp, and all"
+                    )
+                )
+        typer.echo(str(output))
+    except HouseHunterError as exc:
+        _abort(exc)
+
+
+@app.command("import-home-market")
+def import_home_market_command(
+    source_file: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
+    acknowledge_personal_use: Annotated[
+        bool,
+        typer.Option(
+            "--acknowledge-personal-use",
+            help="Confirm that the approved file and derivatives remain for personal local use.",
+        ),
+    ] = False,
+) -> None:
+    """Validate and atomically import an approved private home-market release."""
+    from .home_market import import_home_market
+
+    paths = _paths()
+    try:
+        with exclusive_lock(paths.job_lock):
+            output = import_home_market(
+                paths,
+                source_file,
+                acknowledge_personal_use=acknowledge_personal_use,
+                progress=_progress,
+            )
         typer.echo(str(output))
     except HouseHunterError as exc:
         _abort(exc)
@@ -815,21 +868,56 @@ def rank(
     mountain_magnitude_min: Annotated[
         float | None, typer.Option("--mountain-magnitude-min", min=0)
     ] = None,
+    max_community_conditions_group: Annotated[
+        int | None, typer.Option("--max-community-conditions-group", min=1, max=10)
+    ] = None,
+    cost_of_living_index_min: Annotated[
+        float | None, typer.Option("--cost-of-living-index-min", min=0)
+    ] = None,
+    cost_of_living_index_max: Annotated[
+        float | None, typer.Option("--cost-of-living-index-max", min=0)
+    ] = None,
+    home_sqft_for_1m_min: Annotated[
+        float | None, typer.Option("--home-sqft-for-1m-min", min=0)
+    ] = None,
+    home_sqft_for_1m_max: Annotated[
+        float | None, typer.Option("--home-sqft-for-1m-max", min=0)
+    ] = None,
+    housing_built_2000_plus_pct_min: Annotated[
+        float | None, typer.Option("--housing-built-2000-plus-pct-min", min=0, max=100)
+    ] = None,
+    housing_built_2000_plus_pct_max: Annotated[
+        float | None, typer.Option("--housing-built-2000-plus-pct-max", min=0, max=100)
+    ] = None,
     metric: Annotated[
         str,
-        typer.Option("--metric", help="risk, community-conditions, or mountain"),
+        typer.Option(
+            "--metric",
+            help="risk, community-conditions, mountain, cost-of-living, or home-costs",
+        ),
     ] = "risk",
     order: Annotated[str, typer.Option("--order", help="best or worst")] = "best",
 ) -> None:
-    """Rank geographies by FEMA risk, Community Conditions, or Mountain Magnitude."""
+    """Rank geographies by one independent HouseHunter map dimension."""
     selected = level.lower()
     if selected not in {"tract", "county"}:
         _abort(HouseHunterError("Rank level must be tract or county"))
     if selected == "county" and county:
         _abort(HouseHunterError("--county filters tracts; omit it when ranking counties"))
     selected_metric = metric.lower()
-    if selected_metric not in {"risk", "community-conditions", "mountain"}:
-        _abort(HouseHunterError("Rank metric must be risk, community-conditions, or mountain"))
+    if selected_metric not in {
+        "risk",
+        "community-conditions",
+        "mountain",
+        "cost-of-living",
+        "home-costs",
+    }:
+        _abort(
+            HouseHunterError(
+                "Rank metric must be risk, community-conditions, mountain, "
+                "cost-of-living, or home-costs"
+            )
+        )
     selected_order = order.lower()
     if selected_order not in {"best", "worst"}:
         _abort(HouseHunterError("Rank order must be best or worst"))
@@ -837,8 +925,10 @@ def rank(
         "risk": "risk_score",
         "community-conditions": "community_conditions_group",
         "mountain": "mountain_magnitude",
+        "cost-of-living": "cost_of_living_index",
+        "home-costs": "home_sqft_for_1m",
     }[selected_metric]
-    if selected_metric == "mountain":
+    if selected_metric in {"mountain", "home-costs"}:
         direction = "desc" if selected_order == "best" else "asc"
     else:
         direction = "asc" if selected_order == "best" else "desc"
@@ -850,6 +940,13 @@ def rank(
                     limit=limit,
                     include_unranked=include_unranked,
                     mountain_magnitude_min=mountain_magnitude_min,
+                    max_community_conditions_group=max_community_conditions_group,
+                    cost_of_living_index_min=cost_of_living_index_min,
+                    cost_of_living_index_max=cost_of_living_index_max,
+                    home_sqft_for_1m_min=home_sqft_for_1m_min,
+                    home_sqft_for_1m_max=home_sqft_for_1m_max,
+                    housing_built_2000_plus_pct_min=housing_built_2000_plus_pct_min,
+                    housing_built_2000_plus_pct_max=housing_built_2000_plus_pct_max,
                     sort=sort,
                     direction=direction,
                 )
@@ -858,6 +955,10 @@ def rank(
                     if selected_metric == "community-conditions"
                     else "MAGNITUDE"
                     if selected_metric == "mountain"
+                    else "RPP"
+                    if selected_metric == "cost-of-living"
+                    else "SQFT/$1M"
+                    if selected_metric == "home-costs"
                     else "SCORE"
                 )
                 typer.echo(f"COUNTY_FIPS  {label:<9}  STATE  NAME")
@@ -868,6 +969,13 @@ def rank(
                     limit=limit,
                     include_unranked=include_unranked,
                     mountain_magnitude_min=mountain_magnitude_min,
+                    max_community_conditions_group=max_community_conditions_group,
+                    cost_of_living_index_min=cost_of_living_index_min,
+                    cost_of_living_index_max=cost_of_living_index_max,
+                    home_sqft_for_1m_min=home_sqft_for_1m_min,
+                    home_sqft_for_1m_max=home_sqft_for_1m_max,
+                    housing_built_2000_plus_pct_min=housing_built_2000_plus_pct_min,
+                    housing_built_2000_plus_pct_max=housing_built_2000_plus_pct_max,
                     sort=sort,
                     direction=direction,
                 )
@@ -876,6 +984,10 @@ def rank(
                     if selected_metric == "community-conditions"
                     else "MAGNITUDE"
                     if selected_metric == "mountain"
+                    else "RPP"
+                    if selected_metric == "cost-of-living"
+                    else "SQFT/$1M"
+                    if selected_metric == "home-costs"
                     else "SCORE"
                 )
                 typer.echo(f"TRACT_ID     {label:<9}  STATE")
@@ -885,6 +997,10 @@ def rank(
                 if selected_metric == "risk"
                 else row["mountain_magnitude"]
                 if selected_metric == "mountain"
+                else row["cost_of_living_index"]
+                if selected_metric == "cost-of-living"
+                else row["home_sqft_for_1m"]
+                if selected_metric == "home-costs"
                 else row["community_conditions_group"]
             )
             score = (
@@ -892,6 +1008,10 @@ def rank(
                 if selected_metric == "mountain" and value is not None
                 else f"{value:.1f}"
                 if selected_metric == "risk" and value is not None
+                else f"{value:.1f}"
+                if selected_metric == "cost-of-living" and value is not None
+                else f"{value:,.0f}"
+                if selected_metric == "home-costs" and value is not None
                 else str(value)
                 if value is not None
                 else "—"

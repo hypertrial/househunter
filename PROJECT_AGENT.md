@@ -29,6 +29,15 @@ magnitude means ten times fewer equal-or-higher peers, not ten times more terrai
 tracts and counties are not cross-grain comparable. Do not describe it as
 property-specific views, trail quality, drive time, or guaranteed access.
 
+Cost of Living and Home Costs are fourth and fifth independent dimensions. Cost of
+Living uses the pinned BEA all-items RPP (U.S. = 100, lower is better), assigned at
+MSA or U.S. nonmetropolitan geography and inherited through counties by tracts. Home
+Costs uses a manually imported, approved county asking-market release; square feet for
+$1M and its national county percentile are higher-is-better and inherited by tracts.
+ACS 2024 housing-stock estimates are direct at tract/county grain. Never blend these
+dimensions, imply tract-level BEA/market precision, substitute ACS home value, or
+describe asking-market indicators as sales, valuations, or total ownership costs.
+
 Use the `househunter-engineering` workspace from `.pad.toml`. Follow `AGENTS.md`
 and the local `pad-engineering` skill. Keep ticket bodies, exports, credentials,
 and local Pad state out of this public repository.
@@ -41,14 +50,20 @@ and local Pad state out of this public repository.
 - The compiled web interface in `web/dist` is committed; keep it in sync with
   `web/` source. Node is not required to *use* the app, but it is required to
   change the UI.
-- Never commit credentials or fetched FEMA payloads.
+- Never commit credentials, fetched FEMA/BEA payloads, Realtor.com source rows, or
+  derived home-market snapshots. Real home-market data is loopback/local-export only.
 - FEMA ranking semantics use FEMA only; Community Conditions sorting uses only the
   official CHR&R group. Mountain Magnitude filtering does not alter either metric. Do not
-  contact census.gov from the normal prepare, download, or build flow.
-  FEMA tract/county and CHR&R county layers are all required.
-- Runtime snapshots are schema 9, map-score payloads are schema 3, and public HTTP
+  contact census.gov from the normal prepare, download, or build flow. Normal download
+  also never contacts Realtor.com. FEMA tract/county and CHR&R county layers are
+  required; BEA RPP and the local home-market import are optional and fail open with
+  explicit statuses.
+- Runtime snapshots are schema 10, map-score payloads are schema 4, and public HTTP
   routes are `/api/v2` only. Public artifacts, filters, and types use
   `mountain_magnitude`; do not add score aliases or cap stored magnitudes.
+- Keep the compatible full map-score endpoint. The browser uses the build-bound core
+  plus lazy Cost and Home/ACS add-ons to preserve the initial payload envelope. Never
+  weaken the 5.7 MB decoded, 1.3 MB gzip, or existing interaction thresholds.
 - Cross-major Mountain migration uses only `househunter mountain rescore-v1`, stages
   and validates full/compact/snapshot artifacts before pointer publication, and resumes
   an interrupted commit forward from its atomic journal. Never load or advertise a v1

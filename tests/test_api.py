@@ -1,23 +1,30 @@
 from __future__ import annotations
 
+import json
 import os
 import time
+from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
-from test_build_store import _promote_mountain_fixture
+from test_build_store import _install_dimension_fixture, _promote_mountain_fixture
 from test_map_assets import write_assets
 
+import househunter.api as api_module
 from househunter import __version__
 from househunter.api import create_app
 from househunter.build import build_snapshot
 from househunter.config import RuntimePaths
 from househunter.contracts import MapScoreColumns, MapScoreScope
+from househunter.dimensions import SUMMARY_DIMENSION_COLUMNS, empty_home_source
 from househunter.errors import AmbiguousPlaceError, HouseHunterError
 from househunter.geocode import OSM_ATTRIBUTION, AddressMatch, reset_geocode_runtime
+from househunter.home_market import is_stale
 from househunter.mountain import MOUNTAIN_RUNTIME_COLUMNS
 
 
@@ -51,6 +58,13 @@ def test_api_filters_details_exports_and_token(
         assert meta["methodology"] == (
             "Separate FEMA tract-level and county-level ALR_NPCTL percentiles"
         )
+        assert [layer["key"] for layer in meta["layers"]] == [
+            "risk",
+            "community-conditions",
+            "mountain",
+            "cost-of-living",
+            "home-costs",
+        ]
         response = client.get("/api/v2/places", params={"state": "AL"})
         assert response.status_code == 200
         assert [row["place_id"] for row in response.json()["items"]] == [
@@ -78,10 +92,15 @@ def test_api_filters_details_exports_and_token(
             "community_conditions_geography",
             "chrr_release_year",
             *MOUNTAIN_RUNTIME_COLUMNS,
+            *SUMMARY_DIMENSION_COLUMNS,
         }
         assert summary["community_conditions_group"] == 5
         assert summary["community_conditions_geography"] == "county"
         assert summary["chrr_release_year"] == 2025
+        assert summary["cost_of_living_coverage_status"] == "source_unavailable"
+        assert summary["home_costs_coverage_status"] == "source_unavailable"
+        assert summary["housing_stock_release_year"] is None
+        assert summary["housing_stock_coverage_status"] == "missing_acs"
         assert (
             "alr_npctl_wfir"
             not in client.get("/api/v2/places", params={"state": "AL"}).json()["items"][0]
@@ -96,7 +115,14 @@ def test_api_filters_details_exports_and_token(
         assert summary["county_fips"] == "01001"
         assert summary["county_name"] == "Autauga"
         sources = client.get("/api/v2/sources").json()
-        assert [source["source"] for source in sources] == ["fema", "fema_counties", "chrr"]
+        assert [source["source"] for source in sources] == [
+            "fema",
+            "fema_counties",
+            "chrr",
+            "bea_rpp",
+            "home_market",
+            "housing_stock",
+        ]
         grouped = client.get(
             "/api/v2/counties",
             params={
@@ -110,19 +136,14 @@ def test_api_filters_details_exports_and_token(
             client.get("/api/v2/counties", params={"community_conditions_group": 11}).status_code
             == 422
         )
-        map_columns = client.get("/api/v2/map/scores", params={"level": "tract"}).json()[
-            "columns"
-        ]
+        map_columns = client.get("/api/v2/map/scores", params={"level": "tract"}).json()["columns"]
         assert map_columns["community_conditions_group"][0] == 5
         assert map_columns["mountain_magnitude"][0] is None
         assert "mountain_score" not in map_columns
         assert "coverage_status" not in map_columns
         assert "mountain_coverage_status" not in map_columns
         assert (
-            client.get(
-                "/api/v2/places", params={"mountain_magnitude_min": 80}
-            ).json()["total"]
-            == 0
+            client.get("/api/v2/places", params={"mountain_magnitude_min": 80}).json()["total"] == 0
         )
         unknown = client.get("/api/v2/places/99999999999")
         assert unknown.status_code == 200
@@ -134,7 +155,9 @@ def test_api_filters_details_exports_and_token(
         county_detail = client.get("/api/v2/counties/01001").json()
         assert "ranked among counties" in county_detail["methodology_notice"]
         assert county_detail["summary"]["risk_score"] == 40.0
+        assert county_detail["summary"]["housing_stock_release_year"] == 2024
         assert county_detail["member_tract_count"] == 3
+        assert county_detail["source_notices"]
         county_hazards = {item["code"]: item for item in county_detail["hazard_percentiles"]}
         assert county_hazards["WFIR"]["percentile"] == 9.0
         assert county_hazards["TSUN"]["percentile"] is None
@@ -185,6 +208,80 @@ def test_api_filters_details_exports_and_token(
         assert status["state"] == "succeeded"
 
 
+def test_api_refreshes_home_market_staleness_across_immutable_build_reuse(
+    fixture_environment: tuple[RuntimePaths, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, _ = fixture_environment
+    _install_dimension_fixture(monkeypatch)
+    release = SimpleNamespace(
+        frame=empty_home_source(),
+        manifest={
+            "month": "2026-08",
+            "source_sha256": "a" * 64,
+            "logical_sha256": "b" * 64,
+        },
+        stale=False,
+    )
+    monkeypatch.setattr(
+        "househunter.build.load_release_lock",
+        lambda: {
+            "source_page": "https://example.test/research",
+            "usage_notice": "Personal local use only.",
+        },
+    )
+    monkeypatch.setattr("househunter.build.load_current_release", lambda _: release)
+    first = build_snapshot(paths)
+    metadata_path = first / "build.json"
+    immutable_metadata = metadata_path.read_bytes()
+    on_disk = json.loads(immutable_metadata)
+    immutable_build_id = on_disk["build_id"]
+    assert next(
+        source for source in on_disk["sources"] if source["source"] == "home_market"
+    )["stale"] is False
+
+    today = {"value": date(2026, 11, 1)}
+    monkeypatch.setattr(
+        api_module,
+        "home_market_is_stale",
+        lambda month: is_stale(month, today=today["value"]),
+    )
+    with TestClient(create_app(paths, testing=True)) as client:
+        fresh_meta = client.get("/api/v2/meta").json()
+        assert fresh_meta["build"]["build_id"] == immutable_build_id
+        fresh_source = next(
+            source
+            for source in fresh_meta["build"]["sources"]
+            if source["source"] == "home_market"
+        )
+        assert fresh_source["stale"] is False
+        fresh_status = next(
+            source
+            for source in client.get("/api/v2/sources").json()
+            if source["source"] == "home_market"
+        )
+        assert fresh_status["stale"] is False
+
+        today["value"] = date(2026, 11, 2)
+        assert build_snapshot(paths) == first
+        assert metadata_path.read_bytes() == immutable_metadata
+        stale_meta = client.get("/api/v2/meta").json()
+        assert stale_meta["build"]["build_id"] == immutable_build_id
+        stale_source = next(
+            source
+            for source in stale_meta["build"]["sources"]
+            if source["source"] == "home_market"
+        )
+        stale_status = next(
+            source
+            for source in client.get("/api/v2/sources").json()
+            if source["source"] == "home_market"
+        )
+        assert stale_source["stale"] is True
+        assert stale_status["stale"] is True
+        assert metadata_path.read_bytes() == immutable_metadata
+
+
 @pytest.mark.parametrize(
     ("params", "status_code"),
     [
@@ -227,9 +324,7 @@ def test_api_filters_and_sorts_uncapped_mountain_magnitude(
             f"/api/v2/{resource}",
             params={"mountain_magnitude_min": 0, "mountain_magnitude_max": 0},
         )
-        uncapped = client.get(
-            f"/api/v2/{resource}", params={"mountain_magnitude_min": 100_000}
-        )
+        uncapped = client.get(f"/api/v2/{resource}", params={"mountain_magnitude_min": 100_000})
         legacy_sort = client.get(f"/api/v2/{resource}", params={"sort": "mountain_score"})
 
     assert ranked.status_code == 200
@@ -240,6 +335,82 @@ def test_api_filters_and_sorts_uncapped_mountain_magnitude(
     assert uncapped.status_code == 200
     assert uncapped.json()["total"] == 0
     assert legacy_sort.status_code == 400
+
+
+@pytest.mark.parametrize("resource", ["places", "counties"])
+def test_api_combines_new_dimension_filters_and_sorts(
+    fixture_environment: tuple[RuntimePaths, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    resource: str,
+) -> None:
+    paths, _ = fixture_environment
+    _install_dimension_fixture(monkeypatch)
+    build_snapshot(paths)
+
+    with TestClient(create_app(paths, testing=True)) as client:
+        combined = client.get(
+            f"/api/v2/{resource}",
+            params={
+                "max_community_conditions_group": 2,
+                "cost_of_living_index_max": 100,
+                "home_sqft_for_1m_min": 1500,
+                "housing_built_2000_plus_pct_min": 0,
+                "include_unranked": True,
+            },
+        )
+        home_ranked = client.get(
+            f"/api/v2/{resource}",
+            params={"sort": "home_buying_power_percentile", "direction": "desc"},
+        )
+        impossible = client.get(
+            f"/api/v2/{resource}",
+            params={
+                "community_conditions_group": 5,
+                "max_community_conditions_group": 2,
+                "include_unranked": True,
+            },
+        )
+
+    assert combined.status_code == 200
+    expected = "02001" if resource == "counties" else "02001000100"
+    assert [row["place_id"] for row in combined.json()["items"]] == [expected]
+    assert home_ranked.status_code == 200
+    assert home_ranked.json()["items"][0]["state"] == "AK"
+    assert impossible.status_code == 200
+    assert impossible.json()["total"] == 0
+
+
+@pytest.mark.parametrize(
+    ("params", "status_code"),
+    [
+        ({"cost_of_living_index_min": "nan"}, 422),
+        ({"cost_of_living_index_max": "inf"}, 400),
+        ({"cost_of_living_index_min": "2", "cost_of_living_index_max": "1"}, 400),
+        ({"home_sqft_for_1m_min": "nan"}, 422),
+        ({"home_sqft_for_1m_min": "2", "home_sqft_for_1m_max": "1"}, 400),
+        ({"housing_built_2000_plus_pct_min": "-0.1"}, 422),
+        ({"housing_built_2000_plus_pct_max": "100.1"}, 422),
+        (
+            {
+                "housing_built_2000_plus_pct_min": "2",
+                "housing_built_2000_plus_pct_max": "1",
+            },
+            400,
+        ),
+    ],
+)
+@pytest.mark.parametrize("resource", ["places", "counties"])
+def test_api_rejects_invalid_dimension_bounds(
+    fixture_environment: tuple[RuntimePaths, object],
+    resource: str,
+    params: dict[str, str],
+    status_code: int,
+) -> None:
+    paths, _ = fixture_environment
+    build_snapshot(paths)
+    with TestClient(create_app(paths, testing=True)) as client:
+        response = client.get(f"/api/v2/{resource}", params=params)
+    assert response.status_code == status_code
 
 
 def test_map_scores_and_assets_are_complete_ordered_and_safe(
@@ -258,7 +429,7 @@ def test_map_scores_and_assets_are_complete_ordered_and_safe(
         assert tract.status_code == 200
         assert tract.headers["content-encoding"] == "gzip"
         body = tract.json()
-        assert body["schema_version"] == 3
+        assert body["schema_version"] == 4
         assert body["level"] == "tract"
         assert body["scope"] == {"kind": "national", "state": None}
         assert set(body["columns"]) == {
@@ -266,12 +437,42 @@ def test_map_scores_and_assets_are_complete_ordered_and_safe(
             "risk_score",
             "community_conditions_group",
             "mountain_magnitude",
+            "cost_of_living_index",
+            "home_buying_power_percentile",
+            "home_sqft_for_1m",
+            "housing_built_2000_plus_pct",
         }
         assert body["columns"]["place_id"] == sorted(body["columns"]["place_id"])
         assert len({len(column) for column in body["columns"].values()}) == 1
         assert len(body["columns"]["place_id"]) == 5
         assert body["columns"]["risk_score"][-1] == 99.0
         assert tract.headers["cache-control"] == "no-store"
+        core = client.get("/api/v2/map/scores/core", params={"level": "tract"})
+        assert core.status_code == 200
+        core_body = core.json()
+        assert set(core_body["columns"]) == {
+            "place_id",
+            "risk_score",
+            "community_conditions_group",
+            "mountain_magnitude",
+        }
+        assert core_body["columns"]["place_id"] == body["columns"]["place_id"]
+        cost = client.get(core_body["add_ons"]["cost_of_living"])
+        home = client.get(core_body["add_ons"]["home_costs"])
+        assert cost.status_code == 200
+        assert home.status_code == 200
+        assert cost.json()["kind"] == "cost-of-living"
+        assert home.json()["kind"] == "home-costs"
+        assert cost.json()["columns"]["place_id"] == body["columns"]["place_id"]
+        assert home.json()["columns"]["place_id"] == body["columns"]["place_id"]
+        assert cost.json()["columns"]["cost_of_living_index"] == body["columns"][
+            "cost_of_living_index"
+        ]
+        assert home.json()["columns"]["home_sqft_for_1m"] == body["columns"]["home_sqft_for_1m"]
+        assert client.get(
+            "/api/v2/map/scores/addons/home-costs",
+            params={"level": "tract", "build_id": "stale"},
+        ).status_code == 409
         county = client.get("/api/v2/map/scores", params={"level": "county"}).json()
         assert county["columns"]["place_id"] == ["01001", "02001"]
         assert county["columns"]["risk_score"][0] == 40.0
@@ -320,7 +521,40 @@ def test_map_scores_and_assets_are_complete_ordered_and_safe(
             "01001000200",
             "01001000300",
         ]
+        scoped_meta = client.get("/api/v2/meta").json()["build"]
+        chrr_source = next(
+            source
+            for source in client.get("/api/v2/sources").json()
+            if source["source"] == "chrr"
+        )
+        assert chrr_source["row_count"] == 3
+        assert chrr_source["sha256"] == scoped_meta["input_checksums"]["chrr"]
         assert client.get("/api/v2/map/scores", params={"level": "invalid"}).status_code == 422
+
+
+def test_map_score_addon_serves_the_retained_build_after_pointer_swap(
+    fixture_environment: tuple[RuntimePaths, Path],
+) -> None:
+    paths, fixture_root = fixture_environment
+    first = build_snapshot(paths)
+    with TestClient(create_app(paths, testing=True)) as client:
+        core = client.get("/api/v2/map/scores/core", params={"level": "tract"}).json()
+        old_addon_url = core["add_ons"]["cost_of_living"]
+
+        config_path = fixture_root / "sources.yml"
+        config = yaml.safe_load(config_path.read_text())
+        config["chrr"]["version"] = "2025 Annual Data Release, pointer-swap fixture"
+        config_path.write_text(yaml.safe_dump(config))
+        second = build_snapshot(paths)
+
+        assert second != first
+        retained = client.get(old_addon_url)
+        assert retained.status_code == 200
+        assert retained.json()["build_id"] == first.name
+        assert client.get(
+            "/api/v2/map/scores/addons/cost-of-living",
+            params={"level": "tract", "build_id": "../../current.json"},
+        ).status_code == 409
 
 
 def test_map_scores_require_a_current_build(
@@ -349,8 +583,42 @@ def test_map_score_response_model_rejects_misaligned_or_ambiguous_columns(
         "risk_score": [10.0, None],
         "community_conditions_group": [5, None],
         "mountain_magnitude": [None, 2.5],
+        "cost_of_living_index": [95.0, None],
+        "home_buying_power_percentile": [50.0, None],
+        "home_sqft_for_1m": [4000.0, None],
+        "housing_built_2000_plus_pct": [25.0, None],
     }
     columns.update(overrides)
+    with pytest.raises(ValidationError):
+        MapScoreColumns.model_validate(columns)
+
+
+@pytest.mark.parametrize(
+    ("column", "values"),
+    [
+        ("risk_score", [101.0, None]),
+        ("community_conditions_group", [0, None]),
+        ("mountain_magnitude", [-0.1, None]),
+        ("cost_of_living_index", [0.0, None]),
+        ("home_buying_power_percentile", [100.1, None]),
+        ("home_sqft_for_1m", [float("inf"), None]),
+        ("housing_built_2000_plus_pct", [-0.1, None]),
+    ],
+)
+def test_map_score_response_model_rejects_invalid_dimension_values(
+    column: str, values: list[object]
+) -> None:
+    columns: dict[str, list[object]] = {
+        "place_id": ["01001000100", "01001000200"],
+        "risk_score": [10.0, None],
+        "community_conditions_group": [5, None],
+        "mountain_magnitude": [None, 2.5],
+        "cost_of_living_index": [95.0, None],
+        "home_buying_power_percentile": [50.0, None],
+        "home_sqft_for_1m": [4000.0, None],
+        "housing_built_2000_plus_pct": [25.0, None],
+    }
+    columns[column] = values
     with pytest.raises(ValidationError):
         MapScoreColumns.model_validate(columns)
 

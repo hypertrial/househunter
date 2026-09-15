@@ -41,10 +41,9 @@ class RuntimePaths:
         )
 
     def ensure(self) -> None:
-        self.cache.mkdir(parents=True, exist_ok=True)
-        self.raw.mkdir(parents=True, exist_ok=True)
-        self.processed.mkdir(parents=True, exist_ok=True)
-        self.builds.mkdir(parents=True, exist_ok=True)
+        for directory in (self.data, self.cache, self.raw, self.processed, self.builds):
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            directory.chmod(0o700)
 
 
 def default_config_path() -> Path:
@@ -91,12 +90,14 @@ def atomic_write_json(path: Path, payload: object) -> None:
     """Durably replace one JSON file without exposing a partial write."""
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
-        with temporary.open("x") as handle:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w") as handle:
             json.dump(payload, handle, indent=2, sort_keys=True)
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+        path.chmod(0o600)
         try:
             directory = os.open(path.parent, os.O_RDONLY)
         except OSError:

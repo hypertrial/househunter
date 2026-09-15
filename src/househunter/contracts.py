@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import math
 from datetime import datetime
-from typing import Literal
+from typing import Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -14,6 +15,35 @@ MountainCoverageStatus = Literal[
     "outside_scope",
     "unavailable",
 ]
+CostOfLivingCoverageStatus = Literal[
+    "complete",
+    "outside_scope",
+    "unmatched_geography",
+    "source_unavailable",
+]
+HomeCostsCoverageStatus = Literal[
+    "complete",
+    "source_quality_flag",
+    "missing_market",
+    "invalid_price_per_square_foot",
+    "outside_scope",
+    "source_unavailable",
+]
+HousingStockCoverageStatus = Literal[
+    "complete",
+    "zero_housing",
+    "missing_acs",
+    "outside_scope",
+    "asset_unavailable",
+]
+
+COST_OF_LIVING_COVERAGE_STATUSES = frozenset(
+    get_args(CostOfLivingCoverageStatus)
+)
+HOME_COSTS_COVERAGE_STATUSES = frozenset(get_args(HomeCostsCoverageStatus))
+HOUSING_STOCK_COVERAGE_STATUSES = frozenset(
+    get_args(HousingStockCoverageStatus)
+)
 
 
 class PlaceSummary(BaseModel):
@@ -57,6 +87,35 @@ class PlaceSummary(BaseModel):
     trail_access_pct: float | None
     mountain_population_coverage: float
     mountain_coverage_status: MountainCoverageStatus
+    cost_of_living_index: float | None
+    cost_of_living_goods_index: float | None
+    cost_of_living_housing_rents_index: float | None
+    cost_of_living_utilities_index: float | None
+    cost_of_living_other_services_index: float | None
+    cost_of_living_geography_type: Literal["metropolitan", "nonmetropolitan"] | None
+    cost_of_living_geography_id: str | None
+    cost_of_living_geography_name: str | None
+    cost_of_living_release_year: int | None
+    cost_of_living_coverage_status: CostOfLivingCoverageStatus
+    cost_of_living_attribution: str
+    home_sqft_for_1m: int | None
+    home_buying_power_percentile: float | None
+    home_median_listing_price: float | None
+    home_median_listing_price_per_square_foot: float | None
+    home_median_square_feet: float | None
+    home_active_listing_count: float | None
+    home_market_month: str | None
+    home_costs_coverage_status: HomeCostsCoverageStatus
+    home_market_attribution: str
+    home_market_usage_notice: str
+    housing_stock_total_units_estimate: int | None
+    housing_built_2000_plus_pct: float | None
+    housing_built_2010_plus_pct: float | None
+    housing_built_2020_plus_pct: float | None
+    housing_median_year_built: int | None
+    housing_stock_release_year: int | None
+    housing_stock_coverage_status: HousingStockCoverageStatus
+    housing_stock_attribution: str
 
 
 class TractContribution(BaseModel):
@@ -81,6 +140,7 @@ class PlaceDetail(BaseModel):
     tract_contributions: list[TractContribution]
     hazard_percentiles: list[HazardPercentile]
     member_tract_count: int | None = None
+    source_notices: list[str] = Field(default_factory=list)
 
 
 class AddressLookupRequest(BaseModel):
@@ -145,6 +205,10 @@ class MapScoreColumns(BaseModel):
     risk_score: list[float | None]
     community_conditions_group: list[int | None]
     mountain_magnitude: list[float | None]
+    cost_of_living_index: list[float | None]
+    home_buying_power_percentile: list[float | None]
+    home_sqft_for_1m: list[float | None]
+    housing_built_2000_plus_pct: list[float | None]
 
     @model_validator(mode="after")
     def validate_alignment(self) -> MapScoreColumns:
@@ -153,23 +217,208 @@ class MapScoreColumns(BaseModel):
             len(self.risk_score),
             len(self.community_conditions_group),
             len(self.mountain_magnitude),
+            len(self.cost_of_living_index),
+            len(self.home_buying_power_percentile),
+            len(self.home_sqft_for_1m),
+            len(self.housing_built_2000_plus_pct),
         }
         if len(lengths) != 1:
             raise ValueError("Map score columns must have equal lengths")
         adjacent_ids = zip(self.place_id, self.place_id[1:], strict=False)
         if any(left >= right for left, right in adjacent_ids):
             raise ValueError("Map score place IDs must be ordered and unique")
+        for index in range(len(self.place_id)):
+            finite_values = (
+                self.risk_score[index],
+                self.mountain_magnitude[index],
+                self.cost_of_living_index[index],
+                self.home_buying_power_percentile[index],
+                self.home_sqft_for_1m[index],
+                self.housing_built_2000_plus_pct[index],
+            )
+            if any(value is not None and not math.isfinite(value) for value in finite_values):
+                raise ValueError("Map score values must be finite or null")
+            risk = self.risk_score[index]
+            group = self.community_conditions_group[index]
+            mountain = self.mountain_magnitude[index]
+            cost = self.cost_of_living_index[index]
+            percentile = self.home_buying_power_percentile[index]
+            square_feet = self.home_sqft_for_1m[index]
+            housing = self.housing_built_2000_plus_pct[index]
+            if risk is not None and not 0 <= risk <= 100:
+                raise ValueError("Map risk score must be between 0 and 100")
+            if group is not None and not 1 <= group <= 10:
+                raise ValueError("Map Community Conditions group must be between 1 and 10")
+            if mountain is not None and mountain < 0:
+                raise ValueError("Map Mountain Magnitude must be nonnegative")
+            if cost is not None and cost <= 0:
+                raise ValueError("Map Cost of Living index must be positive")
+            if percentile is not None and not 0 <= percentile <= 100:
+                raise ValueError("Map home buying-power percentile must be between 0 and 100")
+            if square_feet is not None and square_feet <= 0:
+                raise ValueError("Map home square feet must be positive")
+            if housing is not None and not 0 <= housing <= 100:
+                raise ValueError("Map built-2000+ share must be between 0 and 100")
+        return self
+
+
+class MapScoreCoreColumns(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    place_id: list[str]
+    risk_score: list[float | None]
+    community_conditions_group: list[int | None]
+    mountain_magnitude: list[float | None]
+
+    @model_validator(mode="after")
+    def validate_alignment(self) -> MapScoreCoreColumns:
+        columns = (
+            self.place_id,
+            self.risk_score,
+            self.community_conditions_group,
+            self.mountain_magnitude,
+        )
+        if len({len(column) for column in columns}) != 1:
+            raise ValueError("Core map score columns must have equal lengths")
+        if any(
+            left >= right
+            for left, right in zip(self.place_id, self.place_id[1:], strict=False)
+        ):
+            raise ValueError("Core map score place IDs must be ordered and unique")
+        for risk, group, mountain in zip(
+            self.risk_score,
+            self.community_conditions_group,
+            self.mountain_magnitude,
+            strict=True,
+        ):
+            if any(
+                value is not None and not math.isfinite(value)
+                for value in (risk, mountain)
+            ):
+                raise ValueError("Core map score values must be finite or null")
+            if risk is not None and not 0 <= risk <= 100:
+                raise ValueError("Map risk score must be between 0 and 100")
+            if group is not None and not 1 <= group <= 10:
+                raise ValueError("Map Community Conditions group must be between 1 and 10")
+            if mountain is not None and mountain < 0:
+                raise ValueError("Map Mountain Magnitude must be nonnegative")
+        return self
+
+
+class CostOfLivingMapColumns(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    place_id: list[str]
+    cost_of_living_index: list[float | None]
+
+    @model_validator(mode="after")
+    def validate_alignment(self) -> CostOfLivingMapColumns:
+        if len(self.place_id) != len(self.cost_of_living_index):
+            raise ValueError("Cost of Living map columns must have equal lengths")
+        if any(
+            left >= right
+            for left, right in zip(self.place_id, self.place_id[1:], strict=False)
+        ):
+            raise ValueError("Cost of Living map place IDs must be ordered and unique")
+        if any(
+            value is not None and (not math.isfinite(value) or value <= 0)
+            for value in self.cost_of_living_index
+        ):
+            raise ValueError("Map Cost of Living index must be positive and finite")
+        return self
+
+
+class HomeCostsMapColumns(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    place_id: list[str]
+    home_buying_power_percentile: list[float | None]
+    home_sqft_for_1m: list[float | None]
+    housing_built_2000_plus_pct: list[float | None]
+
+    @model_validator(mode="after")
+    def validate_alignment(self) -> HomeCostsMapColumns:
+        columns = (
+            self.place_id,
+            self.home_buying_power_percentile,
+            self.home_sqft_for_1m,
+            self.housing_built_2000_plus_pct,
+        )
+        if len({len(column) for column in columns}) != 1:
+            raise ValueError("Home Costs map columns must have equal lengths")
+        if any(
+            left >= right
+            for left, right in zip(self.place_id, self.place_id[1:], strict=False)
+        ):
+            raise ValueError("Home Costs map place IDs must be ordered and unique")
+        for percentile, square_feet, built_2000 in zip(
+            self.home_buying_power_percentile,
+            self.home_sqft_for_1m,
+            self.housing_built_2000_plus_pct,
+            strict=True,
+        ):
+            if any(
+                value is not None and not math.isfinite(value)
+                for value in (percentile, square_feet, built_2000)
+            ):
+                raise ValueError("Home Costs map values must be finite or null")
+            if percentile is not None and not 0 <= percentile <= 100:
+                raise ValueError("Map home buying-power percentile must be between 0 and 100")
+            if square_feet is not None and square_feet <= 0:
+                raise ValueError("Map home square feet must be positive")
+            if built_2000 is not None and not 0 <= built_2000 <= 100:
+                raise ValueError("Map built-2000+ share must be between 0 and 100")
         return self
 
 
 class MapScores(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[3] = 3
+    schema_version: Literal[4] = 4
     build_id: str
     level: Literal["tract", "county"]
     scope: MapScoreScope
     columns: MapScoreColumns
+
+
+class MapScoreAddons(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    cost_of_living: str
+    home_costs: str
+
+
+class MapScoresCore(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[4] = 4
+    build_id: str
+    level: Literal["tract", "county"]
+    scope: MapScoreScope
+    columns: MapScoreCoreColumns
+    add_ons: MapScoreAddons
+
+
+class CostOfLivingMapScores(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    kind: Literal["cost-of-living"] = "cost-of-living"
+    build_id: str
+    level: Literal["tract", "county"]
+    scope: MapScoreScope
+    columns: CostOfLivingMapColumns
+
+
+class HomeCostsMapScores(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    kind: Literal["home-costs"] = "home-costs"
+    build_id: str
+    level: Literal["tract", "county"]
+    scope: MapScoreScope
+    columns: HomeCostsMapColumns
 
 
 class SourceStatus(BaseModel):
@@ -179,6 +428,11 @@ class SourceStatus(BaseModel):
     sha256: str | None = None
     row_count: int | None = None
     retrieved_at: datetime | None = None
+    release: str | int | None = None
+    stale: bool | None = None
+    attribution: str | None = None
+    usage_notice: str | None = None
+    coverage_status: str | None = None
     error: str | None = None
 
 

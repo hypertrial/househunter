@@ -11,10 +11,12 @@ from pathlib import Path
 
 import uvicorn
 
+from .acquisition import download_optional_bea
 from .api import create_app
 from .build import build_snapshot
 from .chrr import download_chrr
 from .config import RuntimePaths
+from .cost_of_living import download_bea_rpp
 from .download import download_fema, download_fema_counties
 from .errors import HouseHunterError
 from .locking import exclusive_lock
@@ -48,6 +50,7 @@ def prepare_runtime(
     download: Download = download_fema,
     download_counties: Download = download_fema_counties,
     download_community_conditions: Download = download_chrr,
+    download_cost_of_living: Download = download_bea_rpp,
     build: Build = build_snapshot,
     progress: Progress | None = None,
     cancelled: Cancelled | None = None,
@@ -56,10 +59,16 @@ def prepare_runtime(
     paths.ensure()
 
     def _run() -> Path:
-        download(paths, progress=_scale_progress(progress, 0, 35), cancelled=cancelled)
-        download_counties(paths, progress=_scale_progress(progress, 35, 50), cancelled=cancelled)
+        download(paths, progress=_scale_progress(progress, 0, 32), cancelled=cancelled)
+        download_counties(paths, progress=_scale_progress(progress, 32, 47), cancelled=cancelled)
         download_community_conditions(
-            paths, progress=_scale_progress(progress, 50, 60), cancelled=cancelled
+            paths, progress=_scale_progress(progress, 47, 55), cancelled=cancelled
+        )
+        download_optional_bea(
+            paths,
+            download=download_cost_of_living,
+            progress=_scale_progress(progress, 55, 60),
+            cancelled=cancelled,
         )
         if progress:
             progress(60, "Publishing ranking snapshot")
@@ -101,6 +110,7 @@ def run(
     download: Download = download_fema,
     download_counties: Download = download_fema_counties,
     download_community_conditions: Download = download_chrr,
+    download_cost_of_living: Download = download_bea_rpp,
     build: Build = build_snapshot,
     serve: Serve = serve_app,
     progress: Progress | None = _progress,
@@ -115,6 +125,7 @@ def run(
             download=download,
             download_counties=download_counties,
             download_community_conditions=download_community_conditions,
+            download_cost_of_living=download_cost_of_living,
             build=build,
             progress=progress,
         )

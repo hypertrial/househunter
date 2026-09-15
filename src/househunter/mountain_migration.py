@@ -281,7 +281,7 @@ def rescore_v1_release(
         compact = stage_compact_fallback(paths, full, manifest)
         compact_manifest, tracts, counties = load_compact_release(compact)
         if progress:
-            progress(70, "Staging schema-9 HouseHunter snapshot")
+            progress(70, "Staging schema-10 HouseHunter snapshot")
         snapshot = build_snapshot(
             paths,
             mountain_release=(compact, compact_manifest, tracts, counties),

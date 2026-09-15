@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "source_name": "Realtor.com Research Data county inventory",
+  "source_page": "https://www.realtor.com/research/data/",
+  "terms_url": "https://www.realtor.com/terms-of-service/",
+  "automatic_download": false,
+  "private_use_only": true,
+  "usage_notice": "For personal local use only. Source and derived market data must not be committed, packaged, uploaded, or published.",
+  "required_fields": [
+    "month_date_yyyymm",
+    "county_fips",
+    "county_name",
+    "median_listing_price",
+    "active_listing_count",
+    "median_listing_price_per_square_foot",
+    "median_square_feet",
+    "total_listing_count",
+    "quality_flag"
+  ],
+  "releases": [
+    {
+      "month": "2026-08",
+      "month_date_yyyymm": 202608,
+      "expected_filename": "RDC_Inventory_Core_Metrics_County.csv",
+      "byte_size": 895367,
+      "sha256": "4997ef2054c11313d81eb3d5929699744423b92ee3cb1970ebc006dbfeac474e",
+      "normalized_logical_sha256": "3d219000570a8e9de5b23e85bfb476c07a53e620236ad5bab743e407b5a8ada2",
+      "header_sha256": "e5bdf06465e3b67e1b43e0209b1597f91434d699b5ad35be7fa8f4c51e6b35f9",
+      "row_count": 3118,
+      "quality_flagged_row_count": 845,
+      "null_price_per_square_foot_count": 2,
+      "source_page": "https://www.realtor.com/research/data/",
+      "reviewed_on": "2026-09-14"
+    }
+  ]
+}

@@ -41,6 +41,35 @@ export interface PlaceSummary {
   trail_access_pct: number | null;
   mountain_population_coverage: number;
   mountain_coverage_status: "complete" | "partial" | "insufficient_coverage" | "zero_population" | "outside_scope" | "unavailable";
+  cost_of_living_index: number | null;
+  cost_of_living_goods_index: number | null;
+  cost_of_living_housing_rents_index: number | null;
+  cost_of_living_utilities_index: number | null;
+  cost_of_living_other_services_index: number | null;
+  cost_of_living_geography_type: "metropolitan" | "nonmetropolitan" | null;
+  cost_of_living_geography_id: string | null;
+  cost_of_living_geography_name: string | null;
+  cost_of_living_release_year: number | null;
+  cost_of_living_coverage_status: "complete" | "outside_scope" | "unmatched_geography" | "source_unavailable";
+  cost_of_living_attribution: string;
+  home_sqft_for_1m: number | null;
+  home_buying_power_percentile: number | null;
+  home_median_listing_price: number | null;
+  home_median_listing_price_per_square_foot: number | null;
+  home_median_square_feet: number | null;
+  home_active_listing_count: number | null;
+  home_market_month: string | null;
+  home_costs_coverage_status: "complete" | "source_quality_flag" | "missing_market" | "invalid_price_per_square_foot" | "outside_scope" | "source_unavailable";
+  home_market_attribution: string;
+  home_market_usage_notice: string;
+  housing_stock_total_units_estimate: number | null;
+  housing_built_2000_plus_pct: number | null;
+  housing_built_2010_plus_pct: number | null;
+  housing_built_2020_plus_pct: number | null;
+  housing_median_year_built: number | null;
+  housing_stock_release_year: number | null;
+  housing_stock_coverage_status: "complete" | "zero_housing" | "missing_acs" | "outside_scope" | "asset_unavailable";
+  housing_stock_attribution: string;
 }
 
 export interface TractContribution {
@@ -65,6 +94,7 @@ export interface PlaceDetail {
   tract_contributions: TractContribution[];
   hazard_percentiles: HazardPercentile[];
   member_tract_count: number | null;
+  source_notices: string[];
 }
 
 export interface AddressLookup {
@@ -104,8 +134,45 @@ export interface JobStatus {
 }
 
 export type Geography = "tract" | "county";
-export type Metric = "fema" | "community-conditions" | "mountain";
+export type Metric = "fema" | "community-conditions" | "mountain" | "cost-of-living" | "home-costs";
 export type MapScope = { kind: "national"; state: null } | { kind: "state"; state: string };
+
+export interface MapFilters {
+  state: string;
+  county: string;
+  showUnavailable: boolean;
+  mountainMagnitudeMin: number | null;
+  communityConditionsGroupMax: number | null;
+  costOfLivingIndexMax: number | null;
+  homeSqftFor1mMin: number | null;
+  housingBuilt2000PlusPctMin: number | null;
+}
+
+export interface LayerDescriptor {
+  key: "risk" | "community-conditions" | "mountain" | "cost-of-living" | "home-costs";
+  display_name: string;
+  source: string;
+  direction: "lower" | "higher";
+  availability: "available" | "unavailable";
+  vintage: string;
+  geography: string;
+  attribution: string;
+  notice: string;
+}
+
+export interface SourceDescriptor {
+  source: string;
+  version: string;
+  release: string | number | null;
+  cached: boolean;
+  sha256: string | null;
+  row_count: number | null;
+  stale: boolean | null;
+  attribution: string;
+  usage_notice: string | null;
+  coverage_status: string;
+  error: string | null;
+}
 
 export interface BuildMeta {
   build_id: string;
@@ -115,6 +182,7 @@ export interface BuildMeta {
   ranked_county_count?: number;
   source_vintages: Record<string, string | number>;
   scope: MapScope;
+  sources?: SourceDescriptor[];
 }
 
 export interface MapAssetStatus {
@@ -132,6 +200,7 @@ export interface Meta {
   reference_assets_error: string | null;
   map_assets: MapAssetStatus;
   build: BuildMeta | null;
+  layers: LayerDescriptor[];
 }
 
 export interface MapScore {
@@ -139,6 +208,10 @@ export interface MapScore {
   risk_score: number | null;
   community_conditions_group: number | null;
   mountain_magnitude: number | null;
+  cost_of_living_index: number | null;
+  home_buying_power_percentile: number | null;
+  home_sqft_for_1m: number | null;
+  housing_built_2000_plus_pct: number | null;
 }
 
 export interface MapScoreColumns {
@@ -146,14 +219,39 @@ export interface MapScoreColumns {
   risk_score: Array<number | null>;
   community_conditions_group: Array<number | null>;
   mountain_magnitude: Array<number | null>;
+  cost_of_living_index: Array<number | null>;
+  home_buying_power_percentile: Array<number | null>;
+  home_sqft_for_1m: Array<number | null>;
+  housing_built_2000_plus_pct: Array<number | null>;
 }
 
+export type MapScoreAddonKind = "cost-of-living" | "home-costs";
+
 export interface MapScores {
-  schema_version: 3;
+  schema_version: 4;
   build_id: string;
   level: Geography;
   scope: MapScope;
   columns: MapScoreColumns;
+  add_ons?: {
+    cost_of_living: string;
+    home_costs: string;
+  };
+}
+
+export interface MapScoreAddon {
+  schema_version: 1;
+  kind: MapScoreAddonKind;
+  build_id: string;
+  level: Geography;
+  scope: MapScope;
+  columns: {
+    place_id: string[];
+    cost_of_living_index?: Array<number | null>;
+    home_buying_power_percentile?: Array<number | null>;
+    home_sqft_for_1m?: Array<number | null>;
+    housing_built_2000_plus_pct?: Array<number | null>;
+  };
 }
 
 export interface MapAssetEntry {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate pinned FEMA/CHR&R caches and packaged map and Mountain assets."""
+"""Validate pinned sources and packaged map, Mountain, and housing-stock assets."""
 
 from __future__ import annotations
 
@@ -12,7 +12,15 @@ import polars as pl
 
 from househunter.chrr import raw_paths, validate_cached_chrr
 from househunter.config import RuntimePaths, load_config
+from househunter.cost_of_living import BEA_CACHE_NAME
+from househunter.cost_of_living import validate_cached as validate_cached_bea
 from househunter.download import validate_cached_fema, validate_cached_fema_counties
+from househunter.home_market import load_release_lock
+from househunter.housing_stock import (
+    BUNDLED_HOUSING_STOCK,
+    default_source_lock_path,
+    validate_housing_stock_assets,
+)
 from househunter.map_assets import load_manifest, topology_ids
 from househunter.mountain import (
     BUNDLED_COMPACT_RELEASE,
@@ -52,6 +60,19 @@ EXPECTED_MOUNTAIN_RELEASE_ID = "95e0f7fba44f7309"
 EXPECTED_MOUNTAIN_FULL_MANIFEST_SHA256 = (
     "e2b4a540d2da501f2980d197696dec766b041fab23e0e35b33357dec5f5c1e94"
 )
+
+
+def validate_bundled_housing_stock() -> dict[str, object]:
+    bundle = validate_housing_stock_assets(
+        BUNDLED_HOUSING_STOCK, source_lock_path=default_source_lock_path()
+    )
+    return {
+        "release_year": bundle.manifest["release_year"],
+        "source_lock_sha256": bundle.manifest["source_lock_sha256"],
+        "tracts": bundle.tracts.height,
+        "counties": bundle.counties.height,
+        "county_msa": bundle.county_msa.height,
+    }
 
 
 def validate_bundled_mountain() -> dict[str, object]:
@@ -161,6 +182,22 @@ def validate_release(paths: RuntimePaths) -> dict[str, object]:
     if topology_ids(manifest, "counties-national") != set(counties["county_fips"]):
         raise ValueError("Map county identifiers do not match the pinned FEMA cache")
     mountain = validate_bundled_mountain()
+    housing_stock = validate_bundled_housing_stock()
+    bea_path = paths.cache / BEA_CACHE_NAME
+    if bea_path.is_file():
+        bea, bea_sha256 = validate_cached_bea(bea_path, config["bea_rpp"])
+        bea_rpp: dict[str, object] = {
+            "cached": True,
+            "release_year": config["bea_rpp"]["release_year"],
+            "rows": bea.height,
+            "sha256": bea_sha256,
+        }
+    else:
+        bea_rpp = {
+            "cached": False,
+            "release_year": config["bea_rpp"]["release_year"],
+        }
+    home_market_lock = load_release_lock()
     return {
         "tracts": tracts.height,
         "ranked_tracts": tracts["alr_npctl"].is_not_null().sum(),
@@ -171,6 +208,15 @@ def validate_release(paths: RuntimePaths) -> dict[str, object]:
         "chrr_fema_matches": len(set(chrr["county_fips"]) & set(counties["county_fips"])),
         "map_assets": len(manifest["files"]),
         "mountain": mountain,
+        "housing_stock": housing_stock,
+        "bea_rpp": bea_rpp,
+        "home_market_lock": {
+            "automatic_download": home_market_lock["automatic_download"],
+            "private_use_only": home_market_lock["private_use_only"],
+            "approved_releases": [
+                release["month"] for release in home_market_lock["releases"]
+            ],
+        },
         "status": "PASS",
     }
 

@@ -1,0 +1,81 @@
+{
+  "files": {
+    "counties": {
+      "bytes": 136471,
+      "columns": {
+        "county_fips": "String",
+        "housing_built_2000_2009_estimate": "Int64",
+        "housing_built_2000_2009_moe": "Int64",
+        "housing_built_2000_plus_pct": "Float64",
+        "housing_built_2010_2019_estimate": "Int64",
+        "housing_built_2010_2019_moe": "Int64",
+        "housing_built_2010_plus_pct": "Float64",
+        "housing_built_2020_plus_estimate": "Int64",
+        "housing_built_2020_plus_moe": "Int64",
+        "housing_built_2020_plus_pct": "Float64",
+        "housing_median_year_built": "Int64",
+        "housing_median_year_built_moe": "Int64",
+        "housing_stock_coverage_status": "String",
+        "housing_stock_release_year": "Int16",
+        "housing_stock_total_units_estimate": "Int64",
+        "housing_stock_total_units_moe": "Int64"
+      },
+      "filename": "counties.parquet",
+      "rows": 3222,
+      "sha256": "88cacc85e757f89789a656821d24b2c5d5a0968319694736ddf8bd8a48c1938d"
+    },
+    "county_msa": {
+      "bytes": 8764,
+      "columns": {
+        "cbsa_id": "String",
+        "county_fips": "String"
+      },
+      "filename": "county_msa.parquet",
+      "rows": 1915,
+      "sha256": "b3993e2edaf9147ca6b27e1d57c5ce0933e125ee39cd80edca8801a79bd84bbc"
+    },
+    "tracts": {
+      "bytes": 2457104,
+      "columns": {
+        "housing_built_2000_2009_estimate": "Int64",
+        "housing_built_2000_2009_moe": "Int64",
+        "housing_built_2000_plus_pct": "Float64",
+        "housing_built_2010_2019_estimate": "Int64",
+        "housing_built_2010_2019_moe": "Int64",
+        "housing_built_2010_plus_pct": "Float64",
+        "housing_built_2020_plus_estimate": "Int64",
+        "housing_built_2020_plus_moe": "Int64",
+        "housing_built_2020_plus_pct": "Float64",
+        "housing_median_year_built": "Int64",
+        "housing_median_year_built_moe": "Int64",
+        "housing_stock_coverage_status": "String",
+        "housing_stock_release_year": "Int16",
+        "housing_stock_total_units_estimate": "Int64",
+        "housing_stock_total_units_moe": "Int64",
+        "tract_id": "String"
+      },
+      "filename": "tracts.parquet",
+      "rows": 85382,
+      "sha256": "7a8d874f010328f5220cd11b9d81597c4d0e8ab95692a9317c605ae51ba1d86f"
+    }
+  },
+  "omb_delineation": "OMB Bulletin No. 23-01",
+  "release_year": 2024,
+  "schema_version": 1,
+  "source_lock_sha256": "ef6e95db82acd66c84c74a2e2268cc7f088cbd82fdf252ab20b9e0874c61f4a9",
+  "sources": {
+    "B25034": {
+      "expected_size": 50103592,
+      "header_sha256": "adaae7a641aa477af818f70117f658cb39968947b00036b8dcefe14d8acd0413",
+      "sha256": "806d6cb18e8e6c0855e065eca99164b07334cc32f521899aa45a4415ef7d380e",
+      "url": "https://www2.census.gov/programs-surveys/acs/summary_file/2024/table-based-SF/data/5YRData/acsdt5y2024-b25034.dat"
+    },
+    "B25035": {
+      "expected_size": 15421817,
+      "header_sha256": "27e3b23fdd3affd717eeb64939bdd9db1fb4c2dcff7d98ec88389266fce313d6",
+      "sha256": "a08e68670c401abd470fc8084efc3718eba9b5cb52ff612c2442d67d5665971b",
+      "url": "https://www2.census.gov/programs-surveys/acs/summary_file/2024/table-based-SF/data/5YRData/acsdt5y2024-b25035.dat"
+    }
+  },
+  "survey": "ACS 2024 five-year estimates"
+}
