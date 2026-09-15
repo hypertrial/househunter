@@ -19,6 +19,27 @@ const layers = [
   { key: "home-costs", display_name: "Home Costs", source: "Realtor.com / ACS", direction: "higher", availability: "available", vintage: "2026-08 / ACS 2024", geography: "county market; tract and county housing stock", attribution: "Realtor.com Research Data; U.S. Census Bureau", notice: "Personal local use only." },
 ];
 
+function layerButton(page: Page) {
+  return page.getByRole("button", { name: /^Map layer:/ });
+}
+
+function layerOption(page: Page, key: string) {
+  const layer = layers.find((item) => item.key === key);
+  if (!layer) throw new Error(`Unknown layer ${key}`);
+  return page.getByRole("group", { name: "Map layers" }).getByRole("button", {
+    name: `${layer.display_name} — ${layer.source}`,
+  });
+}
+
+async function selectLayer(page: Page, key: string) {
+  const layer = layers.find((item) => item.key === key);
+  if (!layer) throw new Error(`Unknown layer ${key}`);
+  await layerButton(page).click();
+  await layerOption(page, key).click();
+  await expect(layerButton(page)).toHaveAccessibleName(`Map layer: ${layer.display_name} — ${layer.source}`);
+  await expect(page.getByRole("group", { name: "Map layers" })).toHaveCount(0);
+}
+
 const summary = {
   place_id: "08013012101", name: "Census tract 121.01", state: "CO", place_type: "tract",
   population_2020: 0, housing_units_2020: 0, res_hazard_npctl: 21.25,
@@ -278,7 +299,7 @@ test("keeps preparation and retained workflows inside the map shell", async ({ p
 test("renders Community Conditions as an independent county-level layer", async ({ page }) => {
   await installRoutes(page);
   await page.goto("/");
-  await page.getByRole("combobox", { name: "Map layer" }).selectOption("community-conditions");
+  await selectLayer(page, "community-conditions");
   await expect(page).toHaveURL(/metric=community-conditions/);
   await expect(page.getByLabel("Continuous Community Conditions color scale, Group 1 is healthiest"))
     .toContainText("county-level clusters, not percentiles");
@@ -301,7 +322,7 @@ test("renders Community Conditions as an independent county-level layer", async 
 test("renders and filters the independent Mountain Magnitude layer", async ({ page }) => {
   await installRoutes(page);
   await page.goto("/");
-  await page.getByRole("combobox", { name: "Map layer" }).selectOption("mountain");
+  await selectLayer(page, "mountain");
   await expect(page).toHaveURL(/metric=mountain/);
   await expect(page.getByLabel(/Stepped Mountain Magnitude color scale/))
     .toContainText("not property-specific");
@@ -331,10 +352,11 @@ test("combines Cost of Living and Home Costs with the other map filters", async 
   expect(scoreRequests).toContain("/api/v3/map/scores/core");
   expect(scoreRequests).not.toContain("/api/v3/map/scores/addons/cost-of-living");
   expect(scoreRequests).not.toContain("/api/v3/map/scores/addons/home-costs");
-  const layer = page.getByRole("combobox", { name: "Map layer" });
-  await expect(layer.getByRole("option")).toHaveCount(5);
+  await layerButton(page).click();
+  await expect(page.getByRole("group", { name: "Map layers" }).getByRole("button")).toHaveCount(5);
+  await page.keyboard.press("Escape");
 
-  await layer.selectOption("cost-of-living");
+  await selectLayer(page, "cost-of-living");
   await expect.poll(() => scoreRequests).toContain("/api/v3/map/scores/addons/cost-of-living");
   const costLegend = page.getByLabel(
     "Cost of Living color scale from 80 to 120, lower is better, U.S. equals 100",
@@ -356,7 +378,7 @@ test("combines Cost of Living and Home Costs with the other map filters", async 
   await expect(page.getByRole("region", { name: "Lowest and highest Cost of Living RPP" }))
     .toContainText("107.2 RPP");
 
-  await layer.selectOption("home-costs");
+  await selectLayer(page, "home-costs");
   const homeLegend = page.getByLabel(
     "Home Costs national buying power percentile color scale, higher is better",
   );
@@ -390,14 +412,13 @@ test("keeps core layers interactive when a lazy map add-on fails and retries onl
   await page.goto("/");
   await expect(page.locator(".build-pill")).toContainText("interactive");
 
-  const layer = page.getByRole("combobox", { name: "Map layer" });
-  await layer.selectOption("cost-of-living");
+  await selectLayer(page, "cost-of-living");
   const recovery = page.getByRole("alert").filter({ hasText: "Cost of Living map data could not be loaded" });
   await expect(recovery).toBeVisible();
   expect(attempts).toBe(1);
   await expect(page.getByText("Scores could not be loaded")).toHaveCount(0);
 
-  await layer.selectOption("residential-hazard");
+  await selectLayer(page, "residential-hazard");
   await expect(page.locator(".build-pill")).toContainText("interactive");
   const map = page.getByRole("img", { name: /Focusable USA tract Residential Hazard Exposure map/ });
   const bounds = await map.boundingBox();
@@ -406,7 +427,7 @@ test("keeps core layers interactive when a lazy map add-on fails and retries onl
   await expect(page.getByRole("dialog", { name: "Tract detail" })).toBeVisible();
   await page.getByRole("button", { name: "Close tract detail" }).click();
 
-  await layer.selectOption("cost-of-living");
+  await selectLayer(page, "cost-of-living");
   await page.waitForTimeout(100);
   expect(attempts).toBe(1);
   await expect(recovery).toBeVisible();
@@ -432,7 +453,7 @@ test("recolors a panned map after a delayed lazy add-on arrives", async ({ page 
   });
   await page.goto("/");
   await expect(page.locator(".build-pill")).toContainText("interactive");
-  await page.getByRole("combobox", { name: "Map layer" }).selectOption("cost-of-living");
+  await selectLayer(page, "cost-of-living");
   await expect.poll(() => requests).toBe(1);
 
   const map = page.getByRole("img", { name: /Focusable USA tract/ });
@@ -559,7 +580,7 @@ test("surfaces and retries a failed add-on required only by a cross-layer filter
   await expect(recovery).toBeVisible();
   expect(attempts).toBe(1);
   await expect(page.getByText("Scores could not be loaded")).toHaveCount(0);
-  await expect(page.getByRole("combobox", { name: "Map layer" })).toHaveValue("residential-hazard");
+  await expect(layerButton(page)).toHaveAccessibleName("Map layer: Residential Hazard Exposure — HouseHunter / FEMA NRI");
 
   allowHome = true;
   await recovery.getByRole("button", { name: "Retry Home Costs" }).click();
@@ -589,7 +610,7 @@ test("stacks and independently retries simultaneous lazy add-on failures", async
     else await route.fulfill({ status: 503, json: { detail: "temporary Home failure" } });
   });
   await page.goto("/");
-  await page.getByRole("combobox", { name: "Map layer" }).selectOption("cost-of-living");
+  await selectLayer(page, "cost-of-living");
   const cost = page.getByRole("alert").filter({ hasText: "Cost of Living map data could not be loaded" });
   await expect(cost).toBeVisible();
   await page.getByRole("button", { name: /Filters/ }).click();
@@ -642,7 +663,7 @@ test("keeps ACS filtering usable when Home Costs is unavailable", async ({ page 
     },
   } }));
   await page.goto("/");
-  await page.getByRole("combobox", { name: "Map layer" }).selectOption("home-costs");
+  await selectLayer(page, "home-costs");
   await expect(page.getByLabel(
     "Home Costs national buying power percentile color scale, higher is better",
   )).toContainText("Unavailable in this snapshot");
@@ -683,6 +704,99 @@ test("uses explicit address confirmation and never calls a geocoder from the bro
   await expect(page.getByRole("dialog", { name: "Tract detail" })).toBeVisible();
   expect(external).toEqual([]);
   expect(await page.locator("[class*=marker]").count()).toBe(0);
+});
+
+test("keeps the layer menu anchored, bounded, and keyboard operable", async ({ page }) => {
+  await installRoutes(page);
+  await page.goto("/");
+  await expect(page.locator(".build-pill")).toContainText("interactive");
+
+  const trigger = layerButton(page);
+  await trigger.click();
+  const menu = page.getByRole("group", { name: "Map layers" });
+  await expect(menu).toBeVisible();
+  await expect(menu.getByRole("button")).toHaveCount(5);
+  const selected = layerOption(page, "residential-hazard");
+  await expect(selected).toHaveAttribute("aria-pressed", "true");
+  await expect(selected).toBeFocused();
+
+  const layout = await page.evaluate(() => {
+    const triggerBounds = document.querySelector(".layer-trigger")!.getBoundingClientRect();
+    const menuBounds = document.querySelector(".layer-options")!.getBoundingClientRect();
+    return {
+      triggerBottom: triggerBounds.bottom,
+      menuTop: menuBounds.top,
+      menuLeft: menuBounds.left,
+      menuRight: menuBounds.right,
+      menuBottom: menuBounds.bottom,
+      pageWidth: document.documentElement.scrollWidth,
+      viewportWidth: innerWidth,
+      viewportHeight: innerHeight,
+    };
+  });
+  expect(layout.menuTop).toBeGreaterThanOrEqual(layout.triggerBottom);
+  expect(layout.menuLeft).toBeGreaterThanOrEqual(0);
+  expect(layout.menuRight).toBeLessThanOrEqual(layout.viewportWidth);
+  expect(layout.menuBottom).toBeLessThanOrEqual(layout.viewportHeight);
+  expect(layout.pageWidth).toBe(layout.viewportWidth);
+  const accessibility = await new AxeBuilder({ page })
+    .include(".layer-options")
+    .withTags(["wcag2a", "wcag2aa", "wcag21aa", "wcag22aa"])
+    .analyze();
+  expect(accessibility.violations).toEqual([]);
+
+  await page.keyboard.press("ArrowDown");
+  await expect(layerOption(page, "community-conditions")).toBeFocused();
+  await page.keyboard.press("Space");
+  await expect(page).toHaveURL(/metric=community-conditions/);
+  await expect(trigger).toBeFocused();
+  await expect(menu).toHaveCount(0);
+
+  await trigger.click();
+  await expect(layerOption(page, "community-conditions")).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(menu).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+
+  await selectLayer(page, "home-costs");
+  await trigger.click();
+  await expect(layerOption(page, "home-costs")).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(menu).toHaveCount(0);
+  await expect(trigger).not.toBeFocused();
+
+  await trigger.click();
+  await expect(menu).toBeVisible();
+  await page.locator(".map-viewport").click({ position: { x: 2, y: 2 } });
+  await expect(menu).toHaveCount(0);
+  await expect(trigger).not.toBeFocused();
+
+  for (const width of [320, 360, 768, 1280, 1600]) {
+    await page.setViewportSize({ width, height: width <= 360 ? 700 : 800 });
+    await trigger.click();
+    await expect(menu).toBeVisible();
+    const bounds = await page.evaluate(() => {
+      const triggerBounds = document.querySelector(".layer-trigger")!.getBoundingClientRect();
+      const menuBounds = document.querySelector(".layer-options")!.getBoundingClientRect();
+      return {
+        triggerBottom: triggerBounds.bottom,
+        menuTop: menuBounds.top,
+        menuLeft: menuBounds.left,
+        menuRight: menuBounds.right,
+        menuBottom: menuBounds.bottom,
+        pageWidth: document.documentElement.scrollWidth,
+        viewportWidth: innerWidth,
+        viewportHeight: innerHeight,
+      };
+    });
+    expect(bounds.menuTop).toBeGreaterThanOrEqual(bounds.triggerBottom);
+    expect(bounds.menuLeft).toBeGreaterThanOrEqual(0);
+    expect(bounds.menuRight).toBeLessThanOrEqual(bounds.viewportWidth);
+    expect(bounds.menuBottom).toBeLessThanOrEqual(bounds.viewportHeight);
+    expect(bounds.pageWidth).toBe(bounds.viewportWidth);
+    await page.keyboard.press("Escape");
+    await expect(menu).toHaveCount(0);
+  }
 });
 
 test("is keyboard operable and never overflows the viewport", async ({ page }, testInfo) => {
@@ -1106,12 +1220,12 @@ test("cancels an obsolete metric paint when returning to a cached metric", async
   const canvas = page.locator(".map-presentation");
   await expect(canvas).toBeVisible();
 
-  await page.getByRole("combobox", { name: "Map layer" }).selectOption("mountain");
-  await page.getByRole("combobox", { name: "Map layer" }).selectOption("residential-hazard");
+  await selectLayer(page, "mountain");
+  await selectLayer(page, "residential-hazard");
   await expect(page.locator(".build-pill")).toContainText("interactive");
   await page.waitForTimeout(350);
 
-  await expect(page.getByRole("combobox", { name: "Map layer" })).toHaveValue("residential-hazard");
+  await expect(layerButton(page)).toHaveAccessibleName("Map layer: Residential Hazard Exposure — HouseHunter / FEMA NRI");
   await expect(page.getByLabel("Continuous Residential Hazard Exposure color scale, higher is worse")).toBeVisible();
   await expect(page.getByLabel(/Continuous Mountain Magnitude color scale/)).toHaveCount(0);
   expect(await page.evaluate(() => (window.__HOUSEHUNTER_MAP_PROFILE__ || [])
@@ -1130,7 +1244,7 @@ test("keeps narrow map actions, status, and controls fully usable", async ({ pag
   const more = page.getByRole("button", { name: "More" });
   await expect(more).toBeVisible();
   await expect(more).toHaveAttribute("aria-expanded", "false");
-  await page.getByRole("combobox", { name: "Map layer" }).selectOption("mountain");
+  await selectLayer(page, "mountain");
   const mountainLegend = page.getByLabel(
     "Stepped Mountain Magnitude color scale for U.S. tracts, higher means fewer equal-or-higher peers",
   );

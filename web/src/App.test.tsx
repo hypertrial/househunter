@@ -73,8 +73,16 @@ const layers = [
 const sources = [{ source: "home_market", version: "2026-08", release: "2026-08", cached: true, sha256: "fixture", row_count: 1, stale: false, attribution: "Realtor.com Research Data", usage_notice: "For personal local use only.", coverage_status: "complete", error: null }];
 
 function response(body: unknown) { return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } }); }
+function layerButton() {
+  return screen.getByRole("button", { name: /^Map layer:/ });
+}
 function selectLayer(value: string) {
-  fireEvent.change(screen.getByRole("combobox", { name: "Map layer" }), { target: { value } });
+  const layer = layers.find((item) => item.key === value);
+  if (!layer) throw new Error(`Unknown layer ${value}`);
+  fireEvent.click(layerButton());
+  fireEvent.click(within(screen.getByRole("group", { name: "Map layers" })).getByRole("button", {
+    name: `${layer.display_name} — ${layer.source}`,
+  }));
 }
 
 function mockFetch(
@@ -978,14 +986,39 @@ it("offers all five independent layers in the keyboard-accessible menu", async (
   vi.stubGlobal("fetch", mockFetch());
   render(<App />);
   await screen.findByText("HouseHunter");
-  const menu = screen.getByRole("combobox", { name: "Map layer" });
-  expect(within(menu).getAllByRole("option").map((option) => option.textContent)).toEqual([
+  const trigger = layerButton();
+  expect(trigger).toHaveAttribute("aria-expanded", "false");
+  expect(screen.queryByRole("combobox", { name: "Map layer" })).not.toBeInTheDocument();
+  fireEvent.click(trigger);
+  const menu = screen.getByRole("group", { name: "Map layers" });
+  expect(trigger).toHaveAttribute("aria-expanded", "true");
+  expect(within(menu).getAllByRole("button").map((option) => option.getAttribute("aria-label"))).toEqual([
     "Residential Hazard Exposure — HouseHunter / FEMA NRI",
     "Community Conditions — CHR&R",
     "Mountain Magnitude — HouseHunter",
     "Cost of Living — BEA RPP",
     "Home Costs — Realtor.com / ACS",
   ]);
+  const selected = within(menu).getByRole("button", { name: "Residential Hazard Exposure — HouseHunter / FEMA NRI" });
+  expect(selected).toHaveAttribute("aria-pressed", "true");
+  await waitFor(() => expect(selected).toHaveFocus());
+  fireEvent.click(selected);
+  expect(screen.queryByRole("group", { name: "Map layers" })).not.toBeInTheDocument();
+  expect(trigger).toHaveAccessibleName("Map layer: Residential Hazard Exposure — HouseHunter / FEMA NRI");
+  fireEvent.click(trigger);
+  const reopenedMenu = screen.getByRole("group", { name: "Map layers" });
+  const reopened = within(reopenedMenu)
+    .getByRole("button", { name: "Residential Hazard Exposure — HouseHunter / FEMA NRI" });
+  await waitFor(() => expect(reopened).toHaveFocus());
+  fireEvent.keyDown(reopened, { key: "ArrowDown" });
+  expect(within(reopenedMenu).getByRole("button", { name: "Community Conditions — CHR&R" })).toHaveFocus();
+  fireEvent.keyDown(window, { key: "Escape" });
+  await waitFor(() => expect(screen.queryByRole("group", { name: "Map layers" })).not.toBeInTheDocument());
+  await waitFor(() => expect(trigger).toHaveFocus());
+  fireEvent.click(trigger);
+  fireEvent.click(screen.getByRole("button", { name: "Search" }));
+  expect(screen.queryByRole("group", { name: "Map layers" })).not.toBeInTheDocument();
+  expect(screen.getByRole("region", { name: "Search" })).toBeVisible();
 });
 
 it("applies every cross-layer filter atomically and persists it in the URL", async () => {
@@ -1124,7 +1157,7 @@ it("keeps an unavailable Home Costs layer selectable and explains the local impo
   const legend = await screen.findByLabelText(
     "Home Costs national buying power percentile color scale, higher is better",
   );
-  expect(screen.getByRole("combobox", { name: "Map layer" })).toHaveValue("home-costs");
+  expect(layerButton()).toHaveAccessibleName("Map layer: Home Costs — Realtor.com / ACS");
   expect(legend).toHaveTextContent("Unavailable in this snapshot");
   fireEvent.click(screen.getByRole("button", { name: "Information" }));
   expect(screen.getByRole("region", { name: "About this map" })).toHaveTextContent(
@@ -1222,6 +1255,15 @@ it("scopes show-unavailable to the active layer and keeps cross-layer filters", 
   fireEvent.click(screen.getByRole("button", { name: "Filters" }));
   expect(screen.getByRole("checkbox", { name: "Show Mountain-unavailable geographies" }))
     .not.toBeChecked();
+  fireEvent.click(screen.getByRole("checkbox", { name: "Show Mountain-unavailable geographies" }));
+  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+  fireEvent.click(layerButton());
+  fireEvent.click(within(screen.getByRole("group", { name: "Map layers" })).getByRole("button", {
+    name: "Mountain Magnitude — HouseHunter",
+  }));
+  expect(screen.getByRole("button", { name: "Filters · On" })).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "Filters · On" }));
+  expect(screen.getByRole("checkbox", { name: "Show Mountain-unavailable geographies" })).toBeChecked();
 });
 
 it("shows fresh loading feedback and does not refetch when closing extremes", async () => {
@@ -1255,7 +1297,7 @@ it("switches to Community Conditions and browses county groups without changing 
   vi.stubGlobal("fetch", mockFetch());
   render(<App />);
   await screen.findByText("HouseHunter");
-  expect(screen.getByRole("combobox", { name: "Map layer" })).toHaveValue("residential-hazard");
+  expect(layerButton()).toHaveAccessibleName("Map layer: Residential Hazard Exposure — HouseHunter / FEMA NRI");
   selectLayer("community-conditions");
   await waitFor(() => expect(window.location.hash).toContain("metric=community-conditions"));
   const legend = await screen.findByLabelText(

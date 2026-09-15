@@ -49,9 +49,21 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .level-toggle { display: inline-flex; padding: 3px; border-radius: 12px; background: #0d1519; }
 .level-toggle button { min-height: 40px; padding: 0 13px; border: 0; border-radius: 9px; color: #aebdb8; background: transparent; cursor: pointer; font-weight: 750; font-size: 12px; }
 .level-toggle button[aria-pressed="true"] { color: #101816; background: #dfe8df; }
-.layer-menu { min-width: 260px; display: grid; gap: 2px; margin: 0; padding: 3px 8px 5px; border-radius: 12px; background: #0d1519; }
-.layer-menu span { color: #849692; font-size: 8px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
-.layer-menu select { width: 100%; min-height: 27px; padding: 0 24px 0 0; overflow: hidden; border: 0; color: #e8efec; background: #0d1519; cursor: pointer; font-size: 12px; font-weight: 750; text-overflow: ellipsis; }
+.layer-menu { position: relative; width: 402px; max-width: 100%; min-width: 260px; display: grid; gap: 2px; margin: 0; padding: 3px 8px 5px; border-radius: 12px; background: #0d1519; }
+.layer-label { color: #849692; font-size: 8px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+.layer-trigger { width: 100%; min-width: 0; min-height: 27px; display: flex; align-items: center; gap: 10px; padding: 0; overflow: hidden; border: 0; color: #e8efec; background: #0d1519; cursor: pointer; font-size: 12px; font-weight: 750; text-align: left; }
+.layer-value { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.layer-chevron { flex: 0 0 auto; color: #9baba6; font-size: 15px; line-height: 1; transition: transform .12s ease; }
+.layer-trigger[aria-expanded="true"] .layer-chevron { transform: rotate(180deg); }
+.layer-options { position: absolute; z-index: 3; top: calc(100% + 8px); left: 0; width: 100%; max-height: min(320px, calc(100dvh - 135px)); display: grid; gap: 3px; overflow-y: auto; overscroll-behavior: contain; padding: 6px; border: 1px solid rgba(225, 235, 232, .18); border-radius: 13px; background: #111c21; box-shadow: 0 18px 50px rgba(0, 0, 0, .44); }
+.layer-option { position: relative; width: 100%; min-height: 48px; display: grid; gap: 3px; padding: 8px 34px 8px 10px; border: 0; border-radius: 9px; color: #e8efec; background: transparent; cursor: pointer; text-align: left; }
+.layer-option:hover { background: rgba(218, 230, 226, .08); }
+.layer-option:focus-visible { outline-offset: -2px; }
+.layer-option[aria-pressed="true"] { color: #101816; background: #dfe8df; }
+.layer-option[aria-pressed="true"]::after { content: "✓"; position: absolute; top: 50%; right: 12px; transform: translateY(-50%); font-size: 14px; font-weight: 850; }
+.layer-option strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.layer-option small { overflow: hidden; color: #91a29d; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
+.layer-option[aria-pressed="true"] small { color: #52605c; }
 .dock-actions { flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px; }
 .dock-actions button { min-height: 42px; padding: 0 11px; border: 0; border-radius: 10px; color: #dce5e2; background: transparent; cursor: pointer; font-weight: 650; font-size: 12px; white-space: nowrap; }
 .dock-actions button:hover, .dock-actions button[aria-expanded="true"], .dock-actions button.active { background: rgba(218, 230, 226, .10); }

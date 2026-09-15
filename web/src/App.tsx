@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { FormEvent, type KeyboardEvent as ReactKeyboardEvent, useCallback, useEffect, useRef, useState } from "react";
 import RiskMap, { type FocusTarget, type MapPreview } from "./RiskMap";
 import { METRIC_UI, metricColorScale, mountainColor, readHash, scoreBand, scoreColor, STATE_ABBREVIATIONS, STATE_FIPS, type CameraState, type ScoreBand } from "./map";
 import { requestedMapAddons } from "./mapScores";
@@ -266,7 +266,7 @@ function DetailDrawer({ detail, loading, error, level, metric, sources, onClose,
   </aside>;
 }
 
-type Overlay = "filters" | "extremes" | "exports" | "info" | "more" | "search" | null;
+type Overlay = "filters" | "extremes" | "exports" | "info" | "layers" | "more" | "search" | null;
 type PlacePage = { items: PlaceSummary[]; total: number };
 type DetailTarget = { level: Geography; id: string };
 
@@ -348,6 +348,7 @@ function Workspace({ meta }: { meta: Meta }) {
   const firstSemantic = useRef(true);
   const scopeHashNormalized = useRef(false);
   const restoringHistory = useRef(false);
+  const layerMenu = useRef<HTMLDivElement | null>(null);
   const overlayTrigger = useRef<HTMLElement | null>(null);
   const overlayEntry = useRef<HTMLElement | null>(null);
   const restoreOverlayFocus = useRef(true);
@@ -417,7 +418,9 @@ function Workspace({ meta }: { meta: Meta }) {
   }
 
   useEffect(() => {
-    if (previousOverlay.current === "more" && (overlay === "exports" || overlay === "info")) {
+    if (overlay === "layers") {
+      window.requestAnimationFrame(() => overlayEntry.current?.focus());
+    } else if (previousOverlay.current === "more" && (overlay === "exports" || overlay === "info")) {
       window.requestAnimationFrame(() => overlayEntry.current?.focus());
     } else if (previousOverlay.current && !overlay && restoreOverlayFocus.current) {
       window.requestAnimationFrame(() => overlayTrigger.current?.focus());
@@ -425,6 +428,34 @@ function Workspace({ meta }: { meta: Meta }) {
     previousOverlay.current = overlay;
     restoreOverlayFocus.current = true;
   }, [overlay]);
+
+  useEffect(() => {
+    if (overlay !== "layers") return;
+    const dismiss = (event: PointerEvent) => {
+      if (event.target instanceof Node && layerMenu.current?.contains(event.target)) return;
+      restoreOverlayFocus.current = false;
+      setOverlay(null);
+    };
+    window.addEventListener("pointerdown", dismiss);
+    return () => window.removeEventListener("pointerdown", dismiss);
+  }, [overlay]);
+
+  function dismissLayerMenuOnBlur() {
+    if (overlay !== "layers") return;
+    window.requestAnimationFrame(() => {
+      if (layerMenu.current?.contains(document.activeElement)) return;
+      restoreOverlayFocus.current = false;
+      setOverlay((current) => current === "layers" ? null : current);
+    });
+  }
+
+  function moveLayerFocus(event: ReactKeyboardEvent<HTMLButtonElement>, index: number) {
+    const offset = event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
+    if (!offset) return;
+    event.preventDefault();
+    const options = layerMenu.current?.querySelectorAll<HTMLButtonElement>(".layer-option");
+    options?.[(index + offset + METRICS.length) % METRICS.length]?.focus();
+  }
 
   const closeDetail = useCallback(() => {
     setSelected("");
@@ -572,7 +603,10 @@ function Workspace({ meta }: { meta: Meta }) {
   }
   function choose(place: PlaceSummary) { detailTrigger.current = overlayTrigger.current; restoreOverlayFocus.current = false; const targetLevel = metric === "community-conditions" ? "county" : level; setSelected(targetLevel === level ? place.place_id : ""); setDetailTarget({ level: targetLevel, id: place.place_id }); setFocusTarget(targetLevel === level ? { kind: "place", id: place.place_id, nonce: Date.now() } : null); setOverlay(null); setQuery(""); }
   function switchLevel(next: Geography) { invalidateAddressLookup(); setLevel(next); setFilter("county", ""); setDraftFilter("county", ""); setSelected(""); setDetailTarget(null); setDetail(null); setFocusTarget(null); setOverlay(null); setPreview(null); setScoreError(""); setAddonErrors({}); setAddonRetry(null); setInteractiveMetric(null); }
-  function switchMetric(next: Metric) { setMetric(next); setFilter("showUnavailable", false); setDraftFilter("showUnavailable", false); setPreview(null); setOverlay(null); }
+  function switchMetric(next: Metric) {
+    if (next === metric) { setOverlay(null); return; }
+    setMetric(next); setFilter("showUnavailable", false); setDraftFilter("showUnavailable", false); setPreview(null); setOverlay(null);
+  }
 
   async function browseCommunity(group: number, offset = 0) {
     const generation = ++extremesGeneration.current;
@@ -693,7 +727,19 @@ function Workspace({ meta }: { meta: Meta }) {
             : preview.score.home_sqft_for_1m === null ? "Home Costs unavailable" : `${number.format(preview.score.home_sqft_for_1m)} sq ft / $1M · ${preview.score.home_buying_power_percentile?.toFixed(1) ?? "–"}th pct`;
   return <main className="map-shell">
     <RiskMap manifestUrl={meta.map_assets.manifest_url} scoreUrl={`/api/v3/map/scores/core?level=${level}`} expectedBuildId={meta.build?.build_id || ""} level={level} metric={metric} displayMetric={renderedMetric} busy={mapUpdating} selected={selected} filters={filters} neutralOnly={Boolean(scoreError)} retryGeneration={scoreReloadNonce} addonRetry={addonRetry} focusTarget={focusTarget} cameraTarget={cameraTarget} initialCamera={initial.camera} onSelect={selectFromMap} onPreview={setPreview} onCamera={cameraChanged} onStatus={setStatus} onScoresReady={mapScoresReady} onScoreError={mapScoreFailed} onAddonError={mapAddonFailed} onAddonReady={mapAddonReady} onVisibleCommit={mapVisibleCommit} onInteractiveCommit={mapInteractiveCommit} />
-    <header className={`top-dock${overlay ? " overlay-open" : ""}`}><div className="brand"><strong>HouseHunter</strong><span>{METRIC_UI[metric].source}</span></div><div className="level-toggle" aria-label="Geography level"><button aria-pressed={level === "tract"} onClick={() => switchLevel("tract")}>Tracts</button><button aria-pressed={level === "county"} onClick={() => switchLevel("county")}>Counties</button></div><label className="layer-menu"><span>Layer</span><select aria-label="Map layer" value={metric} onChange={(event) => switchMetric(event.target.value as Metric)}>{METRICS.map((item) => <option key={item} value={item}>{METRIC_UI[item].name} — {METRIC_UI[item].source}</option>)}</select></label><div className="dock-actions"><button aria-expanded={overlay === "search"} aria-controls="search-panel" onClick={(event) => toggleOverlay("search", event.currentTarget)}>Search</button><button aria-expanded={overlay === "extremes"} aria-controls="extremes-panel" onClick={(event) => void openExtremes(event.currentTarget)}>{extremeButtonLabel}</button><button aria-expanded={overlay === "filters"} aria-controls="filters-panel" className={activeFilter ? "active" : ""} onClick={(event) => toggleOverlay("filters", event.currentTarget)}>Filters{activeFilter ? " · On" : ""}</button><button className="desktop-dock-action" aria-expanded={overlay === "exports"} aria-controls="exports-panel" onClick={(event) => toggleOverlay("exports", event.currentTarget)}>Exports</button><button className="desktop-dock-action" aria-expanded={overlay === "info"} aria-controls="info-panel" aria-label="Information" onClick={(event) => toggleOverlay("info", event.currentTarget)}>ⓘ</button><button className={`mobile-more${moreOpen ? " active" : ""}`} aria-expanded={moreOpen} aria-controls={moreControls} onClick={(event) => { if (moreOpen) { overlayTrigger.current = event.currentTarget; setOverlay(null); } else toggleOverlay("more", event.currentTarget); }}>More</button></div><div className={`build-pill ${scoreError ? "failed" : ""}`} title={meta.build?.build_id}>{scoreError ? "Score error" : status}</div></header>
+    <header className={`top-dock${overlay ? " overlay-open" : ""}`}>
+      <div className="brand"><strong>HouseHunter</strong><span>{METRIC_UI[metric].source}</span></div>
+      <div className="level-toggle" aria-label="Geography level"><button aria-pressed={level === "tract"} onClick={() => switchLevel("tract")}>Tracts</button><button aria-pressed={level === "county"} onClick={() => switchLevel("county")}>Counties</button></div>
+      <div className="layer-menu" ref={layerMenu} onBlur={dismissLayerMenuOnBlur}>
+        <span className="layer-label">Layer</span>
+        <button type="button" className="layer-trigger" aria-label={`Map layer: ${METRIC_UI[metric].name} — ${METRIC_UI[metric].source}`} aria-expanded={overlay === "layers"} aria-controls="layer-options" onClick={(event) => toggleOverlay("layers", event.currentTarget)}>
+          <span className="layer-value">{METRIC_UI[metric].name} — {METRIC_UI[metric].source}</span><span className="layer-chevron" aria-hidden="true">⌄</span>
+        </button>
+        {overlay === "layers" && <div id="layer-options" className="layer-options" role="group" aria-label="Map layers">{METRICS.map((item, index) => <button type="button" className="layer-option" key={item} aria-label={`${METRIC_UI[item].name} — ${METRIC_UI[item].source}`} aria-pressed={item === metric} ref={item === metric ? (node) => { overlayEntry.current = node; } : undefined} onKeyDown={(event) => moveLayerFocus(event, index)} onClick={() => switchMetric(item)}><strong>{METRIC_UI[item].name}</strong><small>{METRIC_UI[item].source}</small></button>)}</div>}
+      </div>
+      <div className="dock-actions"><button aria-expanded={overlay === "search"} aria-controls="search-panel" onClick={(event) => toggleOverlay("search", event.currentTarget)}>Search</button><button aria-expanded={overlay === "extremes"} aria-controls="extremes-panel" onClick={(event) => void openExtremes(event.currentTarget)}>{extremeButtonLabel}</button><button aria-expanded={overlay === "filters"} aria-controls="filters-panel" className={activeFilter ? "active" : ""} onClick={(event) => toggleOverlay("filters", event.currentTarget)}>Filters{activeFilter ? " · On" : ""}</button><button className="desktop-dock-action" aria-expanded={overlay === "exports"} aria-controls="exports-panel" onClick={(event) => toggleOverlay("exports", event.currentTarget)}>Exports</button><button className="desktop-dock-action" aria-expanded={overlay === "info"} aria-controls="info-panel" aria-label="Information" onClick={(event) => toggleOverlay("info", event.currentTarget)}>ⓘ</button><button className={`mobile-more${moreOpen ? " active" : ""}`} aria-expanded={moreOpen} aria-controls={moreControls} onClick={(event) => { if (moreOpen) { overlayTrigger.current = event.currentTarget; setOverlay(null); } else toggleOverlay("more", event.currentTarget); }}>More</button></div>
+      <div className={`build-pill ${scoreError ? "failed" : ""}`} title={meta.build?.build_id}>{scoreError ? "Score error" : status}</div>
+    </header>
     {overlay === "search" && <section id="search-panel" className="floating-panel search-panel" aria-label="Search"><form onSubmit={lookupAddress} aria-busy={searching}><label>Street address<input autoFocus autoComplete="street-address" autoCapitalize="words" enterKeyHint="search" value={query} onChange={(event) => { invalidateAddressLookup(); setSearchError(""); setQuery(event.target.value); }} placeholder="Street, city, state, ZIP" /></label><p className="privacy-note">Find tract contacts the US Census geocoder through this loopback server and may send it to OpenStreetMap only after a valid Census no-match. Addresses are not written to disk. Do not submit confidential addresses. The result shows tract context, never a property marker or property-specific score.</p><button className="primary" disabled={searching || !query.trim()}>{searching ? "Looking…" : "Find tract"}</button>{confirmation && <div className="confirm-card" role="region" aria-label="Approximate street match"><strong>Confirm approximate street match</strong><p>{confirmation.message}</p>{confirmation.candidates.map((candidate) => <button type="button" className="secondary" key={candidate.candidate_id} onClick={() => void confirmAddress(candidate.candidate_id)}>Use approximate street location: {candidate.matched_address}</button>)}<small>{confirmation.attribution}</small></div>}</form>{searchError && <p role="alert" className="error">{searchError}</p>}</section>}
     {overlay === "filters" && <section id="filters-panel" className="floating-panel filters-panel" aria-label="Map filters"><h2>Filters</h2><label>State<select value={draftState} disabled={Boolean(builtState)} onChange={(event) => setDraftFilters((current) => ({ ...current, state: event.target.value, county: "" }))}><option value="">All states & territories</option>{STATE_ABBREVIATIONS.map((item) => <option key={item}>{item}</option>)}</select></label>{level === "tract" && <label>County<select value={draftCounty} disabled={!draftState} onChange={(event) => setDraftFilter("county", event.target.value)}><option value="">All counties</option>{countyOptions.map((item) => <option value={item.place_id} key={item.place_id}>{item.name}</option>)}</select></label>}<label>Minimum Mountain Magnitude<input type="number" min="0" step="0.01" value={draftMountainMagnitudeMin ?? ""} onChange={(event) => { const value = Number(event.target.value); setDraftFilter("mountainMagnitudeMin", event.target.value === "" ? null : Number.isFinite(value) && value >= 0 ? value : null); }} placeholder="Any" /></label><label>Maximum Community Conditions group<input type="number" min="1" max="10" step="1" value={draftCommunityConditionsGroupMax ?? ""} onChange={(event) => { const value = Number(event.target.value); setDraftFilter("communityConditionsGroupMax", event.target.value === "" ? null : Number.isInteger(value) && value >= 1 && value <= 10 ? value : null); }} placeholder="Any" /></label><label>Maximum Cost of Living RPP<input type="number" min="0" step="0.1" value={draftCostOfLivingIndexMax ?? ""} onChange={(event) => { const value = Number(event.target.value); setDraftFilter("costOfLivingIndexMax", event.target.value === "" ? null : Number.isFinite(value) && value >= 0 ? value : null); }} placeholder="Any" /></label><label>Minimum square feet for $1M<input type="number" min="0" step="1" value={draftHomeSqftFor1mMin ?? ""} onChange={(event) => { const value = Number(event.target.value); setDraftFilter("homeSqftFor1mMin", event.target.value === "" ? null : Number.isFinite(value) && value >= 0 ? value : null); }} placeholder="Any" /></label><label>Minimum built 2000+ share (%)<input type="number" min="0" max="100" step="1" value={draftHousingBuilt2000PlusPctMin ?? ""} onChange={(event) => { const value = Number(event.target.value); setDraftFilter("housingBuilt2000PlusPctMin", event.target.value === "" ? null : Number.isFinite(value) && value >= 0 && value <= 100 ? value : null); }} placeholder="Any" /></label><label className="check"><input type="checkbox" checked={draftUnranked} onChange={(event) => setDraftFilter("showUnavailable", event.target.checked)} />Show {unavailableLabel} geographies</label><p className="filter-note">Explicit metric thresholds always exclude unavailable values, even when “show unavailable” is on.</p><div className="panel-buttons"><button className="primary" onClick={applyFilters}>Apply</button><button className="secondary" onClick={clearFilters}>Clear</button></div></section>}
     {overlay === "extremes" && <section id="extremes-panel" className="floating-panel extremes-panel" aria-label={extremesLabel} aria-busy={extremesLoading}><h2>Explore the range</h2>{browseGroup !== null ? <><button className="secondary" onClick={closeCommunityBrowse}>← Back to groups</button><ResultGroup title={`Group ${browseGroup} · ${number.format(browseTotal)} counties`} items={browseItems} metric={metric} onChoose={choose} /><div className="pager"><button className="secondary" disabled={browseOffset === 0} onClick={() => void browseCommunity(browseGroup, Math.max(0, browseOffset - 50))}>Previous</button><span>{number.format(browseOffset + 1)}–{number.format(Math.min(browseOffset + browseItems.length, browseTotal))} of {number.format(browseTotal)}</span><button className="secondary" disabled={browseOffset + 50 >= browseTotal} onClick={() => void browseCommunity(browseGroup, browseOffset + 50)}>Next</button></div></> : extremesLoading ? <p className="loading-copy" role="status">{metric === "community-conditions" ? "Loading best and worst groups…" : `Loading ${extremesLabel.toLowerCase()}…`}</p> : noCommunityGroups ? <p>No grouped counties in this scope.</p> : <div><ResultGroup title={metric === "community-conditions" ? `Best present · Group ${lowestGroup} · ${number.format(lowestTotal)} counties` : metric === "home-costs" ? highTitle : lowTitle} items={metric === "home-costs" ? highest : lowest} metric={metric} onChoose={choose} onBrowse={metric === "community-conditions" && lowestGroup !== null ? () => void browseCommunity(lowestGroup) : undefined} /><ResultGroup title={metric === "community-conditions" ? `Worst present · Group ${highestGroup} · ${number.format(highestTotal)} counties` : metric === "home-costs" ? lowTitle : highTitle} items={metric === "home-costs" ? lowest : highest} metric={metric} onChoose={choose} onBrowse={metric === "community-conditions" && highestGroup !== null ? () => void browseCommunity(highestGroup) : undefined} /></div>}{searchError && <p role="alert" className="error">{searchError}</p>}</section>}
