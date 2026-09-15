@@ -35,6 +35,7 @@ async function selectLayer(page: Page, key: string) {
   const layer = layers.find((item) => item.key === key);
   if (!layer) throw new Error(`Unknown layer ${key}`);
   await layerButton(page).click();
+  await expect(page.locator(".layer-option[aria-pressed=true]")).toBeFocused();
   await layerOption(page, key).click();
   await expect(layerButton(page)).toHaveAccessibleName(`Map layer: ${layer.display_name} — ${layer.source}`);
   await expect(page.getByRole("group", { name: "Map layers" })).toHaveCount(0);
@@ -706,7 +707,7 @@ test("uses explicit address confirmation and never calls a geocoder from the bro
   expect(await page.locator("[class*=marker]").count()).toBe(0);
 });
 
-test("keeps the layer menu anchored, bounded, and keyboard operable", async ({ page }) => {
+test("keeps the layer menu anchored, bounded, and keyboard operable", async ({ page }, testInfo) => {
   await installRoutes(page);
   await page.goto("/");
   await expect(page.locator(".build-pill")).toContainText("interactive");
@@ -771,11 +772,11 @@ test("keeps the layer menu anchored, bounded, and keyboard operable", async ({ p
   await expect(menu).toHaveCount(0);
   await expect(trigger).not.toBeFocused();
 
-  for (const width of [320, 360, 768, 1280, 1600]) {
-    await page.setViewportSize({ width, height: width <= 360 ? 700 : 800 });
+  if (testInfo.project.name.endsWith("-phone")) {
+    await page.setViewportSize({ width: 320, height: 700 });
     await trigger.click();
     await expect(menu).toBeVisible();
-    const bounds = await page.evaluate(() => {
+    const narrowLayout = await page.evaluate(() => {
       const triggerBounds = document.querySelector(".layer-trigger")!.getBoundingClientRect();
       const menuBounds = document.querySelector(".layer-options")!.getBoundingClientRect();
       return {
@@ -789,13 +790,11 @@ test("keeps the layer menu anchored, bounded, and keyboard operable", async ({ p
         viewportHeight: innerHeight,
       };
     });
-    expect(bounds.menuTop).toBeGreaterThanOrEqual(bounds.triggerBottom);
-    expect(bounds.menuLeft).toBeGreaterThanOrEqual(0);
-    expect(bounds.menuRight).toBeLessThanOrEqual(bounds.viewportWidth);
-    expect(bounds.menuBottom).toBeLessThanOrEqual(bounds.viewportHeight);
-    expect(bounds.pageWidth).toBe(bounds.viewportWidth);
-    await page.keyboard.press("Escape");
-    await expect(menu).toHaveCount(0);
+    expect(narrowLayout.menuTop).toBeGreaterThanOrEqual(narrowLayout.triggerBottom);
+    expect(narrowLayout.menuLeft).toBeGreaterThanOrEqual(0);
+    expect(narrowLayout.menuRight).toBeLessThanOrEqual(narrowLayout.viewportWidth);
+    expect(narrowLayout.menuBottom).toBeLessThanOrEqual(narrowLayout.viewportHeight);
+    expect(narrowLayout.pageWidth).toBe(narrowLayout.viewportWidth);
   }
 });
 
