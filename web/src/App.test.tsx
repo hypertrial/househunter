@@ -1,8 +1,8 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import App, { communityLabel, mapFocusTarget, mapTooltipClass, mountainLabel, mountainRarityLabel, scoreBand, scoreLabel, scorePillLabel, sortedHazardPercentiles, STATE_ABBREVIATIONS } from "./App";
+import App, { communityLabel, mapFocusTarget, mapTooltipClass, mountainLabel, mountainRarityLabel, scoreBand, scoreLabel, scorePillLabel, sensitivityLabel, sortedHazardPercentiles, STATE_ABBREVIATIONS } from "./App";
 import RiskMap from "./RiskMap";
-import { cameraFromTransform, COMMUNITY_COLOR_SCALE, COMMUNITY_GROUP_COLORS, communityGroupColor, costOfLivingColor, COUNTY_MOUNTAIN_COLOR_SCALE, FEMA_COLOR_SCALE, homeBuyingPowerColor, MAP_COLORS, METRIC_COLOR_SCALES, metricColor, metricColorScale, MOUNTAIN_BAND_COLORS, MOUNTAIN_COLOR_SCALE, MOUNTAIN_COLORS, mountainColor, readHash, relativeTransform, scoreColor, transformFromCamera } from "./map";
+import { cameraFromTransform, COMMUNITY_COLOR_SCALE, COMMUNITY_GROUP_COLORS, communityGroupColor, costOfLivingColor, COUNTY_MOUNTAIN_COLOR_SCALE, HAZARD_COLOR_SCALE, homeBuyingPowerColor, MAP_COLORS, METRIC_COLOR_SCALES, metricColor, metricColorScale, MOUNTAIN_BAND_COLORS, MOUNTAIN_COLOR_SCALE, MOUNTAIN_COLORS, mountainColor, readHash, relativeTransform, scoreColor, transformFromCamera } from "./map";
 import type { HazardPercentile, MapFilters, MapScore, PlaceSummary } from "./types";
 
 const mapFilters: MapFilters = {
@@ -13,7 +13,11 @@ const mapFilters: MapFilters = {
 
 const tract: PlaceSummary = {
   place_id: "08013012101", name: "08013012101", state: "CO", place_type: "tract",
-  population_2020: 0, housing_units_2020: 0, risk_score: 21.25, coverage_status: "complete",
+  population_2020: 0, housing_units_2020: 0, res_hazard_npctl: 21.25,
+  res_hazard_spread: 12.5, res_hazard_spectral: 68, res_hazard_tail: 72,
+  res_hazard_power4: 65, property_loss_npctl: 44.5,
+  res_hazard_data_quality: "partial", res_hazard_available_count: 16,
+  res_hazard_coverage_ratio: 16 / 17, alr_npctl: 35.2, alr_valb: 0.00125,
   fema_vintage: "December 2025", census_vintage: "n/a", county_fips: "08013", county_name: "Boulder",
   community_conditions_group: 2, community_conditions_geography: "county", chrr_release_year: 2025,
   mountain_magnitude: 2.3213, mountain_magnitude_version: "mountain_magnitude_v2", mountain_pipeline_version: "mountain_pipeline_v1",
@@ -40,8 +44,11 @@ const tract: PlaceSummary = {
   housing_median_year_built: 1988, housing_stock_release_year: 2024,
   housing_stock_coverage_status: "complete", housing_stock_attribution: "ACS 2024",
 };
-const county: PlaceSummary = { ...tract, place_id: "08013", name: "Boulder", place_type: "county", risk_score: 18.5 };
-const hazards = [{ code: "WFIR", label: "Wildfire", percentile: 80.5 }, { code: "TSUN", label: "Tsunami", percentile: null }];
+const county: PlaceSummary = { ...tract, place_id: "08013", name: "Boulder", place_type: "county", res_hazard_npctl: 18.5 };
+const hazards: HazardPercentile[] = [
+  { code: "WFIR", label: "Wildfire", percentile: 80.5, raw_alrb: 0.003, availability: "valid", fema_eal_rating: "Relatively High" },
+  { code: "TSUN", label: "Tsunami", percentile: 0, raw_alrb: null, availability: "not_applicable", fema_eal_rating: "Not Applicable" },
+];
 const topology = (id: string, state = "CO", translate = [-106, 38]) => ({
   type: "Topology", transform: { scale: [0.01, 0.01], translate },
   objects: { geography: { type: "GeometryCollection", geometries: [{ type: "Polygon", id, properties: { place_id: id, state, county_fips: "08013", name: id }, arcs: [[0]] }] } },
@@ -57,7 +64,7 @@ const manifest = {
   ],
 };
 const layers = [
-  { key: "risk", display_name: "Natural Disaster Risk", source: "FEMA NRI", direction: "lower", availability: "available", vintage: "December 2025", geography: "tract and county", attribution: "FEMA NRI", notice: "Not property-level risk." },
+  { key: "residential-hazard", display_name: "Residential Hazard Exposure", source: "HouseHunter / FEMA NRI", direction: "higher", availability: "available", vintage: "December 2025", geography: "tract and county", attribution: "FEMA NRI", notice: "Not property-level risk." },
   { key: "community-conditions", display_name: "Community Conditions", source: "CHR&R", direction: "lower", availability: "available", vintage: "2025", geography: "county; inherited by tracts", attribution: "CHR&R", notice: "Groups are not percentiles." },
   { key: "mountain", display_name: "Mountain Magnitude", source: "HouseHunter", direction: "higher", availability: "available", vintage: "fixture", geography: "tract and county", attribution: "HouseHunter", notice: "Separate peer groups." },
   { key: "cost-of-living", display_name: "Cost of Living", source: "BEA RPP", direction: "lower", availability: "available", vintage: "2024", geography: "metropolitan or U.S. nonmetropolitan; inherited by tracts", attribution: "U.S. Bureau of Economic Analysis", notice: "U.S. = 100." },
@@ -79,7 +86,7 @@ function mockFetch(
 ) {
   return vi.fn(async (input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://127.0.0.1");
-    if (url.pathname === "/api/v2/meta") return response({ app_version: "2.0.0", mutation_token: "token", reference_assets_ready: true, reference_assets_error: null, map_assets: { ready: true, error: null, schema_version: 1, release: "v1.20", manifest_url: "/map-assets/manifest.json" }, layers: homeAvailable ? layers : layers.map((layer) => layer.key === "home-costs" ? { ...layer, availability: "unavailable", vintage: "unavailable", notice: "Import an approved Realtor.com county file." } : layer), build: build ? { build_id: "fixture", place_count: 1, ranked_place_count: 1, county_count: 1, ranked_county_count: 1, source_vintages: { fema: "December 2025" }, sources: sources.map((source) => ({ ...source, stale: homeStale })), scope: buildScope } : null });
+    if (url.pathname === "/api/v3/meta") return response({ app_version: "3.0.0", mutation_token: "token", reference_assets_ready: true, reference_assets_error: null, map_assets: { ready: true, error: null, schema_version: 1, release: "v1.20", manifest_url: "/map-assets/manifest.json" }, layers: homeAvailable ? layers : layers.map((layer) => layer.key === "home-costs" ? { ...layer, availability: "unavailable", vintage: "unavailable", notice: "Import an approved Realtor.com county file." } : layer), build: build ? { build_id: "fixture", place_count: 1, ranked_place_count: 1, county_count: 1, ranked_county_count: 1, source_vintages: { fema: "December 2025" }, sources: sources.map((source) => ({ ...source, stale: homeStale })), scope: buildScope } : null });
     if (url.pathname === "/map-assets/manifest.json") return response(manifest);
     if (url.pathname.includes("states.hash")) {
       const state = buildScope.state || "CO";
@@ -87,10 +94,10 @@ function mockFetch(
     }
     if (url.pathname.includes("tracts.hash") || url.pathname.includes("tracts-co.hash")) return response(topology(tract.place_id));
     if (url.pathname.includes("counties.hash")) return response(topology(county.place_id));
-    if (url.pathname === "/api/v2/map/scores" || url.pathname === "/api/v2/map/scores/core") return response({ schema_version: 4, build_id: "fixture", level: url.searchParams.get("level"), scope: buildScope, columns: { place_id: [url.searchParams.get("level") === "county" ? county.place_id : tract.place_id], risk_score: [url.searchParams.get("level") === "county" ? county.risk_score : tract.risk_score], community_conditions_group: [2], mountain_magnitude: [2.3213], cost_of_living_index: [107.2], home_buying_power_percentile: [homeAvailable ? 42 : null], home_sqft_for_1m: [homeAvailable ? 2100 : null], housing_built_2000_plus_pct: [32.5] } });
-    if (url.pathname === "/api/v2/places" || url.pathname === "/api/v2/counties") return response({ total: 1, items: [url.pathname.includes("counties") ? county : tract] });
-    if (url.pathname === `/api/v2/places/${tract.place_id}` || url.pathname === `/api/v2/counties/${county.place_id}`) return response({ summary: { ...(url.pathname.includes("counties") ? county : tract), ...detailOverrides }, total_weighted_housing: 0, coverage_ratio: 1, methodology_notice: "Published FEMA percentile; not property-level risk.", source_notices: ["Asking-market indicator, not a sale price."], tract_contributions: [], hazard_percentiles: hazards, member_tract_count: url.pathname.includes("counties") ? 12 : null });
-    if (url.pathname === "/api/v2/lookup") return response({ status: "resolved", query: "1 Main", matched_address: "1 MAIN", tract_id: tract.place_id, detail: { summary: { ...tract, ...detailOverrides }, total_weighted_housing: 0, coverage_ratio: 1, methodology_notice: "Published FEMA percentile.", source_notices: ["Asking-market indicator, not a sale price."], tract_contributions: [], hazard_percentiles: hazards, member_tract_count: null }, provider: "census", precision: "house", approximate: false, attribution: null });
+    if (url.pathname === "/api/v3/map/scores" || url.pathname === "/api/v3/map/scores/core") return response({ schema_version: 5, build_id: "fixture", level: url.searchParams.get("level"), scope: buildScope, columns: { place_id: [url.searchParams.get("level") === "county" ? county.place_id : tract.place_id], res_hazard_npctl: [url.searchParams.get("level") === "county" ? county.res_hazard_npctl : tract.res_hazard_npctl], community_conditions_group: [2], mountain_magnitude: [2.3213], cost_of_living_index: [107.2], home_buying_power_percentile: [homeAvailable ? 42 : null], home_sqft_for_1m: [homeAvailable ? 2100 : null], housing_built_2000_plus_pct: [32.5] } });
+    if (url.pathname === "/api/v3/places" || url.pathname === "/api/v3/counties") return response({ total: 1, items: [url.pathname.includes("counties") ? county : tract] });
+    if (url.pathname === `/api/v3/places/${tract.place_id}` || url.pathname === `/api/v3/counties/${county.place_id}`) return response({ summary: { ...(url.pathname.includes("counties") ? county : tract), ...detailOverrides }, methodology_notice: "HouseHunter residential hazard composite; not property-level risk.", source_notices: ["Asking-market indicator, not a sale price."], hazard_percentiles: hazards, member_tract_count: url.pathname.includes("counties") ? 12 : null });
+    if (url.pathname === "/api/v3/lookup") return response({ status: "resolved", query: "1 Main", matched_address: "1 MAIN", tract_id: tract.place_id, detail: { summary: { ...tract, ...detailOverrides }, methodology_notice: "HouseHunter residential hazard composite.", source_notices: ["Asking-market indicator, not a sale price."], hazard_percentiles: hazards, member_tract_count: null }, provider: "census", precision: "house", approximate: false, attribution: null });
     return response({});
   });
 }
@@ -170,7 +177,7 @@ class MockWorker {
           try {
             const result = await fetch(init.scoreUrl);
             const body = await result.json() as { schema_version?: number; build_id?: string; level?: string; columns?: { place_id?: string[] } };
-            if (!result.ok || body.schema_version !== 4 || body.build_id !== init.expectedBuildId || body.level !== init.level) {
+            if (!result.ok || body.schema_version !== 5 || body.build_id !== init.expectedBuildId || body.level !== init.level) {
               throw new Error("Map scores do not match the current build");
             }
             this.scoreCount = body.columns?.place_id?.length || 0;
@@ -238,15 +245,25 @@ describe("score semantics", () => {
       "low", "low", "below", "below", "typical", "high", "highest", "highest",
     ]);
     expect(scoreBand(null)).toBeNull(); expect(scoreBand(101)).toBeNull();
-    expect(scoreLabel({ ...tract, risk_score: 19.96 })).toBe("20.0");
-    expect(scorePillLabel({ ...tract, risk_score: 19.96 })).toBe("20.0, below typical");
+    expect(scoreLabel({ ...tract, res_hazard_npctl: 19.96 })).toBe("20.0");
+    expect(scorePillLabel({ ...tract, res_hazard_npctl: 19.96 })).toBe("20.0, below typical");
+  });
+  it("uses the specified model-sensitivity boundaries", () => {
+    expect([9.99, 10, 20, 20.01].map(sensitivityLabel)).toEqual([
+      "Low", "Moderate", "Moderate", "High",
+    ]);
+    expect(sensitivityLabel(null)).toBe("Unavailable");
   });
   it("sorts hazards high-to-low with unrated last", () => {
-    const values: HazardPercentile[] = [{ code: "TSUN", label: "Tsunami", percentile: null }, { code: "AVLN", label: "Avalanche", percentile: 10 }, { code: "WFIR", label: "Wildfire", percentile: 80 }];
+    const values: HazardPercentile[] = [
+      { code: "TSUN", label: "Tsunami", percentile: null, raw_alrb: null, availability: "missing", fema_eal_rating: null },
+      { code: "AVLN", label: "Avalanche", percentile: 10, raw_alrb: 1, availability: "valid", fema_eal_rating: "Relatively Low" },
+      { code: "WFIR", label: "Wildfire", percentile: 80, raw_alrb: 2, availability: "valid", fema_eal_rating: "Relatively High" },
+    ];
     expect(sortedHazardPercentiles(values).map((item) => item.code)).toEqual(["WFIR", "AVLN", "TSUN"]);
   });
   it("validates and clamps URL map state", () => {
-    expect(readHash("#level=county&state=co&county=123&place=08013&cx=4&cy=-2&z=99")).toEqual({ level: "county", metric: "fema", state: "", county: "", place: "08013", unranked: false, mountainMagnitudeMin: null, communityConditionsGroupMax: null, costOfLivingIndexMax: null, homeSqftFor1mMin: null, housingBuilt2000PlusPctMin: null, camera: { cx: 1, cy: 0, z: 12 } });
+    expect(readHash("#level=county&state=co&county=123&place=08013&cx=4&cy=-2&z=99")).toEqual({ level: "county", metric: "residential-hazard", state: "", county: "", place: "08013", unranked: false, mountainMagnitudeMin: null, communityConditionsGroupMax: null, costOfLivingIndexMax: null, homeSqftFor1mMin: null, housingBuilt2000PlusPctMin: null, camera: { cx: 1, cy: 0, z: 12 } });
     expect(readHash("#level=tract&state=ZZ&county=08013&place=08013012101")).toMatchObject({ state: "", county: "", place: "08013012101" });
     expect(readHash("#level=tract&state=CO&county=01001&place=01001000100")).toMatchObject({ state: "CO", county: "", place: "" });
     expect(readHash("#metric=community-conditions").metric).toBe("community-conditions");
@@ -262,14 +279,14 @@ describe("score semantics", () => {
     expect(readHash("#max_community_conditions_group=11").communityConditionsGroupMax).toBeNull();
     expect(readHash("#housing_built_2000_plus_pct_min=101").housingBuilt2000PlusPctMin).toBeNull();
     expect(readHash("#cost_of_living_index_max=-1").costOfLivingIndexMax).toBeNull();
-    expect(readHash("#metric=quality").metric).toBe("fema");
+    expect(readHash("#metric=quality").metric).toBe("residential-hazard");
   });
   it("uses bounded fixed-domain color scales and honest null labels", () => {
-    expect(FEMA_COLOR_SCALE).toHaveLength(256);
+    expect(HAZARD_COLOR_SCALE).toHaveLength(256);
     expect(MOUNTAIN_COLOR_SCALE).toHaveLength(11);
     expect(COUNTY_MOUNTAIN_COLOR_SCALE).toHaveLength(9);
     expect(COMMUNITY_COLOR_SCALE).toHaveLength(256);
-    expect(METRIC_COLOR_SCALES.fema).toMatchObject({
+    expect(METRIC_COLOR_SCALES["residential-hazard"]).toMatchObject({
       minimum: 0, maximum: 100, ticks: [0, 20, 40, 60, 80, 100],
     });
     expect(METRIC_COLOR_SCALES["community-conditions"]).toMatchObject({
@@ -287,7 +304,7 @@ describe("score semantics", () => {
     expect(metricColorScale("mountain", "county")).toMatchObject({
       minimum: 0, maximum: 4, ticks: [0, 1, 2, 3, 4],
     });
-    expect(METRIC_COLOR_SCALES.fema.gradient.match(/#[\da-f]{6}/g)).toHaveLength(256);
+    expect(METRIC_COLOR_SCALES["residential-hazard"].gradient.match(/#[\da-f]{6}/g)).toHaveLength(256);
     expect(METRIC_COLOR_SCALES["community-conditions"].gradient.match(/#[\da-f]{6}/g))
       .toHaveLength(256);
     expect(METRIC_COLOR_SCALES.mountain.gradient.match(/#[\da-f]{6}/g)).toHaveLength(10);
@@ -407,7 +424,7 @@ describe("score semantics", () => {
   it("uses the fixed shared scales on the map independently of unrelated metric values", () => {
     const row: MapScore = {
       place_id: "08013012101",
-      risk_score: 21.25,
+      res_hazard_npctl: 21.25,
       community_conditions_group: 2,
       mountain_magnitude: 2.3213,
       cost_of_living_index: 107.2,
@@ -415,14 +432,14 @@ describe("score semantics", () => {
       home_sqft_for_1m: 2100,
       housing_built_2000_plus_pct: 32.5,
     };
-    expect(metricColor(row, "fema")).toBe(scoreColor(21.25));
-    expect(metricColor({ ...row, mountain_magnitude: 0 }, "fema")).toBe(scoreColor(21.25));
+    expect(metricColor(row, "residential-hazard")).toBe(scoreColor(21.25));
+    expect(metricColor({ ...row, mountain_magnitude: 0 }, "residential-hazard")).toBe(scoreColor(21.25));
     expect(metricColor(row, "mountain")).toBe(mountainColor(2.3213));
-    expect(metricColor({ ...row, risk_score: 100 }, "mountain")).toBe(mountainColor(2.3213));
+    expect(metricColor({ ...row, res_hazard_npctl: 100 }, "mountain")).toBe(mountainColor(2.3213));
     expect(metricColor(row, "community-conditions")).toBe(communityGroupColor(2));
     expect(metricColor(row, "cost-of-living")).toBe(costOfLivingColor(107.2));
     expect(metricColor(row, "home-costs")).toBe(homeBuyingPowerColor(42));
-    expect(metricColor(null, "fema")).toBeNull();
+    expect(metricColor(null, "residential-hazard")).toBeNull();
   });
   it("computes the gesture delta from the last committed camera", () => {
     expect(relativeTransform(
@@ -448,7 +465,7 @@ it("continues zooming from a camera restored from the URL", async () => {
   vi.stubGlobal("fetch", mockFetch());
   const onCamera = vi.fn();
   render(<RiskMap
-    manifestUrl="/map-assets/manifest.json" scoreUrl="/api/v2/map/scores?level=tract" expectedBuildId="fixture" level="tract"
+    manifestUrl="/map-assets/manifest.json" scoreUrl="/api/v3/map/scores?level=tract" expectedBuildId="fixture" level="tract"
     selected="" filters={mapFilters} focusTarget={null}
     initialCamera={{ cx: 0.5, cy: 0.5, z: 5 }} onSelect={() => undefined}
     onPreview={() => undefined} onCamera={onCamera} onStatus={() => undefined}
@@ -476,7 +493,7 @@ it("preserves the normalized camera through a responsive resize", async () => {
   vi.stubGlobal("fetch", mockFetch());
   const onCamera = vi.fn();
   render(<RiskMap
-    manifestUrl="/map-assets/manifest.json" scoreUrl="/api/v2/map/scores?level=tract" expectedBuildId="fixture" level="tract"
+    manifestUrl="/map-assets/manifest.json" scoreUrl="/api/v3/map/scores?level=tract" expectedBuildId="fixture" level="tract"
     selected="" filters={mapFilters} focusTarget={null}
     initialCamera={{ cx: 0.37, cy: 0.61, z: 2 }} onSelect={() => undefined}
     onPreview={() => undefined} onCamera={onCamera} onStatus={() => undefined}
@@ -502,7 +519,7 @@ it("pans with pointer-only Chrome input without activating a geography", async (
   vi.stubGlobal("fetch", mockFetch());
   const onCamera = vi.fn();
   render(<RiskMap
-    manifestUrl="/map-assets/manifest.json" scoreUrl="/api/v2/map/scores?level=tract"
+    manifestUrl="/map-assets/manifest.json" scoreUrl="/api/v3/map/scores?level=tract"
     expectedBuildId="fixture" level="tract" selected="" filters={mapFilters}
     focusTarget={null} initialCamera={{ cx: 0.5, cy: 0.5, z: 2 }}
     onSelect={() => undefined} onPreview={() => undefined} onCamera={onCamera}
@@ -553,7 +570,7 @@ it("ignores a stale score response after changing geography level", async () => 
   const baseFetch = mockFetch();
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://127.0.0.1");
-    if (url.pathname === "/api/v2/map/scores/core") {
+    if (url.pathname === "/api/v3/map/scores/core") {
       return url.searchParams.get("level") === "county" ? countyResponse : tractResponse;
     }
     return baseFetch(input);
@@ -561,9 +578,9 @@ it("ignores a stale score response after changing geography level", async () => 
   render(<App />);
   await screen.findByText("HouseHunter");
   fireEvent.click(screen.getByRole("button", { name: "Counties" }));
-  resolveCounty(response({ schema_version: 4, build_id: "fixture", level: "county", scope: { kind: "national", state: null }, columns: { place_id: [county.place_id], risk_score: [county.risk_score], community_conditions_group: [2], mountain_magnitude: [2.3213], cost_of_living_index: [107.2], home_buying_power_percentile: [42], home_sqft_for_1m: [2100], housing_built_2000_plus_pct: [32.5] } }));
+  resolveCounty(response({ schema_version: 5, build_id: "fixture", level: "county", scope: { kind: "national", state: null }, columns: { place_id: [county.place_id], res_hazard_npctl: [county.res_hazard_npctl], community_conditions_group: [2], mountain_magnitude: [2.3213], cost_of_living_index: [107.2], home_buying_power_percentile: [42], home_sqft_for_1m: [2100], housing_built_2000_plus_pct: [32.5] } }));
   await waitFor(() => expect(screen.getByTitle("fixture")).toHaveTextContent("counties"));
-  await act(async () => resolveTract(response({ schema_version: 4, build_id: "fixture", level: "tract", scope: { kind: "national", state: null }, columns: { place_id: [tract.place_id], risk_score: [tract.risk_score], community_conditions_group: [2], mountain_magnitude: [2.3213], cost_of_living_index: [107.2], home_buying_power_percentile: [42], home_sqft_for_1m: [2100], housing_built_2000_plus_pct: [32.5] } })));
+  await act(async () => resolveTract(response({ schema_version: 5, build_id: "fixture", level: "tract", scope: { kind: "national", state: null }, columns: { place_id: [tract.place_id], res_hazard_npctl: [tract.res_hazard_npctl], community_conditions_group: [2], mountain_magnitude: [2.3213], cost_of_living_index: [107.2], home_buying_power_percentile: [42], home_sqft_for_1m: [2100], housing_built_2000_plus_pct: [32.5] } })));
   expect(screen.getByTitle("fixture")).not.toHaveTextContent("tracts ready");
   expect(screen.getByRole("button", { name: "Counties" })).toHaveAttribute("aria-pressed", "true");
 });
@@ -576,7 +593,7 @@ it("ignores a stale score failure after the replacement level succeeds", async (
   const baseFetch = mockFetch();
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://127.0.0.1");
-    if (url.pathname === "/api/v2/map/scores/core") {
+    if (url.pathname === "/api/v3/map/scores/core") {
       return url.searchParams.get("level") === "county" ? countyResponse : tractResponse;
     }
     return baseFetch(input);
@@ -584,7 +601,7 @@ it("ignores a stale score failure after the replacement level succeeds", async (
   render(<App />);
   await screen.findByText("HouseHunter");
   fireEvent.click(screen.getByRole("button", { name: "Counties" }));
-  resolveCounty(response({ schema_version: 4, build_id: "fixture", level: "county", scope: { kind: "national", state: null }, columns: { place_id: [county.place_id], risk_score: [county.risk_score], community_conditions_group: [2], mountain_magnitude: [2.3213], cost_of_living_index: [107.2], home_buying_power_percentile: [42], home_sqft_for_1m: [2100], housing_built_2000_plus_pct: [32.5] } }));
+  resolveCounty(response({ schema_version: 5, build_id: "fixture", level: "county", scope: { kind: "national", state: null }, columns: { place_id: [county.place_id], res_hazard_npctl: [county.res_hazard_npctl], community_conditions_group: [2], mountain_magnitude: [2.3213], cost_of_living_index: [107.2], home_buying_power_percentile: [42], home_sqft_for_1m: [2100], housing_built_2000_plus_pct: [32.5] } }));
   await waitFor(() => expect(screen.getByTitle("fixture")).toHaveTextContent("counties"));
   await act(async () => rejectTract(new Error("obsolete tract request failed")));
   expect(screen.queryByText("Scores could not be loaded")).not.toBeInTheDocument();
@@ -597,7 +614,7 @@ it("loads the replacement level after a score failure and marks it busy until in
   const baseFetch = mockFetch();
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://127.0.0.1");
-    if (url.pathname !== "/api/v2/map/scores/core") return baseFetch(input);
+    if (url.pathname !== "/api/v3/map/scores/core") return baseFetch(input);
     if (url.searchParams.get("level") === "county") return countyResponse;
     return new Response(JSON.stringify({ detail: "tract scores unavailable" }), {
       status: 503,
@@ -613,13 +630,13 @@ it("loads the replacement level after a score failure and marks it busy until in
   expect(screen.queryByText("Scores could not be loaded")).not.toBeInTheDocument();
 
   resolveCounty(response({
-    schema_version: 4,
+    schema_version: 5,
     build_id: "fixture",
     level: "county",
     scope: { kind: "national", state: null },
     columns: {
       place_id: [county.place_id],
-      risk_score: [county.risk_score],
+      res_hazard_npctl: [county.res_hazard_npctl],
       community_conditions_group: [2],
       mountain_magnitude: [2.3213],
       cost_of_living_index: [107.2],
@@ -640,7 +657,7 @@ it("ignores county options loaded for a previous draft state", async () => {
   const baseFetch = mockFetch();
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://127.0.0.1");
-    if (url.pathname === "/api/v2/counties" && url.searchParams.has("state")) {
+    if (url.pathname === "/api/v3/counties" && url.searchParams.has("state")) {
       return url.searchParams.get("state") === "CO" ? coResponse : alResponse;
     }
     return baseFetch(input);
@@ -666,7 +683,7 @@ it("does not clear current county options when an older state request fails", as
   const baseFetch = mockFetch();
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://127.0.0.1");
-    if (url.pathname === "/api/v2/counties" && url.searchParams.has("state")) {
+    if (url.pathname === "/api/v3/counties" && url.searchParams.has("state")) {
       return url.searchParams.get("state") === "CO" ? coResponse : alResponse;
     }
     return baseFetch(input);
@@ -689,7 +706,7 @@ it("discards address confirmations after the query changes", async () => {
   const baseFetch = mockFetch();
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://127.0.0.1");
-    return url.pathname === "/api/v2/lookup" ? lookup : baseFetch(input);
+    return url.pathname === "/api/v3/lookup" ? lookup : baseFetch(input);
   }));
   render(<App />);
   await screen.findByText("HouseHunter");
@@ -708,7 +725,7 @@ it("discards a resolved address after Search closes", async () => {
   const baseFetch = mockFetch();
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://127.0.0.1");
-    return url.pathname === "/api/v2/lookup" ? lookup : baseFetch(input);
+    return url.pathname === "/api/v3/lookup" ? lookup : baseFetch(input);
   }));
   render(<App />);
   await screen.findByText("HouseHunter");
@@ -717,7 +734,7 @@ it("discards a resolved address after Search closes", async () => {
   fireEvent.change(screen.getByLabelText("Street address"), { target: { value: "1 Main St" } });
   fireEvent.click(screen.getByRole("button", { name: "Find tract" }));
   fireEvent.click(search);
-  await act(async () => resolveLookup(response({ status: "resolved", query: "1 Main St", matched_address: "1 MAIN", tract_id: tract.place_id, detail: { summary: tract, total_weighted_housing: 0, coverage_ratio: 1, methodology_notice: "Published FEMA percentile.", tract_contributions: [], hazard_percentiles: hazards, member_tract_count: null }, provider: "census", precision: "house", approximate: false, attribution: null })));
+  await act(async () => resolveLookup(response({ status: "resolved", query: "1 Main St", matched_address: "1 MAIN", tract_id: tract.place_id, detail: { summary: tract, methodology_notice: "HouseHunter residential hazard composite.", hazard_percentiles: hazards, member_tract_count: null, source_notices: [] }, provider: "census", precision: "house", approximate: false, attribution: null })));
   expect(screen.queryByRole("dialog", { name: "Tract detail" })).not.toBeInTheDocument();
 });
 
@@ -727,7 +744,7 @@ it("discards a resolved address after browser history closes Search", async () =
   const baseFetch = mockFetch();
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://127.0.0.1");
-    return url.pathname === "/api/v2/lookup" ? lookup : baseFetch(input);
+    return url.pathname === "/api/v3/lookup" ? lookup : baseFetch(input);
   }));
   render(<App />);
   await screen.findByText("HouseHunter");
@@ -736,7 +753,7 @@ it("discards a resolved address after browser history closes Search", async () =
   fireEvent.click(screen.getByRole("button", { name: "Find tract" }));
   act(() => window.dispatchEvent(new PopStateEvent("popstate")));
   expect(screen.queryByLabelText("Search")).not.toBeInTheDocument();
-  await act(async () => resolveLookup(response({ status: "resolved", query: "1 Main St", matched_address: "1 MAIN", tract_id: tract.place_id, detail: { summary: tract, total_weighted_housing: 0, coverage_ratio: 1, methodology_notice: "Published FEMA percentile.", tract_contributions: [], hazard_percentiles: hazards, member_tract_count: null }, provider: "census", precision: "house", approximate: false, attribution: null })));
+  await act(async () => resolveLookup(response({ status: "resolved", query: "1 Main St", matched_address: "1 MAIN", tract_id: tract.place_id, detail: { summary: tract, methodology_notice: "HouseHunter residential hazard composite.", hazard_percentiles: hazards, member_tract_count: null, source_notices: [] }, provider: "census", precision: "house", approximate: false, attribution: null })));
   expect(screen.queryByRole("dialog", { name: "Tract detail" })).not.toBeInTheDocument();
 });
 
@@ -746,7 +763,7 @@ it("does not surface a stale address failure after Search closes", async () => {
   const baseFetch = mockFetch();
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://127.0.0.1");
-    return url.pathname === "/api/v2/lookup" ? lookup : baseFetch(input);
+    return url.pathname === "/api/v3/lookup" ? lookup : baseFetch(input);
   }));
   render(<App />);
   await screen.findByText("HouseHunter");
@@ -779,7 +796,7 @@ it("presents an outline frame without declaring the map visible or accepting pic
   const onVisibleCommit = vi.fn();
   const onInteractiveCommit = vi.fn();
   render(<RiskMap
-    manifestUrl="/map-assets/manifest.json" scoreUrl="/api/v2/map/scores?level=tract"
+    manifestUrl="/map-assets/manifest.json" scoreUrl="/api/v3/map/scores?level=tract"
     expectedBuildId="fixture" level="tract" selected="" filters={mapFilters}
     focusTarget={null} initialCamera={{ cx: 0.5, cy: 0.5, z: 1 }}
     onSelect={() => undefined} onPreview={() => undefined} onCamera={() => undefined}
@@ -800,7 +817,7 @@ it("presents an outline frame without declaring the map visible or accepting pic
   act(() => mockWorkers[0].deliver({
     type: "FRAME", datasetGeneration: current.datasetGeneration,
     viewportGeneration: current.viewportGeneration, cameraGeneration: current.cameraGeneration,
-    semanticGeneration: current.semanticGeneration, snapshotId: 44, metric: "fema",
+    semanticGeneration: current.semanticGeneration, snapshotId: 44, metric: "residential-hazard",
     camera: current.camera, originX: -48, originY: -48,
     width: current.width + 96, height: current.height + 96, ratio: current.ratio,
     featureCount: 0, interactive: false, bitmap: { close: vi.fn() },
@@ -819,7 +836,7 @@ it("presents an outline frame without declaring the map visible or accepting pic
 it("retries a place focus after a non-interactive outline cannot resolve it", async () => {
   vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>(() => undefined)));
   render(<RiskMap
-    manifestUrl="/map-assets/manifest.json" scoreUrl="/api/v2/map/scores?level=tract"
+    manifestUrl="/map-assets/manifest.json" scoreUrl="/api/v3/map/scores?level=tract"
     expectedBuildId="fixture" level="tract" selected="" filters={mapFilters}
     focusTarget={{ kind: "place", id: tract.place_id, nonce: 12 }}
     initialCamera={{ cx: 0.5, cy: 0.5, z: 1 }} onSelect={() => undefined}
@@ -840,7 +857,7 @@ it("retries a place focus after a non-interactive outline cannot resolve it", as
   const frame = (snapshotId: number, interactive: boolean, featureCount: number) => ({
     type: "FRAME", datasetGeneration: current.datasetGeneration,
     viewportGeneration: current.viewportGeneration, cameraGeneration: current.cameraGeneration,
-    semanticGeneration: current.semanticGeneration, snapshotId, metric: "fema",
+    semanticGeneration: current.semanticGeneration, snapshotId, metric: "residential-hazard",
     camera: current.camera, originX: -48, originY: -48,
     width: current.width + 96, height: current.height + 96, ratio: current.ratio,
     featureCount, interactive, bitmap: { close: vi.fn() },
@@ -871,7 +888,7 @@ it("closes and negatively acknowledges a stale bitmap without presenting it", as
     cameraGeneration: init.cameraGeneration,
     semanticGeneration: init.semanticGeneration,
     snapshotId: 987_654,
-    metric: "fema",
+    metric: "residential-hazard",
     camera: init.camera,
     originX: 0,
     originY: 0,
@@ -891,7 +908,7 @@ it("closes and negatively acknowledges a stale bitmap without presenting it", as
 it("requests focus once per nonce even when focus itself commits more frames", async () => {
   vi.stubGlobal("fetch", mockFetch());
   render(<RiskMap
-    manifestUrl="/map-assets/manifest.json" scoreUrl="/api/v2/map/scores?level=tract"
+    manifestUrl="/map-assets/manifest.json" scoreUrl="/api/v3/map/scores?level=tract"
     expectedBuildId="fixture" level="tract" selected="" filters={mapFilters}
     focusTarget={{ kind: "state", id: "CO", nonce: 9 }}
     initialCamera={{ cx: 0.5, cy: 0.5, z: 1 }} onSelect={() => undefined}
@@ -935,24 +952,24 @@ it("renders the map as the only primary UI with all retained controls", async ()
   const exports = screen.getByRole("navigation", { name: "Exports" });
   expect(screen.getByRole("button", { name: "More" })).toHaveAttribute("aria-expanded", "true");
   expect(screen.getByRole("button", { name: "More" })).toHaveAttribute("aria-controls", "exports-panel");
-  expect(within(exports).getByRole("link", { name: "Tracts CSV" })).toHaveAttribute("href", "/api/v2/exports/places.csv");
-  expect(within(exports).getByRole("link", { name: "Tracts Parquet" })).toHaveAttribute("href", "/api/v2/exports/places.parquet");
-  expect(within(exports).getByRole("link", { name: "Counties CSV" })).toHaveAttribute("href", "/api/v2/exports/counties.csv");
-  expect(within(exports).getByRole("link", { name: "Counties Parquet" })).toHaveAttribute("href", "/api/v2/exports/counties.parquet");
-  const legend = screen.getByLabelText("Continuous score color scale, lower is better");
+  expect(within(exports).getByRole("link", { name: "Tracts CSV" })).toHaveAttribute("href", "/api/v3/exports/places.csv");
+  expect(within(exports).getByRole("link", { name: "Tracts Parquet" })).toHaveAttribute("href", "/api/v3/exports/places.parquet");
+  expect(within(exports).getByRole("link", { name: "Counties CSV" })).toHaveAttribute("href", "/api/v3/exports/counties.csv");
+  expect(within(exports).getByRole("link", { name: "Counties Parquet" })).toHaveAttribute("href", "/api/v3/exports/counties.parquet");
+  const legend = screen.getByLabelText("Continuous Residential Hazard Exposure color scale, higher is worse");
   expect(legend).toHaveTextContent("not property-level risk");
   expect(legend.querySelector(".legend-gradient")).toHaveStyle({
     backgroundImage: expect.stringContaining("linear-gradient"),
   });
   expect(within(legend).getByRole("img", {
-    name: "FEMA Risk continuous color ramp from 0 to 100",
+    name: "Residential Hazard Exposure continuous color ramp from 0 to 100",
   })).toBeVisible();
   for (const tick of ["0", "20", "40", "60", "80", "100"]) {
     expect(within(legend).getByText(tick)).toBeVisible();
   }
   expect(within(legend).getByText("Unranked")).toBeVisible();
   expect(legend.querySelector(".missing-key .hatched")).toHaveAttribute("aria-hidden", "true");
-  expect(screen.getByRole("img", { name: /focusable USA tract risk map/i })).toBeVisible();
+  expect(screen.getByRole("img", { name: /focusable USA tract Residential Hazard Exposure map/i })).toBeVisible();
   expect(screen.queryByRole("table")).not.toBeInTheDocument();
   expect(screen.queryByText("Next")).not.toBeInTheDocument();
 });
@@ -963,7 +980,7 @@ it("offers all five independent layers in the keyboard-accessible menu", async (
   await screen.findByText("HouseHunter");
   const menu = screen.getByRole("combobox", { name: "Map layer" });
   expect(within(menu).getAllByRole("option").map((option) => option.textContent)).toEqual([
-    "Natural Disaster Risk — FEMA NRI",
+    "Residential Hazard Exposure — HouseHunter / FEMA NRI",
     "Community Conditions — CHR&R",
     "Mountain Magnitude — HouseHunter",
     "Cost of Living — BEA RPP",
@@ -1076,7 +1093,7 @@ it("orders Home Costs extremes by square feet with most before least", async () 
   const directions: string[] = [];
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://127.0.0.1");
-    if (url.pathname === "/api/v2/places"
+    if (url.pathname === "/api/v3/places"
       && url.searchParams.get("sort") === "home_sqft_for_1m") {
       const direction = url.searchParams.get("direction") || "";
       directions.push(direction);
@@ -1119,14 +1136,14 @@ it("keeps the committed legend and accessible map description aligned during met
   vi.stubGlobal("fetch", mockFetch());
   render(<App />);
   await screen.findAllByText("1 tracts interactive", {}, { timeout: 3000 });
-  const canvas = screen.getByRole("img", { name: /focusable USA tract risk map/i });
+  const canvas = screen.getByRole("img", { name: /focusable USA tract Residential Hazard Exposure map/i });
 
   selectLayer("mountain");
 
   expect(screen.getByText("Updating Mountain Magnitude map…")).toBeVisible();
   expect(canvas).toHaveAttribute("aria-busy", "true");
-  expect(canvas).toHaveAccessibleName(/tract risk map/i);
-  expect(screen.getByLabelText("Continuous score color scale, lower is better")).toBeVisible();
+  expect(canvas).toHaveAccessibleName(/tract Residential Hazard Exposure map/i);
+  expect(screen.getByLabelText("Continuous Residential Hazard Exposure color scale, higher is worse")).toBeVisible();
   expect(screen.queryByLabelText(/Stepped Mountain Magnitude color scale/)).not.toBeInTheDocument();
 
   expect(await screen.findByLabelText(
@@ -1141,13 +1158,13 @@ it("commits only the final metric after rapid successive map changes", async () 
   vi.stubGlobal("fetch", mockFetch());
   render(<App />);
   await screen.findAllByText("1 tracts interactive", {}, { timeout: 3000 });
-  const canvas = screen.getByRole("img", { name: /focusable USA tract risk map/i });
+  const canvas = screen.getByRole("img", { name: /focusable USA tract Residential Hazard Exposure map/i });
 
   selectLayer("mountain");
   selectLayer("community-conditions");
 
   expect(canvas).toHaveAttribute("aria-busy", "true");
-  expect(screen.getByLabelText("Continuous score color scale, lower is better")).toBeVisible();
+  expect(screen.getByLabelText("Continuous Residential Hazard Exposure color scale, higher is worse")).toBeVisible();
   const finalLegend = await screen.findByLabelText(
     "Continuous Community Conditions color scale, Group 1 is healthiest",
   );
@@ -1182,7 +1199,7 @@ it("scopes show-unavailable to the active layer and keeps cross-layer filters", 
   await screen.findByText("HouseHunter");
 
   fireEvent.click(screen.getByRole("button", { name: "Filters" }));
-  fireEvent.click(screen.getByRole("checkbox", { name: "Show FEMA-unranked geographies" }));
+  fireEvent.click(screen.getByRole("checkbox", { name: "Show hazard-unranked geographies" }));
   fireEvent.click(screen.getByRole("button", { name: "Apply" }));
   expect(screen.getByRole("button", { name: "Filters · On" })).toBeVisible();
 
@@ -1207,7 +1224,7 @@ it("shows fresh loading feedback and does not refetch when closing extremes", as
   const extremeStates: Array<string | null> = [];
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://127.0.0.1");
-    if (url.pathname === "/api/v2/places" && url.searchParams.get("sort") === "risk_score") {
+    if (url.pathname === "/api/v3/places" && url.searchParams.get("sort") === "res_hazard_npctl") {
       extremeRequests += 1;
       extremeStates.push(url.searchParams.get("state"));
       return new Promise<Response>(() => undefined);
@@ -1222,7 +1239,7 @@ it("shows fresh loading feedback and does not refetch when closing extremes", as
   expect(screen.queryByRole("heading", { name: "Lowest" })).not.toBeInTheDocument();
   expect(extremeRequests).toBe(2);
   fireEvent.click(trigger);
-  expect(screen.queryByRole("region", { name: "Lowest and highest risk" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("region", { name: "Lowest and highest Residential Hazard Exposure" })).not.toBeInTheDocument();
   expect(screen.queryByRole("status")).not.toBeInTheDocument();
   expect(extremeRequests).toBe(2);
   expect(extremeStates).toEqual([null, null]);
@@ -1232,7 +1249,7 @@ it("switches to Community Conditions and browses county groups without changing 
   vi.stubGlobal("fetch", mockFetch());
   render(<App />);
   await screen.findByText("HouseHunter");
-  expect(screen.getByRole("combobox", { name: "Map layer" })).toHaveValue("fema");
+  expect(screen.getByRole("combobox", { name: "Map layer" })).toHaveValue("residential-hazard");
   selectLayer("community-conditions");
   await waitFor(() => expect(window.location.hash).toContain("metric=community-conditions"));
   const legend = await screen.findByLabelText(
@@ -1257,7 +1274,7 @@ it("switches to Community Conditions and browses county groups without changing 
   fireEvent.click(within(panel).getByRole("button", { name: /Boulder.*Group 2 of 10/ }));
   const drawer = await screen.findByRole("dialog", { name: "County detail" });
   expect(screen.getByRole("button", { name: "Tracts" })).toHaveAttribute("aria-pressed", "true");
-  expect(within(drawer).getByLabelText("FEMA risk")).toBeVisible();
+  expect(within(drawer).getByLabelText("Residential Hazard Exposure")).toBeVisible();
   expect(within(drawer).getByLabelText("Community Conditions")).toHaveClass("active");
   expect(within(drawer).getByText("Group 2 of 10")).toBeVisible();
   expect(within(drawer).getByText(/County geography/)).toBeVisible();
@@ -1268,7 +1285,7 @@ it("shows an empty Community Conditions range for an ungrouped territory", async
   const baseFetch = mockFetch();
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://127.0.0.1");
-    if (url.pathname === "/api/v2/counties" && url.searchParams.get("sort") === "community_conditions_group") {
+    if (url.pathname === "/api/v3/counties" && url.searchParams.get("sort") === "community_conditions_group") {
       return Promise.resolve(response({
         total: 1,
         items: [{ ...county, place_id: "72001", state: "PR", community_conditions_group: null }],
@@ -1317,9 +1334,10 @@ it("maps and filters Mountain Magnitude with an honest expandable breakdown", as
   fireEvent.click(screen.getByRole("button", { name: "Find tract" }));
   const drawer = await screen.findByRole("dialog", { name: "Tract detail" });
   expect(await within(drawer).findByLabelText("Mountain Magnitude")).toHaveClass("active");
-  expect(within(drawer).getByLabelText("FEMA risk").querySelector(":scope > span"))
-    .toHaveStyle({ color: scoreColor(tract.risk_score)! });
-  const wildfire = within(drawer).getByText("Wildfire").closest(".contribution");
+  expect(within(drawer).getByLabelText("Residential Hazard Exposure").querySelector(":scope > span"))
+    .toHaveStyle({ color: scoreColor(tract.res_hazard_npctl)! });
+  const wildfire = within(drawer).getAllByText("Wildfire")
+    .find((element) => element.closest(".contribution"))!.closest(".contribution");
   expect(wildfire?.querySelector(".bar i"))
     .toHaveStyle({ backgroundColor: scoreColor(hazards[0].percentile)! });
   fireEvent.click(within(drawer).getByText("Mountain Magnitude breakdown"));
@@ -1361,7 +1379,7 @@ it("discards a stale Community Conditions page after returning to group summarie
   let resolveNext: ((response: Response) => void) | undefined;
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://127.0.0.1");
-    if (url.pathname === "/api/v2/counties" && url.searchParams.get("limit") === "50") {
+    if (url.pathname === "/api/v3/counties" && url.searchParams.get("limit") === "50") {
       if (url.searchParams.get("offset") === "50") {
         return new Promise<Response>((resolve) => { resolveNext = resolve; });
       }
@@ -1431,8 +1449,8 @@ it("looks up a street address and opens tract detail", async () => {
   fireEvent.change(screen.getByLabelText("Street address"), { target: { value: "1 Main St, Boulder, CO" } });
   fireEvent.click(screen.getByRole("button", { name: "Find tract" }));
   const drawer = await screen.findByRole("dialog", { name: "Tract detail" });
-  expect(await within(drawer).findByText("Wildfire")).toBeVisible();
-  expect(within(drawer).getByText("No rating")).toBeVisible();
+  expect((await within(drawer).findAllByText("Wildfire"))[0]).toBeVisible();
+  expect(within(drawer).getByText("0.0 · Not applicable")).toBeVisible();
   expect(window.location.hash).not.toContain("Main");
   expect(window.location.hash).toContain("state=CO");
   expect(window.location.hash).toContain("county=08013");
@@ -1447,8 +1465,8 @@ it("navigates between tract and county detail workflows", async () => {
   const tractDrawer = await screen.findByRole("dialog", { name: "Tract detail" });
   fireEvent.click(await within(tractDrawer).findByRole("button", { name: "View Boulder county" }));
   const countyDrawer = await screen.findByRole("dialog", { name: "County detail" });
-  expect(await within(countyDrawer).findByText("Wildfire")).toBeVisible();
-  expect(within(countyDrawer).getByText("No rating")).toBeVisible();
+  expect((await within(countyDrawer).findAllByText("Wildfire"))[0]).toBeVisible();
+  expect(within(countyDrawer).getByText("0.0 · Not applicable")).toBeVisible();
   expect(within(countyDrawer).getByLabelText("Home Costs")).toHaveTextContent("County market geography");
   fireEvent.click(await within(countyDrawer).findByRole("button", { name: "View 12 tracts" }));
   await waitFor(() => expect(screen.getByRole("button", { name: "Tracts" })).toHaveAttribute("aria-pressed", "true"));
@@ -1459,7 +1477,7 @@ it("navigates between tract and county detail workflows", async () => {
 
 it("keeps preparation inside the neutral map shell", async () => {
   vi.stubGlobal("fetch", mockFetch(false)); render(<App />);
-  expect(await screen.findByRole("heading", { name: "Prepare the national risk map" })).toBeVisible();
-  expect(screen.getByRole("img", { name: /USA tract risk map/i })).toBeVisible();
+  expect(await screen.findByRole("heading", { name: "Prepare the national hazard map" })).toBeVisible();
+  expect(screen.getByRole("img", { name: /USA tract Residential Hazard Exposure map/i })).toBeVisible();
   expect(screen.getByRole("button", { name: "Prepare national data" })).toBeVisible();
 });

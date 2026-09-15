@@ -17,15 +17,14 @@ from .config import RuntimePaths, canonical_json, load_config, sha256_bytes, sha
 from .contracts import SourceStatus
 from .errors import SourceContractError
 from .hazards import (
-    FEMA_HAZARD_FIELDS,
-    HAZARD_COLUMNS,
+    HAZARD_SOURCE_COLUMNS,
     county_out_fields,
     hazard_fields_from_cached_row,
     hazard_schema,
-    hazard_values_from_row,
-    invalid_optional_hazard_rows,
     logical_hazard_values,
+    normalized_hazard_values_from_row,
     tract_out_fields,
+    validate_hazard_source_values,
 )
 
 Progress = Callable[[int, str], None]
@@ -35,9 +34,11 @@ MAX_ARCGIS_JSON_BYTES = 16 * 1024 * 1024
 
 def _validate_raw_percentiles(rows: list[dict[str, Any]]) -> None:
     for row in rows:
-        for field in ("ALR_NPCTL", *FEMA_HAZARD_FIELDS):
+        for field in ("ALR_NPCTL", "ALR_VALB"):
             value = row.get(field)
-            if value is not None and type(value) not in {int, float}:
+            if value is not None and (
+                isinstance(value, bool) or type(value) not in {int, float}
+            ):
                 raise SourceContractError(f"FEMA {field} must be a JSON number or null")
 
 
@@ -174,24 +175,21 @@ def _invalid_composite_percentile(frame: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-def _reject_invalid_hazards(frame: pl.DataFrame) -> None:
-    invalid_hazards = invalid_optional_hazard_rows(frame)
-    if invalid_hazards.height:
-        raise SourceContractError(
-            f"FEMA contains {invalid_hazards.height} invalid hazard ALR_NPCTL values"
-        )
-
-
 def _validate_rows(rows: list[dict[str, Any]], source: dict[str, Any]) -> pl.DataFrame:
     if any(not isinstance(row, dict) for row in rows):
         raise SourceContractError("FEMA returned a malformed data row")
     _validate_raw_percentiles(rows)
+    try:
+        validate_hazard_source_values(rows, source)
+    except (TypeError, ValueError) as exc:
+        raise SourceContractError(str(exc)) from exc
     normalized = [
         {
             "tract_id": str(row.get("TRACTFIPS", "")),
             "alr_npctl": row.get("ALR_NPCTL"),
+            "alr_valb": row.get("ALR_VALB"),
             "nri_version": row.get("NRI_VER"),
-            **hazard_values_from_row(row),
+            **normalized_hazard_values_from_row(row),
         }
         for row in rows
     ]
@@ -201,6 +199,7 @@ def _validate_rows(rows: list[dict[str, Any]], source: dict[str, Any]) -> pl.Dat
             schema={
                 "tract_id": pl.String,
                 "alr_npctl": pl.Float64,
+                "alr_valb": pl.Float64,
                 "nri_version": pl.String,
                 **hazard_schema(),
             },
@@ -219,7 +218,6 @@ def _validate_rows(rows: list[dict[str, Any]], source: dict[str, Any]) -> pl.Dat
     invalid_values = _invalid_composite_percentile(frame)
     if invalid_values.height:
         raise SourceContractError(f"FEMA contains {invalid_values.height} invalid ALR_NPCTL values")
-    _reject_invalid_hazards(frame)
     versions = frame["nri_version"].unique().to_list()
     if versions != [source["version"]]:
         raise SourceContractError(f"Expected NRI_VER {source['version']!r}, got {versions!r}")
@@ -230,6 +228,10 @@ def _validate_county_rows(rows: list[dict[str, Any]], source: dict[str, Any]) ->
     if any(not isinstance(row, dict) for row in rows):
         raise SourceContractError("FEMA returned a malformed data row")
     _validate_raw_percentiles(rows)
+    try:
+        validate_hazard_source_values(rows, source)
+    except (TypeError, ValueError) as exc:
+        raise SourceContractError(str(exc)) from exc
     normalized = [
         {
             "county_fips": str(row.get("STCOFIPS", "")),
@@ -237,8 +239,9 @@ def _validate_county_rows(rows: list[dict[str, Any]], source: dict[str, Any]) ->
             "county_type": "" if row.get("COUNTYTYPE") is None else str(row.get("COUNTYTYPE")),
             "state": "" if row.get("STATEABBRV") is None else str(row.get("STATEABBRV")),
             "alr_npctl": row.get("ALR_NPCTL"),
+            "alr_valb": row.get("ALR_VALB"),
             "nri_version": row.get("NRI_VER"),
-            **hazard_values_from_row(row),
+            **normalized_hazard_values_from_row(row),
         }
         for row in rows
     ]
@@ -251,6 +254,7 @@ def _validate_county_rows(rows: list[dict[str, Any]], source: dict[str, Any]) ->
                 "county_type": pl.String,
                 "state": pl.String,
                 "alr_npctl": pl.Float64,
+                "alr_valb": pl.Float64,
                 "nri_version": pl.String,
                 **hazard_schema(),
             },
@@ -269,7 +273,6 @@ def _validate_county_rows(rows: list[dict[str, Any]], source: dict[str, Any]) ->
     invalid_values = _invalid_composite_percentile(frame)
     if invalid_values.height:
         raise SourceContractError(f"FEMA contains {invalid_values.height} invalid ALR_NPCTL values")
-    _reject_invalid_hazards(frame)
     versions = frame["nri_version"].unique().to_list()
     if versions != [source["version"]]:
         raise SourceContractError(f"Expected NRI_VER {source['version']!r}, got {versions!r}")
@@ -278,7 +281,13 @@ def _validate_county_rows(rows: list[dict[str, Any]], source: dict[str, Any]) ->
 
 def _logical_rows(frame: pl.DataFrame) -> list[list[Any]]:
     return [
-        [row["tract_id"], row["alr_npctl"], row["nri_version"], *logical_hazard_values(row)]
+        [
+            row["tract_id"],
+            row["alr_npctl"],
+            row["alr_valb"],
+            row["nri_version"],
+            *logical_hazard_values(row),
+        ]
         for row in frame.iter_rows(named=True)
     ]
 
@@ -291,6 +300,7 @@ def _logical_county_rows(frame: pl.DataFrame) -> list[list[Any]]:
             row["county_type"],
             row["state"],
             row["alr_npctl"],
+            row["alr_valb"],
             row["nri_version"],
             *logical_hazard_values(row),
         ]
@@ -318,7 +328,7 @@ def validate_cached_fema(path: Path, source: dict[str, Any]) -> tuple[pl.DataFra
         frame = pl.read_parquet(path)
     except (OSError, pl.exceptions.PolarsError) as exc:
         raise SourceContractError(f"Cannot read cached FEMA data: {exc}") from exc
-    required = {"tract_id", "alr_npctl", "nri_version", *HAZARD_COLUMNS}
+    required = {"tract_id", "alr_npctl", "alr_valb", "nri_version", *HAZARD_SOURCE_COLUMNS}
     missing = required - set(frame.columns)
     if missing:
         raise SourceContractError(
@@ -329,6 +339,7 @@ def validate_cached_fema(path: Path, source: dict[str, Any]) -> tuple[pl.DataFra
             {
                 "TRACTFIPS": row["tract_id"],
                 "ALR_NPCTL": row["alr_npctl"],
+                "ALR_VALB": row["alr_valb"],
                 "NRI_VER": row["nri_version"],
                 **hazard_fields_from_cached_row(row),
             }
@@ -354,8 +365,9 @@ def validate_cached_fema_counties(path: Path, source: dict[str, Any]) -> tuple[p
         "county_type",
         "state",
         "alr_npctl",
+        "alr_valb",
         "nri_version",
-        *HAZARD_COLUMNS,
+        *HAZARD_SOURCE_COLUMNS,
     }
     missing = required - set(frame.columns)
     if missing:
@@ -370,6 +382,7 @@ def validate_cached_fema_counties(path: Path, source: dict[str, Any]) -> tuple[p
                 "COUNTYTYPE": row["county_type"],
                 "STATEABBRV": row["state"],
                 "ALR_NPCTL": row["alr_npctl"],
+                "ALR_VALB": row["alr_valb"],
                 "NRI_VER": row["nri_version"],
                 **hazard_fields_from_cached_row(row),
             }

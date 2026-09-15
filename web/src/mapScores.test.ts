@@ -4,13 +4,13 @@ import {
 } from "./mapScores";
 
 const payload = {
-  schema_version: 4,
+  schema_version: 5,
   build_id: "fixture",
   level: "tract",
   scope: { kind: "national", state: null },
   columns: {
     place_id: ["01001000100", "01001000200"],
-    risk_score: [10, null],
+    res_hazard_npctl: [10, null],
     community_conditions_group: [2, null],
     mountain_magnitude: [2.5, null],
     cost_of_living_index: [91.2, null],
@@ -40,12 +40,12 @@ describe("decodeMapScores", () => {
     [{ ...payload, scope: { kind: "national", state: null, extra: true } }, "scope"],
     [{ ...payload, columns: null }, "schema"],
     [{ ...payload, columns: { ...payload.columns, place_id: "not-an-array" } }, "columns"],
-    [{ ...payload, columns: { ...payload.columns, risk_score: [10] } }, "length"],
+    [{ ...payload, columns: { ...payload.columns, res_hazard_npctl: [10] } }, "length"],
     [{ ...payload, columns: { ...payload.columns, place_id: ["2", "1"] } }, "ordered"],
     [{ ...payload, columns: { ...payload.columns, place_id: ["1", "1"] } }, "unique"],
     [{ ...payload, columns: { ...payload.columns, place_id: ["1", 2] } }, "place ID"],
-    [{ ...payload, columns: { ...payload.columns, risk_score: [Number.NaN, null] } }, "value"],
-    [{ ...payload, columns: { ...payload.columns, risk_score: [Number.POSITIVE_INFINITY, null] } }, "value"],
+    [{ ...payload, columns: { ...payload.columns, res_hazard_npctl: [Number.NaN, null] } }, "value"],
+    [{ ...payload, columns: { ...payload.columns, res_hazard_npctl: [Number.POSITIVE_INFINITY, null] } }, "value"],
     [{ ...payload, columns: { ...payload.columns, mountain_magnitude: [Number.NEGATIVE_INFINITY, null] } }, "value"],
     [{ ...payload, columns: { ...payload.columns, mountain_magnitude: [-0.1, null] } }, "value"],
     [{ ...payload, columns: { ...payload.columns, cost_of_living_index: [0, null] } }, "value"],
@@ -64,7 +64,7 @@ describe("decodeMapScores", () => {
       ...payload,
       columns: {
         ...payload.columns,
-        risk_score: [null, null],
+        res_hazard_npctl: [null, null],
         community_conditions_group: [null, null],
         mountain_magnitude: [null, null],
         cost_of_living_index: [null, null],
@@ -73,7 +73,7 @@ describe("decodeMapScores", () => {
         housing_built_2000_plus_pct: [null, null],
       },
     }, "fixture", "tract");
-    expect(decoded.columns.risk_score).toEqual([null, null]);
+    expect(decoded.columns.res_hazard_npctl).toEqual([null, null]);
     expect(decoded.columns.community_conditions_group).toEqual([null, null]);
     expect(decoded.columns.mountain_magnitude).toEqual([null, null]);
   });
@@ -82,12 +82,12 @@ describe("decodeMapScores", () => {
     const core = decodeMapScores({
       ...payload,
       add_ons: {
-        cost_of_living: "/api/v2/map/scores/addons/cost-of-living?level=tract&build_id=fixture",
-        home_costs: "/api/v2/map/scores/addons/home-costs?level=tract&build_id=fixture",
+        cost_of_living: "/api/v3/map/scores/addons/cost-of-living?level=tract&build_id=fixture",
+        home_costs: "/api/v3/map/scores/addons/home-costs?level=tract&build_id=fixture",
       },
       columns: {
         place_id: payload.columns.place_id,
-        risk_score: payload.columns.risk_score,
+        res_hazard_npctl: payload.columns.res_hazard_npctl,
         community_conditions_group: payload.columns.community_conditions_group,
         mountain_magnitude: payload.columns.mountain_magnitude,
       },
@@ -138,10 +138,10 @@ describe("decodeMapScores", () => {
       communityConditionsGroupMax: null, costOfLivingIndexMax: null,
       homeSqftFor1mMin: null, housingBuilt2000PlusPctMin: null,
     };
-    expect(requestedMapAddons("fema", filters)).toEqual([]);
+    expect(requestedMapAddons("residential-hazard", filters)).toEqual([]);
     expect(requestedMapAddons("cost-of-living", filters)).toEqual(["cost-of-living"]);
     expect(requestedMapAddons("home-costs", filters)).toEqual(["home-costs"]);
-    expect(requestedMapAddons("fema", {
+    expect(requestedMapAddons("residential-hazard", {
       ...filters, costOfLivingIndexMax: 100, housingBuilt2000PlusPctMin: 25,
     })).toEqual(["cost-of-living", "home-costs"]);
   });

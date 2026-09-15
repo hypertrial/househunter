@@ -50,8 +50,8 @@ test("canonical map interaction performance gates", async ({ page, browser }, te
 
   const scoreTexts = await page.evaluate(async () => {
     const [coreResponse, fullResponse] = await Promise.all([
-      fetch("/api/v2/map/scores/core?level=tract"),
-      fetch("/api/v2/map/scores?level=tract"),
+      fetch("/api/v3/map/scores/core?level=tract"),
+      fetch("/api/v3/map/scores?level=tract"),
     ]);
     const [core, full] = await Promise.all([coreResponse.text(), fullResponse.text()]);
     const addOns = JSON.parse(core).add_ons as {

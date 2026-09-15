@@ -6,7 +6,7 @@ from typing import Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-CoverageStatus = Literal["complete", "zero_housing", "missing_fema", "unmatched_geography"]
+ResidentialHazardDataQuality = Literal["complete", "partial", "unavailable"]
 MountainCoverageStatus = Literal[
     "complete",
     "partial",
@@ -53,8 +53,17 @@ class PlaceSummary(BaseModel):
     place_type: str
     population_2020: int
     housing_units_2020: int
-    risk_score: float | None
-    coverage_status: CoverageStatus
+    res_hazard_npctl: float | None
+    res_hazard_spread: float | None
+    res_hazard_spectral: float | None
+    res_hazard_tail: float | None
+    res_hazard_power4: float | None
+    property_loss_npctl: float | None
+    res_hazard_data_quality: ResidentialHazardDataQuality
+    res_hazard_available_count: int
+    res_hazard_coverage_ratio: float
+    alr_npctl: float
+    alr_valb: float | None
     fema_vintage: str
     census_vintage: str
     county_fips: str
@@ -118,26 +127,18 @@ class PlaceSummary(BaseModel):
     housing_stock_attribution: str
 
 
-class TractContribution(BaseModel):
-    tract_id: str | None
-    housing_units: int
-    housing_weight: float
-    fema_percentile: float | None
-    weighted_contribution: float | None
-
-
 class HazardPercentile(BaseModel):
     code: str
     label: str
     percentile: float | None
+    raw_alrb: float | None
+    availability: Literal["valid", "not_applicable", "missing", "invalid"]
+    fema_eal_rating: str | None
 
 
 class PlaceDetail(BaseModel):
     summary: PlaceSummary
-    total_weighted_housing: int
-    coverage_ratio: float
     methodology_notice: str
-    tract_contributions: list[TractContribution]
     hazard_percentiles: list[HazardPercentile]
     member_tract_count: int | None = None
     source_notices: list[str] = Field(default_factory=list)
@@ -202,7 +203,7 @@ class MapScoreColumns(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     place_id: list[str]
-    risk_score: list[float | None]
+    res_hazard_npctl: list[float | None]
     community_conditions_group: list[int | None]
     mountain_magnitude: list[float | None]
     cost_of_living_index: list[float | None]
@@ -214,7 +215,7 @@ class MapScoreColumns(BaseModel):
     def validate_alignment(self) -> MapScoreColumns:
         lengths = {
             len(self.place_id),
-            len(self.risk_score),
+            len(self.res_hazard_npctl),
             len(self.community_conditions_group),
             len(self.mountain_magnitude),
             len(self.cost_of_living_index),
@@ -229,7 +230,7 @@ class MapScoreColumns(BaseModel):
             raise ValueError("Map score place IDs must be ordered and unique")
         for index in range(len(self.place_id)):
             finite_values = (
-                self.risk_score[index],
+                self.res_hazard_npctl[index],
                 self.mountain_magnitude[index],
                 self.cost_of_living_index[index],
                 self.home_buying_power_percentile[index],
@@ -238,15 +239,15 @@ class MapScoreColumns(BaseModel):
             )
             if any(value is not None and not math.isfinite(value) for value in finite_values):
                 raise ValueError("Map score values must be finite or null")
-            risk = self.risk_score[index]
+            exposure = self.res_hazard_npctl[index]
             group = self.community_conditions_group[index]
             mountain = self.mountain_magnitude[index]
             cost = self.cost_of_living_index[index]
             percentile = self.home_buying_power_percentile[index]
             square_feet = self.home_sqft_for_1m[index]
             housing = self.housing_built_2000_plus_pct[index]
-            if risk is not None and not 0 <= risk <= 100:
-                raise ValueError("Map risk score must be between 0 and 100")
+            if exposure is not None and not 0 <= exposure <= 100:
+                raise ValueError("Map Residential Hazard Exposure must be between 0 and 100")
             if group is not None and not 1 <= group <= 10:
                 raise ValueError("Map Community Conditions group must be between 1 and 10")
             if mountain is not None and mountain < 0:
@@ -266,7 +267,7 @@ class MapScoreCoreColumns(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     place_id: list[str]
-    risk_score: list[float | None]
+    res_hazard_npctl: list[float | None]
     community_conditions_group: list[int | None]
     mountain_magnitude: list[float | None]
 
@@ -274,7 +275,7 @@ class MapScoreCoreColumns(BaseModel):
     def validate_alignment(self) -> MapScoreCoreColumns:
         columns = (
             self.place_id,
-            self.risk_score,
+            self.res_hazard_npctl,
             self.community_conditions_group,
             self.mountain_magnitude,
         )
@@ -285,19 +286,19 @@ class MapScoreCoreColumns(BaseModel):
             for left, right in zip(self.place_id, self.place_id[1:], strict=False)
         ):
             raise ValueError("Core map score place IDs must be ordered and unique")
-        for risk, group, mountain in zip(
-            self.risk_score,
+        for exposure, group, mountain in zip(
+            self.res_hazard_npctl,
             self.community_conditions_group,
             self.mountain_magnitude,
             strict=True,
         ):
             if any(
                 value is not None and not math.isfinite(value)
-                for value in (risk, mountain)
+                for value in (exposure, mountain)
             ):
                 raise ValueError("Core map score values must be finite or null")
-            if risk is not None and not 0 <= risk <= 100:
-                raise ValueError("Map risk score must be between 0 and 100")
+            if exposure is not None and not 0 <= exposure <= 100:
+                raise ValueError("Map Residential Hazard Exposure must be between 0 and 100")
             if group is not None and not 1 <= group <= 10:
                 raise ValueError("Map Community Conditions group must be between 1 and 10")
             if mountain is not None and mountain < 0:
@@ -374,7 +375,7 @@ class HomeCostsMapColumns(BaseModel):
 class MapScores(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[4] = 4
+    schema_version: Literal[5] = 5
     build_id: str
     level: Literal["tract", "county"]
     scope: MapScoreScope
@@ -391,7 +392,7 @@ class MapScoreAddons(BaseModel):
 class MapScoresCore(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[4] = 4
+    schema_version: Literal[5] = 5
     build_id: str
     level: Literal["tract", "county"]
     scope: MapScoreScope
@@ -449,16 +450,15 @@ class JobStatus(BaseModel):
 
 
 METHODOLOGY_NOTICE = (
-    "HouseHunter ranks FEMA National Risk Index tracts by their published ALR_NPCTL "
-    "percentile. Per-hazard bars are FEMA's published {CODE}_ALR_NPCTL values at the "
-    "tract grain; they are not a HouseHunter blend. This is not FEMA's broader Risk "
-    "Index, a property assessment, loss probability, insurance quote, or prediction."
+    "HouseHunter derives tract Residential Hazard Exposure from FEMA building-specific "
+    "Expected Annual Loss Rates across 17 hazards. It emphasizes elevated hazards and "
+    "ranks tracts nationally. It is not a property assessment, loss probability, "
+    "insurance quote, or prediction."
 )
 
 COUNTY_METHODOLOGY_NOTICE = (
-    "HouseHunter ranks FEMA National Risk Index counties by their published county-level "
-    "ALR_NPCTL percentile, ranked among counties. Per-hazard bars are FEMA's published "
-    "county {CODE}_ALR_NPCTL values, not an average of tract percentiles. This is not "
-    "FEMA's broader Risk Index, a property assessment, loss probability, insurance "
-    "quote, or prediction."
+    "HouseHunter derives county Residential Hazard Exposure from FEMA building-specific "
+    "Expected Annual Loss Rates across 17 hazards and ranks counties nationally, never "
+    "by averaging tract scores. It is not a property assessment, loss probability, "
+    "insurance quote, or prediction."
 )

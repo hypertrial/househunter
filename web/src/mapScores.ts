@@ -20,9 +20,9 @@ function validAddonUrls(value: unknown): value is NonNullable<MapScores["add_ons
   const urls = value as Record<string, unknown>;
   return Object.keys(urls).sort().join(",") === "cost_of_living,home_costs"
     && typeof urls.cost_of_living === "string"
-    && urls.cost_of_living.startsWith("/api/v2/map/scores/addons/cost-of-living?")
+    && urls.cost_of_living.startsWith("/api/v3/map/scores/addons/cost-of-living?")
     && typeof urls.home_costs === "string"
-    && urls.home_costs.startsWith("/api/v2/map/scores/addons/home-costs?");
+    && urls.home_costs.startsWith("/api/v3/map/scores/addons/home-costs?");
 }
 
 export function decodeMapScores(
@@ -32,7 +32,7 @@ export function decodeMapScores(
 ): MapScores {
   if (!value || typeof value !== "object") throw new Error("Map score schema is invalid");
   const payload = value as Partial<MapScores>;
-  if (payload.schema_version !== 4 || !payload.columns) {
+  if (payload.schema_version !== 5 || !payload.columns) {
     throw new Error("Map score schema is unsupported");
   }
   if (payload.build_id !== expectedBuildId) throw new Error("Map score build is stale");
@@ -40,7 +40,7 @@ export function decodeMapScores(
   if (!validScope(payload.scope)) throw new Error("Map score scope is invalid");
   const {
     place_id,
-    risk_score,
+    res_hazard_npctl,
     community_conditions_group,
     mountain_magnitude,
     cost_of_living_index,
@@ -50,7 +50,7 @@ export function decodeMapScores(
   } = payload.columns;
   const coreColumns = [
     place_id,
-    risk_score,
+    res_hazard_npctl,
     community_conditions_group,
     mountain_magnitude,
   ];
@@ -72,7 +72,7 @@ export function decodeMapScores(
     ...(payload as MapScores),
     columns: {
       place_id,
-      risk_score,
+      res_hazard_npctl,
       community_conditions_group,
       mountain_magnitude,
       cost_of_living_index: full ? cost_of_living_index : nulls(),
@@ -97,9 +97,9 @@ export function decodeMapScores(
     const percentile = normalized.columns.home_buying_power_percentile[index];
     const squareFeet = normalized.columns.home_sqft_for_1m[index];
     const built2000 = normalized.columns.housing_built_2000_plus_pct[index];
-    if (![risk_score[index], magnitude, cost, percentile, squareFeet, built2000]
+    if (![res_hazard_npctl[index], magnitude, cost, percentile, squareFeet, built2000]
       .every(numberOrNull)
-      || (risk_score[index] !== null && (risk_score[index]! < 0 || risk_score[index]! > 100))
+      || (res_hazard_npctl[index] !== null && (res_hazard_npctl[index]! < 0 || res_hazard_npctl[index]! > 100))
       || (magnitude !== null && magnitude < 0)
       || (cost !== null && cost <= 0)
       || (percentile !== null && (percentile < 0 || percentile > 100))

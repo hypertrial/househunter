@@ -1,15 +1,17 @@
 # HouseHunter
 
-HouseHunter is a local-only macOS application that maps FEMA National Risk Index
-geographies by published `ALR_NPCTL`. Lower is better. The full-viewport map starts
-with all 85,154 tracts; a county mode maps all 3,232 counties using FEMA's official
-county table, not an average of tract scores.
+HouseHunter is a local-only macOS application that maps **Residential Hazard
+Exposure**, a deterministic HouseHunter composite of FEMA National Risk Index
+building-loss rates. Higher values indicate greater exposure to one or more
+significant hazards, with extra weight on elevated tail hazards. The full-viewport
+map starts with all 85,154 tracts; county mode independently ranks all 3,232 counties
+from FEMA's official county table rather than averaging tract scores.
 
 The map can also switch to the official 2025 County Health Rankings & Roadmaps
 **Community Conditions** Health Group. This is an independent county-level layer:
 Group 1 is healthiest and Group 10 least healthy. The groups are data-driven
 clusters, not percentiles. Tracts inherit their county's group and are labeled
-county-level; HouseHunter never blends this value with FEMA risk.
+county-level; HouseHunter never blends this value with Residential Hazard Exposure.
 
 An optional **Mountain Magnitude** layer summarizes resident exposure to nearby
 terrain, public mountain land, and mapped trail access. Its uncapped logarithmic
@@ -36,15 +38,15 @@ independently: built-2000+, built-2010+, built-2020+, and median year built. The
 not sale prices, valuations, total ownership costs, or promises that a matching home
 is listed. HouseHunter never combines any of its five dimensions into one score.
 
-`ALR_NPCTL` is FEMA's national percentile for composite Expected Annual Loss Rate,
-distinct from FEMA's broader Risk Index. Tract and county percentiles are not
-comparable. Detail views and exports also show FEMA's 18 published
-`{CODE}_ALR_NPCTL` hazard percentiles at the same grain. Those bars explain the
-composite; they are not a HouseHunter blend, and lists still rank only on
-composite `ALR_NPCTL`. A HouseHunter score is **not** a property-level
-assessment, a loss probability, an insurance quote, or a prediction. Address lookup
-maps a house to its 2020 Census tract via the public Census geocoder, then shows
-that tract's FEMA score. If Census returns no street match, the loopback server
+Residential Hazard Exposure derives national same-grain percentiles from 17 FEMA
+building-specific `*_ALRB` fields, treating not-applicable hazards as zero while
+keeping genuinely missing or invalid inputs null and visible through an explicit data
+quality flag. Detail views retain the raw FEMA `ALR_NPCTL`, `ALR_VALB`, each hazard's
+raw building-loss rate and rating, the three tail aggregations, model sensitivity,
+and a separate Expected Property Loss percentile. A HouseHunter score is **not** a
+property-level assessment, a loss probability, an insurance quote, or a prediction.
+Address lookup maps a house to its 2020 Census tract via the public Census geocoder,
+then shows that tract's contextual score. If Census returns no street match, the loopback server
 may query OpenStreetMap Nominatim and convert accepted coordinates back through
 Census. Street-level matches need confirmation because a road point can cross
 tract boundaries.
@@ -107,7 +109,7 @@ househunter sources [--json]
 househunter download [--source fema|fema_counties|chrr|bea_rpp|all]
 househunter import-home-market FILE --acknowledge-personal-use
 househunter build [--state CO]
-househunter rank [--state CO] [--county STCOFIPS] [--level tract|county] [--metric risk|community-conditions|mountain|cost-of-living|home-costs] [--mountain-magnitude-min N] [--max-community-conditions-group 1..10] [--cost-of-living-index-min N] [--cost-of-living-index-max N] [--home-sqft-for-1m-min N] [--home-sqft-for-1m-max N] [--housing-built-2000-plus-pct-min 0..100] [--housing-built-2000-plus-pct-max 0..100] [--order best|worst] [--limit N] [--include-unranked]
+househunter rank [--state CO] [--county STCOFIPS] [--level tract|county] [--metric residential-hazard|community-conditions|mountain|cost-of-living|home-costs] [--res-hazard-min N] [--res-hazard-max N] [--mountain-magnitude-min N] [--max-community-conditions-group 1..10] [--cost-of-living-index-min N] [--cost-of-living-index-max N] [--home-sqft-for-1m-min N] [--home-sqft-for-1m-max N] [--housing-built-2000-plus-pct-min 0..100] [--housing-built-2000-plus-pct-max 0..100] [--order best|worst] [--limit N] [--include-unranked]
 househunter inspect TRACT_FIPS|COUNTY_FIPS
 househunter lookup "1670 Broadway, Denver, CO" [--allow-approximate]
 househunter export --format parquet|csv|json [--level tract|county] [--output PATH]
@@ -121,21 +123,29 @@ managed cache and build paths so exports cannot overwrite immutable runtime data
 
 ## Method
 
-For tract `t` and county `c`, HouseHunter uses:
+HouseHunter computes tracts and counties independently. For each of the 17 hazards,
+it percentile-ranks valid FEMA building Expected Annual Loss Rates (`*_ALRB`) across
+the national same-grain applicable universe with average ranks for ties:
 
 ```text
-risk_score[t] = ALR_NPCTL[t]
-risk_score[c] = ALR_NPCTL[c]
+hazard_pct = 100 * (average_rank - 1) / (N - 1)
 ```
 
+A valid zero and a FEMA not-applicable hazard both contribute percentile zero;
+missing or invalid values remain null. Available hazard percentiles feed three raw
+tail-sensitive aggregations: an exponentially weighted descending spectral score
+(`lambda = 0.45`), the mean of the worst `ceil(25%)`, and a fourth-order power mean.
+Each raw aggregation is percentile-ranked nationally, their median is taken, and that
+median is percentile-ranked once more as `RES_HAZARD_NPCTL`. Model sensitivity is the
+spread between the three aggregation percentiles: Low below 10, Moderate from 10
+through 20, and High above 20. `PROPERTY_LOSS_NPCTL` separately percentile-ranks
+FEMA `ALR_VALB`; it is never averaged into the exposure score.
+
 County names come from the FEMA county layer. Tract rows join `TRACTFIPS[:5]` to
-`STCOFIPS`. The county percentile is FEMA's published county value, ranked among
-counties; it is not the mean of tract percentiles. Per-hazard county values are
-that county layer's `{CODE}_ALR_NPCTL`, not an average of tract hazards. Null
-hazard percentiles mean FEMA published no rating; they are not zero. State is
-derived from the first two digits of `TRACTFIPS` using a bundled FIPS map.
-HouseHunter does not impute, re-percentile, winsorize, or renormalize around
-missing rows. Unrankable rows remain visible as `missing_fema`.
+`STCOFIPS`. County inputs and percentiles come directly from FEMA's county layer; no
+tract score or hazard is averaged into a county. State is derived from the first two
+digits of `TRACTFIPS` using a bundled FIPS map. The legacy FEMA `ALR_NPCTL` remains
+supporting detail and export provenance only.
 
 Community Conditions is joined on the same five-digit county FIPS. Its official
 `CommunityConditions_Group` is retained as an integer 1–10 or null; null is shown
@@ -207,14 +217,14 @@ npm test
 npm run build
 ```
 
-Runtime snapshots use schema 10. Schema-9 snapshots are rejected with a rebuild
-instruction. The compatible full `GET /api/v2/map/scores?level=tract|county` contract
-uses map schema 4 and returns aligned `place_id`, `risk_score`,
+Runtime snapshots use schema 11. Older snapshots are rejected with a rebuild
+instruction. The full `GET /api/v3/map/scores?level=tract|county` contract
+uses map schema 5 and returns aligned `place_id`, `res_hazard_npctl`,
 `community_conditions_group`, `mountain_magnitude`, `cost_of_living_index`,
 `home_buying_power_percentile`, `home_sqft_for_1m`, and
 `housing_built_2000_plus_pct` arrays in ascending unique `place_id` order.
 
-The browser starts from schema-4 `GET /api/v2/map/scores/core`, which contains only
+The browser starts from schema-5 `GET /api/v3/map/scores/core`, which contains only
 the first four columns plus build-bound add-on URLs. It fetches the Cost of Living
 array or the Home Costs/housing-stock arrays only when that layer or one of its
 filters is first used. Every add-on independently validates schema, build, scope,
@@ -222,9 +232,9 @@ level, ordered IDs, aligned lengths, nulls, and numeric domains before merging. 
 full endpoint remains available for local clients.
 
 Each payload's `build_id`, `level`, and `scope` identify the snapshot.
-Coverage-status fields remain available from place, county, detail, and export
+Data-quality and coverage fields remain available from place, county, detail, and export
 interfaces; they are intentionally absent from this compact rendering payload.
-All public HTTP routes are under `/api/v2`; `/api/v1/*` is intentionally unsupported.
+All public HTTP routes are under `/api/v3`; `/api/v1/*` and `/api/v2/*` are intentionally unsupported.
 Place and county lists support symmetric bounds for Mountain Magnitude, Cost of Living,
 square feet for $1M, and built-2000+ share, plus the compatible exact
 `community_conditions_group` and additive `max_community_conditions_group`. Explicit
@@ -243,7 +253,7 @@ npm run test:perf
 
 It records canonical Chromium and WebKit evidence at 1600×900 and DPR 2 and
 enforces the fixed gesture, settle, pick, detail, startup, long-task, and payload
-ceilings. The schema-4 full national payload must remain at or below 5.7 MB decoded
+ceilings. The schema-5 full national payload must remain at or below 5.7 MB decoded
 and 1.3 MB gzip. The initial core payload retains the prior 3.5 MB/1.1 MB envelope;
 the new arrays use the lazy fallback so they do not worsen initial interaction. The
 separate pre-existing Chromium pick-tail and WebKit gesture-tail debt remains tracked
@@ -268,7 +278,7 @@ uv run househunter mountain rescore-v1 --source-lock config/mountain/source-lock
 The single-purpose migration validates the v1 release, source identity, raw blocks,
 components, internal scores, and aggregates, then derives v2 from the validated raw
 block columns. It never trusts persisted aggregate scores or edits v1 artifacts in
-place. Full release, compact release, and schema-10 snapshot candidates are staged and
+place. Full release, compact release, and schema-11 snapshot candidates are staged and
 validated before any pointer changes. A small atomic journal makes an interrupted
 pointer commit forward-recoverable: rerunning the same command completes the same v2
 transaction. A v1, mixed, symlinked, partial, compact-only, foreign, or source-drifted
@@ -336,7 +346,7 @@ does not require those inputs.
 Prepared builds use one bounded pool of one to four worker processes. `--resume` reuses
 only checksum-valid shards for the same pack and pipeline; `--fresh` clears only the
 marked work directory for that pack. A successful promoted prepared build rebuilds the
-schema-10 normal snapshot, removes obsolete owned v2 releases and work shards, publishes
+schema-11 normal snapshot, removes obsolete owned v2 releases and work shards, publishes
 the validated under-50-MiB managed compact fallback, and writes a timing report under
 `data/mountain/reports/`. Release schema 2 binds the unchanged
 `mountain_pipeline_v1`, validation-only internal `mountain_score_v1`, public
@@ -347,7 +357,7 @@ preserves 10 GB of unrelated free filesystem space.
 
 The national laptop acceptance gate runs two clean four-worker builds and checks the
 55-minute runtime, 24 GiB aggregate RSS, swap growth, 45/50 GB storage limits, identical
-release and Parquet identities, schema-2/9 publication identity, and a queryable
+release and Parquet identities, schema-2/11 publication identity, and a queryable
 Mountain-ranked snapshot. It also gates 83,848 scored tracts and 3,143 scored counties;
 maxima near 4.9235 and 3.4973; western tract median/p95 near 0.88/1.94 and county
 median/p95 near 0.96/2.14; at least 0.75 from median to p95 and from p95 to maximum at
@@ -372,7 +382,7 @@ Rollback is explicit and fail-closed. A same-major v2 rollback may validate and 
 a retained v2 full release with the source lock, prepared pack, and prepared lock that
 created it; promotion is refused if provenance or raw metrics differ. A v1 release is
 never advertised as a v2-compatible rollback. Keep the pre-migration v1 full release
-unpruned until the installed 2.0.0 wheel passes offline acceptance. Cross-major rollback
+unpruned until the installed 3.0.0 wheel passes offline acceptance. Cross-major rollback
 restores the v1 application and all of its v1 full, compact, and snapshot pointers as one
 operation; do not point the v2 application at v1 data. Source licenses and public release
 identifiers are recorded per input in `source-lock-v2.json`. When refreshing a lock,
@@ -406,11 +416,12 @@ with an explicit repair message.
 
 ## Scope
 
-The FEMA layer uses composite `ALR_NPCTL`; the independent Community Conditions layer
-uses only CHR&R's published group; Mountain Magnitude remains a separate approximate
-context layer. The 18 published FEMA hazard percentiles appear on inspect/detail
-and ride along in exports; there is no hazard map layer, sort or filter by hazard,
-insurance data, external basemap, hosted service, or native installer.
+The primary hazard layer uses the derived `RES_HAZARD_NPCTL`; FEMA `ALR_NPCTL` and
+`ALR_VALB` remain supporting provenance. The independent Community Conditions layer
+uses only CHR&R's published group, and Mountain Magnitude remains a separate approximate
+context layer. The 17 derived building-hazard percentiles appear in inspect/detail and
+exports; there is no per-hazard map layer or filter, insurance data, external basemap,
+hosted service, or native installer.
 
 ## License
 

@@ -3,7 +3,9 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
 import secrets
+import tempfile
 from pathlib import Path
 from typing import Annotated, Literal
 from urllib.parse import urlencode, urlsplit
@@ -14,6 +16,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.background import BackgroundTask
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from . import __version__
@@ -43,7 +46,7 @@ from .map_assets import (
     load_manifest,
     map_asset_status,
 )
-from .store import Store, current_build
+from .store import Store, _export_select_sql, current_build
 
 
 class JobRequest(BaseModel):
@@ -109,6 +112,10 @@ class LocalOnlyMiddleware(BaseHTTPMiddleware):
             request.url.path.startswith("/api/") or request.url.path.startswith("/map-assets/")
         ):
             return JSONResponse({"detail": "Cross-site loopback request rejected"}, status_code=403)
+        if request.url.path in {"/api/v1", "/api/v2"} or request.url.path.startswith(
+            ("/api/v1/", "/api/v2/")
+        ):
+            return JSONResponse({"detail": "Not Found"}, status_code=404)
         response = await call_next(request)
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; connect-src 'self'; img-src 'self' data:; "
@@ -186,12 +193,15 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
         if x_househunter_token is None or not secrets.compare_digest(x_househunter_token, token):
             raise HTTPException(status_code=403, detail="Invalid or missing mutation token")
 
-    @app.get("/api/v2/meta")
+    @app.get("/api/v3/meta")
     def meta() -> dict[str, object]:
         result: dict[str, object] = {
             "app_version": __version__,
             "mutation_token": token,
-            "methodology": "Separate FEMA tract-level and county-level ALR_NPCTL percentiles",
+            "methodology": (
+                "HouseHunter Residential Hazard Exposure, calibrated separately for the "
+                "national FEMA tract and county layers"
+            ),
             "reference_assets_ready": True,
             "reference_assets_error": None,
             "map_assets": assets.as_dict(),
@@ -206,12 +216,12 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
             result["layers"] = []
         return result
 
-    @app.get("/api/v2/map/scores", response_model=MapScores)
+    @app.get("/api/v3/map/scores", response_model=MapScores)
     def map_scores(level: Literal["tract", "county"] = "tract") -> dict[str, object]:
         with Store(runtime) as store:
             return store.map_scores(level)
 
-    @app.get("/api/v2/map/scores/core", response_model=MapScoresCore)
+    @app.get("/api/v3/map/scores/core", response_model=MapScoresCore)
     def map_scores_core(
         level: Literal["tract", "county"] = "tract",
     ) -> dict[str, object]:
@@ -219,8 +229,8 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
             payload = store.map_scores_core(level)
         query = urlencode({"level": level, "build_id": payload["build_id"]})
         payload["add_ons"] = {
-            "cost_of_living": f"/api/v2/map/scores/addons/cost-of-living?{query}",
-            "home_costs": f"/api/v2/map/scores/addons/home-costs?{query}",
+            "cost_of_living": f"/api/v3/map/scores/addons/cost-of-living?{query}",
+            "home_costs": f"/api/v3/map/scores/addons/home-costs?{query}",
         }
         return payload
 
@@ -235,7 +245,7 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
             ) from exc
 
     @app.get(
-        "/api/v2/map/scores/addons/cost-of-living",
+        "/api/v3/map/scores/addons/cost-of-living",
         response_model=CostOfLivingMapScores,
     )
     def cost_of_living_map_scores(
@@ -245,7 +255,7 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
         return map_scores_addon(level, "cost-of-living", build_id)
 
     @app.get(
-        "/api/v2/map/scores/addons/home-costs",
+        "/api/v3/map/scores/addons/home-costs",
         response_model=HomeCostsMapScores,
     )
     def home_costs_map_scores(
@@ -292,7 +302,7 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
             },
         )
 
-    @app.get("/api/v2/sources", response_model=list[SourceStatus])
+    @app.get("/api/v3/sources", response_model=list[SourceStatus])
     def sources() -> list[dict[str, object]]:
         try:
             _, metadata = current_build(runtime)
@@ -309,7 +319,7 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
         return live
 
     @app.post(
-        "/api/v2/jobs",
+        "/api/v3/jobs",
         dependencies=[Depends(require_token)],
         status_code=202,
         response_model=JobStatus,
@@ -317,27 +327,27 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
     def create_job(request: JobRequest) -> dict[str, object]:
         return jobs.start(request.kind, state=request.state).model_dump(mode="json")
 
-    @app.get("/api/v2/jobs/{job_id}", response_model=JobStatus)
+    @app.get("/api/v3/jobs/{job_id}", response_model=JobStatus)
     def get_job(job_id: str) -> dict[str, object]:
         return jobs.get(job_id).model_dump(mode="json")
 
     @app.delete(
-        "/api/v2/jobs/{job_id}",
+        "/api/v3/jobs/{job_id}",
         dependencies=[Depends(require_token)],
         response_model=JobStatus,
     )
     def cancel_job(job_id: str) -> dict[str, object]:
         return jobs.cancel(job_id).model_dump(mode="json")
 
-    @app.get("/api/v2/places", response_model=PlacePage)
+    @app.get("/api/v3/places", response_model=PlacePage)
     def places(
         search: str | None = None,
         state: str | None = None,
         county: str | None = None,
         min_population: int | None = Query(None, ge=0),
         max_population: int | None = Query(None, ge=0),
-        min_score: float | None = Query(None, ge=0, le=100),
-        max_score: float | None = Query(None, ge=0, le=100),
+        min_res_hazard: float | None = Query(None, ge=0, le=100),
+        max_res_hazard: float | None = Query(None, ge=0, le=100),
         community_conditions_group: int | None = Query(None, ge=1, le=10),
         max_community_conditions_group: int | None = Query(None, ge=1, le=10),
         mountain_magnitude_min: float | None = Query(None, ge=0),
@@ -349,7 +359,7 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
         housing_built_2000_plus_pct_min: float | None = Query(None, ge=0, le=100),
         housing_built_2000_plus_pct_max: float | None = Query(None, ge=0, le=100),
         include_unranked: bool = False,
-        sort: str = "risk_score",
+        sort: str = "res_hazard_npctl",
         direction: Literal["asc", "desc"] = "asc",
         offset: int = Query(0, ge=0),
         limit: int = Query(100, ge=1, le=500),
@@ -361,8 +371,8 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
                 county=county,
                 min_population=min_population,
                 max_population=max_population,
-                min_score=min_score,
-                max_score=max_score,
+                min_res_hazard=min_res_hazard,
+                max_res_hazard=max_res_hazard,
                 community_conditions_group=community_conditions_group,
                 max_community_conditions_group=max_community_conditions_group,
                 mountain_magnitude_min=mountain_magnitude_min,
@@ -380,21 +390,21 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
                 limit=limit,
             )
 
-    @app.get("/api/v2/places/{place_id}", response_model=PlaceDetail)
+    @app.get("/api/v3/places/{place_id}", response_model=PlaceDetail)
     def place(place_id: str) -> dict[str, object]:
         with Store(runtime) as store:
             return store.place_detail(store.resolve_place(place_id))
 
-    @app.post("/api/v2/lookup", response_model=AddressLookup | AddressConfirmation)
+    @app.post("/api/v3/lookup", response_model=AddressLookup | AddressConfirmation)
     def lookup(request: AddressLookupRequest) -> dict[str, object]:
         return lookup_address(runtime, request.address, candidate_id=request.candidate_id)
 
-    @app.get("/api/v2/counties", response_model=PlacePage)
+    @app.get("/api/v3/counties", response_model=PlacePage)
     def counties(
         search: str | None = None,
         state: str | None = None,
-        min_score: float | None = Query(None, ge=0, le=100),
-        max_score: float | None = Query(None, ge=0, le=100),
+        min_res_hazard: float | None = Query(None, ge=0, le=100),
+        max_res_hazard: float | None = Query(None, ge=0, le=100),
         community_conditions_group: int | None = Query(None, ge=1, le=10),
         max_community_conditions_group: int | None = Query(None, ge=1, le=10),
         mountain_magnitude_min: float | None = Query(None, ge=0),
@@ -406,7 +416,7 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
         housing_built_2000_plus_pct_min: float | None = Query(None, ge=0, le=100),
         housing_built_2000_plus_pct_max: float | None = Query(None, ge=0, le=100),
         include_unranked: bool = False,
-        sort: str = "risk_score",
+        sort: str = "res_hazard_npctl",
         direction: Literal["asc", "desc"] = "asc",
         offset: int = Query(0, ge=0),
         limit: int = Query(100, ge=1, le=500),
@@ -415,8 +425,8 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
             return store.list_counties(
                 search=search,
                 state=state,
-                min_score=min_score,
-                max_score=max_score,
+                min_res_hazard=min_res_hazard,
+                max_res_hazard=max_res_hazard,
                 community_conditions_group=community_conditions_group,
                 max_community_conditions_group=max_community_conditions_group,
                 mountain_magnitude_min=mountain_magnitude_min,
@@ -434,7 +444,7 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
                 limit=limit,
             )
 
-    @app.get("/api/v2/counties/{stco_fips}", response_model=PlaceDetail)
+    @app.get("/api/v3/counties/{stco_fips}", response_model=PlaceDetail)
     def county(stco_fips: str) -> dict[str, object]:
         with Store(runtime) as store:
             return store.county_detail(store.resolve_county(stco_fips))
@@ -442,7 +452,7 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
     def csv_export_for(table: Literal["places", "counties"], filename: str) -> StreamingResponse:
         def rows():  # type: ignore[no-untyped-def]
             with Store(runtime) as store:
-                cursor = store.connection.execute(f"SELECT * FROM {table} ORDER BY place_id")
+                cursor = store.connection.execute(_export_select_sql(table))
                 buffer = io.StringIO()
                 writer = csv.writer(buffer)
                 writer.writerow([column[0] for column in cursor.description])
@@ -460,11 +470,22 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
         )
 
     def parquet_export_for(name: Literal["places", "counties"], filename: str) -> FileResponse:
-        build, _ = current_build(runtime)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix="househunter-export-", suffix=".parquet"
+        )
+        os.close(descriptor)
+        temporary = Path(temporary_name)
+        try:
+            with Store(runtime) as store:
+                store.export("parquet", temporary, table=name)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
         return FileResponse(
-            build / f"{name}.parquet",
+            temporary,
             media_type="application/vnd.apache.parquet",
             filename=filename,
+            background=BackgroundTask(temporary.unlink, missing_ok=True),
         )
 
     def json_export_for(table: Literal["places", "counties"], filename: str) -> StreamingResponse:
@@ -472,7 +493,7 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
             yield "["
             first = True
             with Store(runtime) as store:
-                cursor = store.connection.execute(f"SELECT * FROM {table} ORDER BY place_id")
+                cursor = store.connection.execute(_export_select_sql(table))
                 columns = [column[0] for column in cursor.description]
                 while batch := cursor.fetchmany(1000):
                     for row in batch:
@@ -490,36 +511,29 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
-    @app.get("/api/v2/exports/places.csv")
+    @app.get("/api/v3/exports/places.csv")
     def csv_export() -> StreamingResponse:
         return csv_export_for("places", "househunter-places.csv")
 
-    @app.get("/api/v2/exports/places.parquet")
+    @app.get("/api/v3/exports/places.parquet")
     def parquet_export() -> FileResponse:
         return parquet_export_for("places", "househunter-places.parquet")
 
-    @app.get("/api/v2/exports/places.json")
+    @app.get("/api/v3/exports/places.json")
     def json_export() -> StreamingResponse:
         return json_export_for("places", "househunter-places.json")
 
-    @app.get("/api/v2/exports/counties.csv")
+    @app.get("/api/v3/exports/counties.csv")
     def counties_csv_export() -> StreamingResponse:
         return csv_export_for("counties", "househunter-counties.csv")
 
-    @app.get("/api/v2/exports/counties.parquet")
+    @app.get("/api/v3/exports/counties.parquet")
     def counties_parquet_export() -> FileResponse:
         return parquet_export_for("counties", "househunter-counties.parquet")
 
-    @app.get("/api/v2/exports/counties.json")
+    @app.get("/api/v3/exports/counties.json")
     def counties_json_export() -> StreamingResponse:
         return json_export_for("counties", "househunter-counties.json")
-
-    legacy_methods = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]
-
-    @app.api_route("/api/v1", methods=legacy_methods, include_in_schema=False)
-    @app.api_route("/api/v1/{legacy_path:path}", methods=legacy_methods, include_in_schema=False)
-    def removed_v1_api(legacy_path: str = "") -> None:
-        raise HTTPException(status_code=404, detail="HouseHunter API v1 has been removed")
 
     static = static_directory()
     if static.is_dir():

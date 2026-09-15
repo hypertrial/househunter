@@ -109,7 +109,7 @@ export default function RiskMap({
   scoreUrl,
   expectedBuildId,
   level,
-  metric = "fema",
+  metric = "residential-hazard",
   displayMetric = metric,
   busy = displayMetric !== metric,
   selected,
@@ -718,11 +718,12 @@ export default function RiskMap({
     if (viewport && zoomRef.current) select(viewport).call(zoomRef.current.transform, zoomIdentity);
   };
 
-  const metricLabel = displayMetric === "fema" ? "risk"
+  const metricLabel = displayMetric === "residential-hazard" ? "Residential Hazard Exposure"
     : displayMetric === "mountain" ? "Mountain Magnitude"
       : displayMetric === "community-conditions" ? "Community Conditions"
         : displayMetric === "cost-of-living" ? "Cost of Living" : "Home Costs";
-  const metricDescription = displayMetric === "fema" ? "Lower FEMA ALR_NPCTL is better."
+  const metricDescription = displayMetric === "residential-hazard"
+    ? "Higher values indicate greater residential multi-hazard exposure."
     : displayMetric === "mountain"
       ? `Higher Mountain Magnitude means fewer U.S. ${pluralLevel} have equal-or-higher resident-weighted mountain exposure.`
       : displayMetric === "community-conditions"

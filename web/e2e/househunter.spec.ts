@@ -12,7 +12,7 @@ const build = {
 };
 
 const layers = [
-  { key: "risk", display_name: "Natural Disaster Risk", source: "FEMA NRI", direction: "lower", availability: "available", vintage: "December 2025", geography: "tract and county", attribution: "FEMA NRI", notice: "Not property-level risk." },
+  { key: "residential-hazard", display_name: "Residential Hazard Exposure", source: "HouseHunter / FEMA NRI", direction: "higher", availability: "available", vintage: "December 2025", geography: "tract and county", attribution: "FEMA NRI", notice: "Not property-level risk." },
   { key: "community-conditions", display_name: "Community Conditions", source: "CHR&R", direction: "lower", availability: "available", vintage: "2025", geography: "county; inherited by tracts", attribution: "CHR&R", notice: "Groups are not percentiles." },
   { key: "mountain", display_name: "Mountain Magnitude", source: "HouseHunter", direction: "higher", availability: "available", vintage: "fixture", geography: "tract and county", attribution: "HouseHunter", notice: "Separate peer groups." },
   { key: "cost-of-living", display_name: "Cost of Living", source: "BEA RPP", direction: "lower", availability: "available", vintage: "2024", geography: "metropolitan or U.S. nonmetropolitan; inherited by tracts", attribution: "U.S. Bureau of Economic Analysis", notice: "U.S. = 100." },
@@ -21,7 +21,11 @@ const layers = [
 
 const summary = {
   place_id: "08013012101", name: "Census tract 121.01", state: "CO", place_type: "tract",
-  population_2020: 0, housing_units_2020: 0, risk_score: 21.25, coverage_status: "complete",
+  population_2020: 0, housing_units_2020: 0, res_hazard_npctl: 21.25,
+  res_hazard_spread: 12.5, res_hazard_spectral: 68, res_hazard_tail: 72,
+  res_hazard_power4: 65, property_loss_npctl: 44.5,
+  res_hazard_data_quality: "partial", res_hazard_available_count: 16,
+  res_hazard_coverage_ratio: 16 / 17, alr_npctl: 35.2, alr_valb: 0.00125,
   fema_vintage: "December 2025", census_vintage: "n/a", county_fips: "08013", county_name: "Boulder",
   community_conditions_group: 2, community_conditions_geography: "county", chrr_release_year: 2025,
   mountain_magnitude: 2.3213, mountain_magnitude_version: "mountain_magnitude_v2", mountain_pipeline_version: "mountain_pipeline_v1",
@@ -51,20 +55,20 @@ const summary = {
 };
 
 const countySummary = {
-  ...summary, place_id: "08013", name: "Boulder", place_type: "county", risk_score: 18.5,
+  ...summary, place_id: "08013", name: "Boulder", place_type: "county", res_hazard_npctl: 18.5,
 };
 
 const hazards = [
-  { code: "WFIR", label: "Wildfire", percentile: 80.5 },
-  { code: "AVLN", label: "Avalanche", percentile: 12 },
-  { code: "TSUN", label: "Tsunami", percentile: null },
+  { code: "WFIR", label: "Wildfire", percentile: 80.5, raw_alrb: 0.003, availability: "valid", fema_eal_rating: "Relatively High" },
+  { code: "AVLN", label: "Avalanche", percentile: 12, raw_alrb: 0.0002, availability: "valid", fema_eal_rating: "Relatively Low" },
+  { code: "TSUN", label: "Tsunami", percentile: 0, raw_alrb: null, availability: "not_applicable", fema_eal_rating: "Not Applicable" },
 ];
 
 const detail = (item = summary) => ({
-  summary: item, total_weighted_housing: 0, coverage_ratio: 1,
-  methodology_notice: "Published FEMA ALR_NPCTL; not property-level risk.",
+  summary: item,
+  methodology_notice: "HouseHunter residential hazard composite; not property-level risk.",
   source_notices: ["Asking-market indicator, not a sale price."],
-  tract_contributions: [], hazard_percentiles: hazards,
+  hazard_percentiles: hazards,
   member_tract_count: item.place_type === "county" ? 12 : null,
 });
 
@@ -192,39 +196,39 @@ async function installRoutes(
       await route.fulfill({ json: name === "tracts-co.topojson.gz" ? detailPolygon : polygon });
     }
   });
-  await page.route("**/api/v2/**", async (route: Route) => {
+  await page.route("**/api/v3/**", async (route: Route) => {
     const url = new URL(route.request().url());
-    if (url.pathname === "/api/v2/meta") {
+    if (url.pathname === "/api/v3/meta") {
       await route.fulfill({ json: {
-        app_version: "2.0.0", mutation_token: "test-token", reference_assets_ready: true,
+        app_version: "3.0.0", mutation_token: "test-token", reference_assets_ready: true,
         reference_assets_error: null, build: prepared ? build : null, layers,
         map_assets: { ready: true, error: null, schema_version: 1, release: "v1.20", manifest_url: "/map-assets/manifest.json" },
       } });
-    } else if (url.pathname === "/api/v2/jobs" && route.request().method() === "POST") {
+    } else if (url.pathname === "/api/v3/jobs" && route.request().method() === "POST") {
       expect(route.request().headers()["x-househunter-token"]).toBe("test-token");
       await route.fulfill({ status: 202, json: { job_id: "one", state: "running", progress: 30, message: "Building", error: null } });
-    } else if (url.pathname === "/api/v2/jobs/one") {
+    } else if (url.pathname === "/api/v3/jobs/one") {
       prepared = true;
       await route.fulfill({ json: { job_id: "one", state: "succeeded", progress: 100, message: "Complete", error: null } });
-    } else if (url.pathname === "/api/v2/map/scores/core") {
+    } else if (url.pathname === "/api/v3/map/scores/core") {
       const county = url.searchParams.get("level") === "county";
       const query = `level=${county ? "county" : "tract"}&build_id=${build.build_id}`;
-      await route.fulfill({ json: { schema_version: 4, build_id: build.build_id, level: county ? "county" : "tract", scope: build.scope, add_ons: { cost_of_living: `/api/v2/map/scores/addons/cost-of-living?${query}`, home_costs: `/api/v2/map/scores/addons/home-costs?${query}` }, columns: { place_id: [county ? "08013" : "08013012101"], risk_score: [county ? 18.5 : 21.25], community_conditions_group: [2], mountain_magnitude: [2.3213] } } });
-    } else if (url.pathname === "/api/v2/map/scores/addons/cost-of-living") {
+      await route.fulfill({ json: { schema_version: 5, build_id: build.build_id, level: county ? "county" : "tract", scope: build.scope, add_ons: { cost_of_living: `/api/v3/map/scores/addons/cost-of-living?${query}`, home_costs: `/api/v3/map/scores/addons/home-costs?${query}` }, columns: { place_id: [county ? "08013" : "08013012101"], res_hazard_npctl: [county ? 18.5 : 21.25], community_conditions_group: [2], mountain_magnitude: [2.3213] } } });
+    } else if (url.pathname === "/api/v3/map/scores/addons/cost-of-living") {
       const county = url.searchParams.get("level") === "county";
       await route.fulfill({ json: { schema_version: 1, kind: "cost-of-living", build_id: build.build_id, level: county ? "county" : "tract", scope: build.scope, columns: { place_id: [county ? "08013" : "08013012101"], cost_of_living_index: [107.2] } } });
-    } else if (url.pathname === "/api/v2/map/scores/addons/home-costs") {
+    } else if (url.pathname === "/api/v3/map/scores/addons/home-costs") {
       const county = url.searchParams.get("level") === "county";
       await route.fulfill({ json: { schema_version: 1, kind: "home-costs", build_id: build.build_id, level: county ? "county" : "tract", scope: build.scope, columns: { place_id: [county ? "08013" : "08013012101"], home_buying_power_percentile: [42], home_sqft_for_1m: [2100], housing_built_2000_plus_pct: [32.5] } } });
-    } else if (url.pathname === "/api/v2/places") {
+    } else if (url.pathname === "/api/v3/places") {
       await route.fulfill({ json: { total: 1, items: [summary] } });
-    } else if (url.pathname === "/api/v2/counties") {
+    } else if (url.pathname === "/api/v3/counties") {
       await route.fulfill({ json: { total: 1, items: [countySummary] } });
-    } else if (url.pathname === "/api/v2/places/08013012101") {
+    } else if (url.pathname === "/api/v3/places/08013012101") {
       await route.fulfill({ json: detail() });
-    } else if (url.pathname === "/api/v2/counties/08013") {
+    } else if (url.pathname === "/api/v3/counties/08013") {
       await route.fulfill({ json: detail(countySummary) });
-    } else if (url.pathname === "/api/v2/lookup") {
+    } else if (url.pathname === "/api/v3/lookup") {
       const posted = route.request().postDataJSON() as { candidate_id?: string };
       if (posted.candidate_id) await route.fulfill({ json: {
         status: "resolved", query: "1 Main St", matched_address: "Main Street, Boulder, CO", tract_id: summary.place_id,
@@ -264,8 +268,8 @@ test("keeps preparation and retained workflows inside the map shell", async ({ p
   await page.getByRole("button", { name: /Census tract 121.01/ }).first().click();
   const detailDrawer = page.getByRole("dialog", { name: "Tract detail" });
   await expect(detailDrawer).toContainText("Wildfire");
-  await expect(detailDrawer).toContainText("No rating");
-  const scoreValue = detailDrawer.locator('.metric-card[aria-label="FEMA risk"] > span');
+  await expect(detailDrawer).toContainText("0.0 · Not applicable");
+  const scoreValue = detailDrawer.locator('.metric-card[aria-label="Residential Hazard Exposure"] > span');
   await expect(scoreValue).toHaveCSS("color", "rgb(185, 175, 82)");
   const wildfireBar = detailDrawer.locator(".contribution", { hasText: "Wildfire" }).locator(".bar i");
   await expect(wildfireBar).toHaveCSS("background-color", "rgb(193, 99, 65)");
@@ -320,18 +324,18 @@ test("combines Cost of Living and Home Costs with the other map filters", async 
   const scoreRequests: string[] = [];
   page.on("request", (request) => {
     const pathname = new URL(request.url()).pathname;
-    if (pathname.startsWith("/api/v2/map/scores")) scoreRequests.push(pathname);
+    if (pathname.startsWith("/api/v3/map/scores")) scoreRequests.push(pathname);
   });
   await page.goto("/");
   await expect(page.locator(".build-pill")).toContainText("interactive");
-  expect(scoreRequests).toContain("/api/v2/map/scores/core");
-  expect(scoreRequests).not.toContain("/api/v2/map/scores/addons/cost-of-living");
-  expect(scoreRequests).not.toContain("/api/v2/map/scores/addons/home-costs");
+  expect(scoreRequests).toContain("/api/v3/map/scores/core");
+  expect(scoreRequests).not.toContain("/api/v3/map/scores/addons/cost-of-living");
+  expect(scoreRequests).not.toContain("/api/v3/map/scores/addons/home-costs");
   const layer = page.getByRole("combobox", { name: "Map layer" });
   await expect(layer.getByRole("option")).toHaveCount(5);
 
   await layer.selectOption("cost-of-living");
-  await expect.poll(() => scoreRequests).toContain("/api/v2/map/scores/addons/cost-of-living");
+  await expect.poll(() => scoreRequests).toContain("/api/v3/map/scores/addons/cost-of-living");
   const costLegend = page.getByLabel(
     "Cost of Living color scale from 80 to 120, lower is better, U.S. equals 100",
   );
@@ -344,7 +348,7 @@ test("combines Cost of Living and Home Costs with the other map filters", async 
   await page.getByLabel("Minimum square feet for $1M").fill("2000");
   await page.getByLabel("Minimum built 2000+ share (%)").fill("30");
   await page.getByRole("button", { name: "Apply" }).click();
-  await expect.poll(() => scoreRequests).toContain("/api/v2/map/scores/addons/home-costs");
+  await expect.poll(() => scoreRequests).toContain("/api/v3/map/scores/addons/home-costs");
   await expect(page).toHaveURL(/cost_of_living_index_max=110/);
   await expect(page).toHaveURL(/home_sqft_for_1m_min=2000/);
   await expect(page).toHaveURL(/housing_built_2000_plus_pct_min=30/);
@@ -375,7 +379,7 @@ test("keeps core layers interactive when a lazy map add-on fails and retries onl
   await installRoutes(page);
   let allowCost = false;
   let attempts = 0;
-  await page.route("**/api/v2/map/scores/addons/cost-of-living**", async (route) => {
+  await page.route("**/api/v3/map/scores/addons/cost-of-living**", async (route) => {
     attempts += 1;
     if (!allowCost) {
       await route.fulfill({ status: 503, json: { detail: "temporary cost add-on failure" } });
@@ -393,9 +397,9 @@ test("keeps core layers interactive when a lazy map add-on fails and retries onl
   expect(attempts).toBe(1);
   await expect(page.getByText("Scores could not be loaded")).toHaveCount(0);
 
-  await layer.selectOption("fema");
+  await layer.selectOption("residential-hazard");
   await expect(page.locator(".build-pill")).toContainText("interactive");
-  const map = page.getByRole("img", { name: /Focusable USA tract risk map/ });
+  const map = page.getByRole("img", { name: /Focusable USA tract Residential Hazard Exposure map/ });
   const bounds = await map.boundingBox();
   if (!bounds) throw new Error("Map viewport has no bounds");
   await map.click({ position: { x: bounds.width / 2, y: bounds.height / 2 } });
@@ -421,7 +425,7 @@ test("recolors a panned map after a delayed lazy add-on arrives", async ({ page 
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });
   let requests = 0;
-  await page.route("**/api/v2/map/scores/addons/cost-of-living**", async (route) => {
+  await page.route("**/api/v3/map/scores/addons/cost-of-living**", async (route) => {
     requests += 1;
     await gate;
     await route.fallback();
@@ -456,7 +460,7 @@ test("deep-linked lazy layers finish with one consistent style revision", async 
   const ids = Array.from({ length: 20_000 }, (_, index) => `08013${String(index).padStart(6, "0")}`);
   const columns = {
     place_id: ids,
-    risk_score: ids.map(() => 21.25),
+    res_hazard_npctl: ids.map(() => 21.25),
     community_conditions_group: ids.map(() => 2),
     mountain_magnitude: ids.map(() => 2.3213),
   };
@@ -475,16 +479,16 @@ test("deep-linked lazy layers finish with one consistent style revision", async 
     arcs: [raceArc],
   };
   await page.route("**/map-assets/tracts.topojson.gz", (route) => route.fulfill({ json: topology }));
-  await page.route("**/api/v2/map/scores/core**", (route) => route.fulfill({ json: {
-    schema_version: 4, build_id: build.build_id, level: "tract", scope: build.scope,
+  await page.route("**/api/v3/map/scores/core**", (route) => route.fulfill({ json: {
+    schema_version: 5, build_id: build.build_id, level: "tract", scope: build.scope,
     add_ons: {
-      cost_of_living: `/api/v2/map/scores/addons/cost-of-living?level=tract&build_id=${build.build_id}`,
-      home_costs: `/api/v2/map/scores/addons/home-costs?level=tract&build_id=${build.build_id}`,
+      cost_of_living: `/api/v3/map/scores/addons/cost-of-living?level=tract&build_id=${build.build_id}`,
+      home_costs: `/api/v3/map/scores/addons/home-costs?level=tract&build_id=${build.build_id}`,
     },
     columns,
   } }));
   let requests = 0;
-  await page.route("**/api/v2/map/scores/addons/cost-of-living**", async (route) => {
+  await page.route("**/api/v3/map/scores/addons/cost-of-living**", async (route) => {
     requests += 1;
     await route.fulfill({ json: {
       schema_version: 1, kind: "cost-of-living", build_id: build.build_id,
@@ -538,7 +542,7 @@ test("surfaces and retries a failed add-on required only by a cross-layer filter
   await installRoutes(page);
   let allowHome = false;
   let attempts = 0;
-  await page.route("**/api/v2/map/scores/addons/home-costs**", async (route) => {
+  await page.route("**/api/v3/map/scores/addons/home-costs**", async (route) => {
     attempts += 1;
     if (!allowHome) {
       await route.fulfill({ status: 503, json: { detail: "temporary Home Costs failure" } });
@@ -555,14 +559,14 @@ test("surfaces and retries a failed add-on required only by a cross-layer filter
   await expect(recovery).toBeVisible();
   expect(attempts).toBe(1);
   await expect(page.getByText("Scores could not be loaded")).toHaveCount(0);
-  await expect(page.getByRole("combobox", { name: "Map layer" })).toHaveValue("fema");
+  await expect(page.getByRole("combobox", { name: "Map layer" })).toHaveValue("residential-hazard");
 
   allowHome = true;
   await recovery.getByRole("button", { name: "Retry Home Costs" }).click();
   await expect.poll(() => attempts).toBe(2);
   await expect(recovery).toHaveCount(0);
   await expect(page.locator(".build-pill")).toContainText("interactive");
-  const map = page.getByRole("img", { name: /Focusable USA tract risk map/ });
+  const map = page.getByRole("img", { name: /Focusable USA tract Residential Hazard Exposure map/ });
   const bounds = await map.boundingBox();
   if (!bounds) throw new Error("Map viewport has no bounds");
   await map.click({ position: { x: bounds.width / 2, y: bounds.height / 2 } });
@@ -574,12 +578,12 @@ test("stacks and independently retries simultaneous lazy add-on failures", async
   await installRoutes(page);
   const allowed = { cost: false, home: false };
   const attempts = { cost: 0, home: 0 };
-  await page.route("**/api/v2/map/scores/addons/cost-of-living**", async (route) => {
+  await page.route("**/api/v3/map/scores/addons/cost-of-living**", async (route) => {
     attempts.cost += 1;
     if (allowed.cost) await route.fallback();
     else await route.fulfill({ status: 503, json: { detail: "temporary Cost failure" } });
   });
-  await page.route("**/api/v2/map/scores/addons/home-costs**", async (route) => {
+  await page.route("**/api/v3/map/scores/addons/home-costs**", async (route) => {
     attempts.home += 1;
     if (allowed.home) await route.fallback();
     else await route.fulfill({ status: 503, json: { detail: "temporary Home failure" } });
@@ -620,18 +624,18 @@ test("stacks and independently retries simultaneous lazy add-on failures", async
 test("keeps ACS filtering usable when Home Costs is unavailable", async ({ page }, testInfo) => {
   test.skip(!testInfo.project.name.endsWith("-wide"), "Runs the unavailable-layer worker flow once per browser engine");
   await installRoutes(page);
-  await page.route("**/api/v2/meta", (route) => route.fulfill({ json: {
-    app_version: "2.0.0", mutation_token: "test-token", reference_assets_ready: true,
+  await page.route("**/api/v3/meta", (route) => route.fulfill({ json: {
+    app_version: "3.0.0", mutation_token: "test-token", reference_assets_ready: true,
     reference_assets_error: null, build,
     layers: layers.map((layer) => layer.key === "home-costs"
       ? { ...layer, availability: "unavailable", vintage: "ACS 2024", notice: "Import an approved Realtor.com county file." }
       : layer),
     map_assets: { ready: true, error: null, schema_version: 1, release: "v1.20", manifest_url: "/map-assets/manifest.json" },
   } }));
-  await page.route("**/api/v2/map/scores**", (route) => route.fulfill({ json: {
-    schema_version: 4, build_id: build.build_id, level: "tract", scope: build.scope,
+  await page.route("**/api/v3/map/scores**", (route) => route.fulfill({ json: {
+    schema_version: 5, build_id: build.build_id, level: "tract", scope: build.scope,
     columns: {
-      place_id: [summary.place_id], risk_score: [summary.risk_score],
+      place_id: [summary.place_id], res_hazard_npctl: [summary.res_hazard_npctl],
       community_conditions_group: [2], mountain_magnitude: [summary.mountain_magnitude],
       cost_of_living_index: [summary.cost_of_living_index], home_buying_power_percentile: [null],
       home_sqft_for_1m: [null], housing_built_2000_plus_pct: [32.5],
@@ -747,8 +751,8 @@ test("is keyboard operable and never overflows the viewport", async ({ page }, t
   }
   const dimensions = await page.evaluate(() => ({ page: document.documentElement.scrollWidth, viewport: innerWidth }));
   expect(dimensions.page).toBe(dimensions.viewport);
-  await expect(page.getByLabel(/Focusable USA tract risk map/)).toBeVisible();
-  await expect(page.getByLabel("Continuous score color scale, lower is better"))
+  await expect(page.getByLabel(/Focusable USA tract Residential Hazard Exposure map/)).toBeVisible();
+  await expect(page.getByLabel("Continuous Residential Hazard Exposure color scale, higher is worse"))
     .toContainText("not property-level risk");
   const accessibility = await new AxeBuilder({ page })
     .withTags(["wcag2a", "wcag2aa", "wcag21aa", "wcag22aa"])
@@ -926,16 +930,16 @@ test("picks polygon holes exactly and resolves overlaps in reverse source order"
   await installRoutes(page);
   const selected: string[] = [];
   await page.route("**/map-assets/tracts.topojson.gz", (route) => route.fulfill({ json: exactPickPolygons }));
-  await page.route("**/api/v2/map/scores**", (route) => route.fulfill({ json: {
-    schema_version: 4, build_id: build.build_id, level: "tract", scope: build.scope,
+  await page.route("**/api/v3/map/scores**", (route) => route.fulfill({ json: {
+    schema_version: 5, build_id: build.build_id, level: "tract", scope: build.scope,
     columns: {
-      place_id: ["08013012101", "08013012102"], risk_score: [21.25, 35],
+      place_id: ["08013012101", "08013012102"], res_hazard_npctl: [21.25, 35],
       community_conditions_group: [2, 2], mountain_magnitude: [2.3213, 2.3213],
       cost_of_living_index: [107.2, 107.2], home_buying_power_percentile: [42, 42],
       home_sqft_for_1m: [2100, 2100], housing_built_2000_plus_pct: [32.5, 32.5],
     },
   } }));
-  await page.route("**/api/v2/places/08013012102", (route) => {
+  await page.route("**/api/v3/places/08013012102", (route) => {
     selected.push("08013012102");
     return route.fulfill({ json: detail({
       ...summary, place_id: "08013012102", name: "Later overlap",
@@ -980,11 +984,11 @@ test("picks a newly exposed state before its replacement bitmap commits", async 
   const selectedId = exposedCaliforniaIds.at(-1)!;
   await page.route("**/map-assets/states.topojson.gz", (route) => route.fulfill({ json: exposedAreaStates }));
   await page.route("**/map-assets/tracts.topojson.gz", (route) => route.fulfill({ json: exposedAreaTracts }));
-  await page.route("**/api/v2/map/scores**", (route) => route.fulfill({ json: {
-    schema_version: 4, build_id: build.build_id, level: "tract", scope: build.scope,
+  await page.route("**/api/v3/map/scores**", (route) => route.fulfill({ json: {
+    schema_version: 5, build_id: build.build_id, level: "tract", scope: build.scope,
     columns: {
       place_id: [...exposedCaliforniaIds, summary.place_id],
-      risk_score: [...exposedCaliforniaIds.map(() => 35), summary.risk_score],
+      res_hazard_npctl: [...exposedCaliforniaIds.map(() => 35), summary.res_hazard_npctl],
       community_conditions_group: [...exposedCaliforniaIds.map(() => 2), 2],
       mountain_magnitude: [...exposedCaliforniaIds.map(() => 1.5), summary.mountain_magnitude],
       cost_of_living_index: [...exposedCaliforniaIds.map(() => 103), 107.2],
@@ -993,7 +997,7 @@ test("picks a newly exposed state before its replacement bitmap commits", async 
       housing_built_2000_plus_pct: [...exposedCaliforniaIds.map(() => 30), 32.5],
     },
   } }));
-  await page.route(`**/api/v2/places/${selectedId}`, (route) => route.fulfill({ json: detail({
+  await page.route(`**/api/v3/places/${selectedId}`, (route) => route.fulfill({ json: detail({
     ...summary, place_id: selectedId, name: `California ${selectedId}`, state: "CA", county_fips: "06001",
   }) }));
   await page.goto(`/?profile-map#level=tract&place=${summary.place_id}`);
@@ -1103,16 +1107,16 @@ test("cancels an obsolete metric paint when returning to a cached metric", async
   await expect(canvas).toBeVisible();
 
   await page.getByRole("combobox", { name: "Map layer" }).selectOption("mountain");
-  await page.getByRole("combobox", { name: "Map layer" }).selectOption("fema");
+  await page.getByRole("combobox", { name: "Map layer" }).selectOption("residential-hazard");
   await expect(page.locator(".build-pill")).toContainText("interactive");
   await page.waitForTimeout(350);
 
-  await expect(page.getByRole("combobox", { name: "Map layer" })).toHaveValue("fema");
-  await expect(page.getByLabel("Continuous score color scale, lower is better")).toBeVisible();
+  await expect(page.getByRole("combobox", { name: "Map layer" })).toHaveValue("residential-hazard");
+  await expect(page.getByLabel("Continuous Residential Hazard Exposure color scale, higher is worse")).toBeVisible();
   await expect(page.getByLabel(/Continuous Mountain Magnitude color scale/)).toHaveCount(0);
   expect(await page.evaluate(() => (window.__HOUSEHUNTER_MAP_PROFILE__ || [])
     .filter((entry) => entry.name === "bitmap-commit" || entry.name === "bitmap-reuse-commit")
-    .at(-1)?.metric)).toBe("fema");
+    .at(-1)?.metric)).toBe("residential-hazard");
 });
 
 test("keeps narrow map actions, status, and controls fully usable", async ({ page }) => {

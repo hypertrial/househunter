@@ -152,7 +152,7 @@ let height = 1;
 let ratio = 1;
 let camera: MapTransform = { k: 1, x: 0, y: 0 };
 let semantics: MapSemantics = {
-  metric: "fema", state: "", county: "", showUnavailable: false,
+  metric: "residential-hazard", state: "", county: "", showUnavailable: false,
   mountainMagnitudeMin: null, communityConditionsGroupMax: null,
   costOfLivingIndexMax: null, homeSqftFor1mMin: null,
   housingBuilt2000PlusPctMin: null, neutralOnly: false,
@@ -242,7 +242,7 @@ function scoreValues(index: number | null): [
 ] {
   if (index === null || !scores) return [null, null, null, null, null, null, null];
   return [
-    scores.columns.risk_score[index],
+    scores.columns.res_hazard_npctl[index],
     scores.columns.community_conditions_group[index],
     scores.columns.mountain_magnitude[index],
     scores.columns.cost_of_living_index[index],
@@ -254,7 +254,7 @@ function scoreValues(index: number | null): [
 
 function activeMetricValue(index: number, metric: Metric): number | null {
   if (!scores) return null;
-  if (metric === "fema") return scores.columns.risk_score[index];
+  if (metric === "residential-hazard") return scores.columns.res_hazard_npctl[index];
   if (metric === "community-conditions") return scores.columns.community_conditions_group[index];
   if (metric === "mountain") return scores.columns.mountain_magnitude[index];
   if (metric === "cost-of-living") return scores.columns.cost_of_living_index[index];
@@ -1100,7 +1100,7 @@ function pick(command: Extract<RendererCommand, { type: "PICK" }>) {
       state: match.state,
       score: match.scoreIndex === null ? null : {
         place_id: match.id,
-        risk_score: risk,
+        res_hazard_npctl: risk,
         community_conditions_group: community,
         mountain_magnitude: mountain,
         cost_of_living_index: cost,

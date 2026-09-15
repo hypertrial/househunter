@@ -1,6 +1,6 @@
 # Data sources and provenance
 
-HouseHunter v2 pins data vintages. It never discovers or accepts an automatic “latest”
+HouseHunter v3 pins data vintages. It never discovers or accepts an automatic “latest”
 release. A source update requires review, validation, and a HouseHunter release.
 
 ## Cost of Living — BEA Regional Price Parities
@@ -130,7 +130,7 @@ the app displays its canonical county name.
    househunter build
    ```
 
-5. Confirm `househunter sources`, `/api/v2/sources`, `/api/v2/meta`, local exports,
+5. Confirm `househunter sources`, `/api/v3/sources`, `/api/v3/meta`, local exports,
    national percentile samples, stale state, and rollback behavior. Then run
    `scripts/check_private_data_boundary.py`, package inspection, and both verification
    scripts. Delete temporary copies when the review is complete. Never add this source
@@ -141,10 +141,10 @@ the app displays its canonical county name.
 - Dataset: National Risk Index Census Tracts
 - Release: v1.20, December 2025
 - ArcGIS item: `9da4eeb936544335a6db0cd7a8448a51`
-- Requested fields: `TRACTFIPS`, `ALR_NPCTL`, `NRI_VER`, and the 18 published `{CODE}_ALR_NPCTL` doubles (`AVLN`, `CFLD`, `CWAV`, `DRGT`, `ERQK`, `HAIL`, `HWAV`, `HRCN`, `ISTM`, `LNDS`, `LTNG`, `IFLD`, `SWND`, `TRND`, `TSUN`, `VLCN`, `WFIR`, `WNTW`)
+- Requested fields: `TRACTFIPS`, `ALR_NPCTL`, `ALR_VALB`, `NRI_VER`, and building `*_ALRB` plus `*_EALR` for 17 residential hazards (`AVLN`, `CFLD`, `CWAV`, `ERQK`, `HAIL`, `HWAV`, `HRCN`, `ISTM`, `LNDS`, `LTNG`, `IFLD`, `SWND`, `TRND`, `TSUN`, `VLCN`, `WFIR`, `WNTW`)
 - Geometry: requested only by the maintainer map-asset generator; runtime preparation
   and ranking never request geometry
-- Metric: composite Expected Annual Loss Rate national percentile (`ALR_NPCTL`). Hazard columns are the same layer's published `{CODE}_ALR_NPCTL` values, used for inspect/detail/export only.
+- Metric: HouseHunter independently derives building-hazard percentiles and `RES_HAZARD_NPCTL`; FEMA `ALR_NPCTL` and `ALR_VALB` remain supporting provenance.
 - Cache: `data/cache/fema_nri_tracts.parquet`
 
 Official references: [FEMA technical documentation](https://www.fema.gov/sites/default/files/documents/fema_national-risk-index_technical-documentation.pdf),
@@ -156,15 +156,16 @@ and [FEMA data resources](https://hazards.fema.gov/nri/data-resources).
 - Dataset: National Risk Index Counties
 - Release: v1.20, December 2025
 - ArcGIS item: `39485e8035d446a5bff03259508ae355`
-- Requested fields: `STCOFIPS`, `COUNTY`, `COUNTYTYPE`, `STATEABBRV`, `ALR_NPCTL`, `NRI_VER`, and the same 18 `{CODE}_ALR_NPCTL` doubles as the tract layer
+- Requested fields: `STCOFIPS`, `COUNTY`, `COUNTYTYPE`, `STATEABBRV`, `ALR_NPCTL`, `ALR_VALB`, `NRI_VER`, and the same 17 building `*_ALRB`/`*_EALR` pairs as the tract layer
 - Geometry: requested only by the maintainer map-asset generator; runtime preparation
   and ranking never request geometry
-- Metric: FEMA's published **county** `ALR_NPCTL`, ranked among counties. County hazard percentiles come from this layer, not from averaging tracts.
+- Metric: HouseHunter derives **county** building-hazard percentiles and `RES_HAZARD_NPCTL` among counties. Inputs come from this layer, never from averaging tracts.
 - Cache: `data/cache/fema_nri_counties.parquet`
 
-County names and the county ranking come from this layer. Tract rows join
+County names and county scoring inputs come from this layer. Tract rows join
 `TRACTFIPS[:5]` to `STCOFIPS`. HouseHunter does **not** average tract percentiles to
-produce a county score. Tract and county percentiles are not comparable.
+produce a county score. Tract and county percentiles are not comparable. Drought is
+excluded because it has no meaningful residential building-loss-rate input.
 
 ## CHR&R Community Conditions
 
@@ -279,7 +280,7 @@ population-weighted lower-rank ECDF per component; no tile or state percentile o
 aggregate is cached. A generated schema-2 candidate is written inside the release
 filesystem, validated by independently reconstructing block percentiles, the internal
 composite, tract/county bases, both same-grain peer calibrations, and final magnitudes,
-then renamed to its content identity. The timed path finishes only after the schema-10
+then renamed to its content identity. The timed path finishes only after the schema-11
 HouseHunter snapshot is rebuilt and queryable. It also publishes one content-addressed
 compact fallback under `data/mountain/compact/`.
 
@@ -445,7 +446,8 @@ fallback without a software release. OpenStreetMap data is © OpenStreetMap
 contributors (ODbL).
 
 The returned 11-digit GEOID is the HouseHunter tract `place_id`. The score remains
-that tract's published FEMA `ALR_NPCTL`, not a property-level rating. The public
+that tract's derived Residential Hazard Exposure percentile, not a property-level
+rating. The public
 Census geocoder only matches streets in its address-range file, so new
 subdivisions often need the Nominatim street confirmation.
 
@@ -459,13 +461,14 @@ and are unused by the local app. Prepare, download, and build never contact cens
 
 ## Limitations
 
-The score is FEMA's published composite percentile for that geography, not risk at a
-specific address. A percentile is a national relative ranking, not a probability or
-expected dollar loss. The composite combines FEMA consequence types and should not be
-read as one particular hazard. The 18 `{CODE}_ALR_NPCTL` values are FEMA's published
-percentiles at the same grain; HouseHunter does not blend them. Null means FEMA
-published no rating, never zero. County scores and county hazard percentiles are not
-a summary of the tracts inside the county.
+Residential Hazard Exposure is a HouseHunter composite for that geography, not risk at
+a specific address. A percentile is a national relative ranking, not a probability or
+expected dollar loss. The model emphasizes elevated tails across 17 building hazards
+and should not be read as one particular hazard. Not-applicable hazards and valid zero
+rates contribute zero; genuinely missing or invalid rates remain null with an explicit
+data-quality flag. County scores and county hazard percentiles are not a summary of the
+tracts inside the county. FEMA's own `ALR_NPCTL` remains supporting context, while
+`PROPERTY_LOSS_NPCTL` separately ranks `ALR_VALB` and is not part of the composite.
 Mountain Magnitude is an approximate regional context metric, not a parcel or address
 assessment. Coarse cells and source completeness can miss narrow ridges, informal or
 unmapped trails, seasonal closures, entrances, legal access details, travel time, and

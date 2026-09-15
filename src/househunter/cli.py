@@ -865,6 +865,12 @@ def rank(
     level: Annotated[str, typer.Option("--level", help="tract or county")] = "tract",
     limit: Annotated[int, typer.Option("--limit", min=1, max=500)] = 25,
     include_unranked: Annotated[bool, typer.Option("--include-unranked")] = False,
+    min_res_hazard: Annotated[
+        float | None, typer.Option("--res-hazard-min", min=0, max=100)
+    ] = None,
+    max_res_hazard: Annotated[
+        float | None, typer.Option("--res-hazard-max", min=0, max=100)
+    ] = None,
     mountain_magnitude_min: Annotated[
         float | None, typer.Option("--mountain-magnitude-min", min=0)
     ] = None,
@@ -893,9 +899,12 @@ def rank(
         str,
         typer.Option(
             "--metric",
-            help="risk, community-conditions, mountain, cost-of-living, or home-costs",
+            help=(
+                "residential-hazard, community-conditions, mountain, cost-of-living, "
+                "or home-costs"
+            ),
         ),
-    ] = "risk",
+    ] = "residential-hazard",
     order: Annotated[str, typer.Option("--order", help="best or worst")] = "best",
 ) -> None:
     """Rank geographies by one independent HouseHunter map dimension."""
@@ -906,7 +915,7 @@ def rank(
         _abort(HouseHunterError("--county filters tracts; omit it when ranking counties"))
     selected_metric = metric.lower()
     if selected_metric not in {
-        "risk",
+        "residential-hazard",
         "community-conditions",
         "mountain",
         "cost-of-living",
@@ -914,7 +923,7 @@ def rank(
     }:
         _abort(
             HouseHunterError(
-                "Rank metric must be risk, community-conditions, mountain, "
+                "Rank metric must be residential-hazard, community-conditions, mountain, "
                 "cost-of-living, or home-costs"
             )
         )
@@ -922,7 +931,7 @@ def rank(
     if selected_order not in {"best", "worst"}:
         _abort(HouseHunterError("Rank order must be best or worst"))
     sort = {
-        "risk": "risk_score",
+        "residential-hazard": "res_hazard_npctl",
         "community-conditions": "community_conditions_group",
         "mountain": "mountain_magnitude",
         "cost-of-living": "cost_of_living_index",
@@ -939,6 +948,8 @@ def rank(
                     state=state,
                     limit=limit,
                     include_unranked=include_unranked,
+                    min_res_hazard=min_res_hazard,
+                    max_res_hazard=max_res_hazard,
                     mountain_magnitude_min=mountain_magnitude_min,
                     max_community_conditions_group=max_community_conditions_group,
                     cost_of_living_index_min=cost_of_living_index_min,
@@ -968,6 +979,8 @@ def rank(
                     county=county,
                     limit=limit,
                     include_unranked=include_unranked,
+                    min_res_hazard=min_res_hazard,
+                    max_res_hazard=max_res_hazard,
                     mountain_magnitude_min=mountain_magnitude_min,
                     max_community_conditions_group=max_community_conditions_group,
                     cost_of_living_index_min=cost_of_living_index_min,
@@ -993,8 +1006,8 @@ def rank(
                 typer.echo(f"TRACT_ID     {label:<9}  STATE")
         for row in result["items"]:
             value = (
-                row["risk_score"]
-                if selected_metric == "risk"
+                row["res_hazard_npctl"]
+                if selected_metric == "residential-hazard"
                 else row["mountain_magnitude"]
                 if selected_metric == "mountain"
                 else row["cost_of_living_index"]
@@ -1007,7 +1020,7 @@ def rank(
                 f"M{value:.2f}"
                 if selected_metric == "mountain" and value is not None
                 else f"{value:.1f}"
-                if selected_metric == "risk" and value is not None
+                if selected_metric == "residential-hazard" and value is not None
                 else f"{value:.1f}"
                 if selected_metric == "cost-of-living" and value is not None
                 else f"{value:,.0f}"

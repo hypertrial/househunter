@@ -3,7 +3,10 @@ import { fileURLToPath } from "node:url";
 
 const webRoot = fileURLToPath(new URL("../", import.meta.url));
 const roots = ["src", "e2e", "e2e-performance", "dist"];
-const banned = ["mountain_score", "Mountain Score", "/api/v1", "mountain_min"];
+const banned = [
+  "mountain_score", "Mountain Score", "/api/v1", "/api/v2", "mountain_min",
+  "risk_score", 'metric === "fema"', 'value="fema"',
+];
 const failures = [];
 
 async function filesWithin(path) {

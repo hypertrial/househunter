@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import math
 import re
-import shutil
 from pathlib import Path
 from typing import Any
 
@@ -14,11 +13,14 @@ from .config import RuntimePaths
 from .contracts import COUNTY_METHODOLOGY_NOTICE, METHODOLOGY_NOTICE
 from .dimensions import SUMMARY_DIMENSION_COLUMNS
 from .errors import AmbiguousPlaceError, BuildNotFoundError, HouseHunterError
-from .hazards import hazard_percentiles_from_record, hazard_select_sql
+from .hazards import HAZARDS, hazard_percentiles_from_record, hazard_select_sql
 
 SUMMARY_COLUMNS = """
 place_id, name, state, place_type, population_2020, housing_units_2020,
-risk_score, coverage_status, fema_vintage, census_vintage, county_fips, county_name,
+res_hazard_npctl, res_hazard_spread, res_hazard_spectral, res_hazard_tail,
+res_hazard_power4, property_loss_npctl, res_hazard_data_quality,
+res_hazard_available_count, res_hazard_coverage_ratio, alr_npctl, alr_valb,
+fema_vintage, census_vintage, county_fips, county_name,
 community_conditions_group, community_conditions_geography, chrr_release_year,
 mountain_magnitude, mountain_magnitude_version, mountain_pipeline_version,
 relief_5km_m, relief_10km_m, relief_20km_m, relief_40km_m, relief_20km_pct,
@@ -35,8 +37,17 @@ SUMMARY_KEYS = [
     "place_type",
     "population_2020",
     "housing_units_2020",
-    "risk_score",
-    "coverage_status",
+    "res_hazard_npctl",
+    "res_hazard_spread",
+    "res_hazard_spectral",
+    "res_hazard_tail",
+    "res_hazard_power4",
+    "property_loss_npctl",
+    "res_hazard_data_quality",
+    "res_hazard_available_count",
+    "res_hazard_coverage_ratio",
+    "alr_npctl",
+    "alr_valb",
     "fema_vintage",
     "census_vintage",
     "county_fips",
@@ -73,6 +84,37 @@ SUMMARY_KEYS = [
 ]
 SUMMARY_COLUMNS = ", ".join(SUMMARY_KEYS)
 BUILD_ID_PATTERN = re.compile(r"(?:national|[a-z]{2})-[0-9a-f]{16}")
+
+_EXPOSURE_EXPORT_COLUMNS = (
+    ("res_hazard_npctl", "RES_HAZARD_NPCTL"),
+    ("res_hazard_spread", "RES_HAZARD_SPREAD"),
+    ("res_hazard_spectral", "RES_HAZARD_SPECTRAL"),
+    ("res_hazard_tail", "RES_HAZARD_TAIL"),
+    ("res_hazard_power4", "RES_HAZARD_POWER4"),
+    ("property_loss_npctl", "PROPERTY_LOSS_NPCTL"),
+    ("res_hazard_data_quality", "RES_HAZARD_DATA_QUALITY"),
+    ("res_hazard_available_count", "RES_HAZARD_AVAILABLE_COUNT"),
+    ("res_hazard_coverage_ratio", "RES_HAZARD_COVERAGE_RATIO"),
+    ("alr_npctl", "ALR_NPCTL"),
+    ("alr_valb", "ALR_VALB"),
+    *(
+        column
+        for hazard in HAZARDS
+        for column in (
+            (hazard.raw_column, hazard.alrb_field),
+            (hazard.rating_column, hazard.rating_field),
+            (hazard.percentile_column, f"{hazard.code}_ALRB_NPCTL"),
+        )
+    ),
+)
+
+
+def _export_select_sql(table: str) -> str:
+    excluded = ", ".join(source for source, _ in _EXPOSURE_EXPORT_COLUMNS)
+    aliases = ", ".join(
+        f'{source} AS "{destination}"' for source, destination in _EXPOSURE_EXPORT_COLUMNS
+    )
+    return f"SELECT * EXCLUDE ({excluded}), {aliases} FROM {table} ORDER BY place_id"
 
 
 def _validated_build(build: Path, expected_build_id: str) -> tuple[Path, dict[str, Any]]:
@@ -154,8 +196,8 @@ class Store:
         county: str | None = None,
         min_population: int | None = None,
         max_population: int | None = None,
-        min_score: float | None = None,
-        max_score: float | None = None,
+        min_res_hazard: float | None = None,
+        max_res_hazard: float | None = None,
         community_conditions_group: int | None = None,
         max_community_conditions_group: int | None = None,
         mountain_magnitude_min: float | None = None,
@@ -167,14 +209,14 @@ class Store:
         housing_built_2000_plus_pct_min: float | None = None,
         housing_built_2000_plus_pct_max: float | None = None,
         include_unranked: bool = False,
-        sort: str = "risk_score",
+        sort: str = "res_hazard_npctl",
         direction: str = "asc",
         offset: int = 0,
         limit: int = 100,
         search_county_name: bool = False,
     ) -> dict[str, Any]:
         sort_columns = {
-            "risk_score": "risk_score",
+            "res_hazard_npctl": "res_hazard_npctl",
             "name": "name",
             "state": "state",
             "population": "population_2020",
@@ -214,6 +256,13 @@ class Store:
         ):
             raise HouseHunterError("Mountain Magnitude minimum cannot exceed maximum")
         metric_bounds = (
+            (
+                "Residential Hazard Exposure",
+                min_res_hazard,
+                max_res_hazard,
+                0.0,
+                100.0,
+            ),
             (
                 "Cost of Living",
                 cost_of_living_index_min,
@@ -255,17 +304,14 @@ class Store:
         parameters: list[Any] = []
         if not include_unranked:
             rank_column = {
+                "res_hazard_npctl": "res_hazard_npctl",
                 "mountain_magnitude": "mountain_magnitude",
                 "cost_of_living_index": "cost_of_living_index",
                 "home_sqft_for_1m": "home_sqft_for_1m",
                 "home_buying_power_percentile": "home_buying_power_percentile",
                 "housing_built_2000_plus_pct": "housing_built_2000_plus_pct",
-            }.get(sort)
-            clauses.append(
-                f"{rank_column} IS NOT NULL"
-                if rank_column is not None
-                else "coverage_status = 'complete'"
-            )
+            }.get(sort, "res_hazard_npctl")
+            clauses.append(f"{rank_column} IS NOT NULL")
         if search:
             if search_county_name:
                 clauses.append("(name ILIKE ? OR place_id = ? OR county_name ILIKE ?)")
@@ -288,8 +334,8 @@ class Store:
         for column, operator, value in (
             ("population_2020", ">=", min_population),
             ("population_2020", "<=", max_population),
-            ("risk_score", ">=", min_score),
-            ("risk_score", "<=", max_score),
+            ("res_hazard_npctl", ">=", min_res_hazard),
+            ("res_hazard_npctl", "<=", max_res_hazard),
             ("mountain_magnitude", ">=", mountain_magnitude_min),
             ("mountain_magnitude", "<=", mountain_magnitude_max),
             ("cost_of_living_index", ">=", cost_of_living_index_min),
@@ -334,8 +380,8 @@ class Store:
         county: str | None = None,
         min_population: int | None = None,
         max_population: int | None = None,
-        min_score: float | None = None,
-        max_score: float | None = None,
+        min_res_hazard: float | None = None,
+        max_res_hazard: float | None = None,
         community_conditions_group: int | None = None,
         max_community_conditions_group: int | None = None,
         mountain_magnitude_min: float | None = None,
@@ -347,7 +393,7 @@ class Store:
         housing_built_2000_plus_pct_min: float | None = None,
         housing_built_2000_plus_pct_max: float | None = None,
         include_unranked: bool = False,
-        sort: str = "risk_score",
+        sort: str = "res_hazard_npctl",
         direction: str = "asc",
         offset: int = 0,
         limit: int = 100,
@@ -359,8 +405,8 @@ class Store:
             county=county,
             min_population=min_population,
             max_population=max_population,
-            min_score=min_score,
-            max_score=max_score,
+            min_res_hazard=min_res_hazard,
+            max_res_hazard=max_res_hazard,
             community_conditions_group=community_conditions_group,
             max_community_conditions_group=max_community_conditions_group,
             mountain_magnitude_min=mountain_magnitude_min,
@@ -384,8 +430,8 @@ class Store:
         *,
         search: str | None = None,
         state: str | None = None,
-        min_score: float | None = None,
-        max_score: float | None = None,
+        min_res_hazard: float | None = None,
+        max_res_hazard: float | None = None,
         community_conditions_group: int | None = None,
         max_community_conditions_group: int | None = None,
         mountain_magnitude_min: float | None = None,
@@ -397,7 +443,7 @@ class Store:
         housing_built_2000_plus_pct_min: float | None = None,
         housing_built_2000_plus_pct_max: float | None = None,
         include_unranked: bool = False,
-        sort: str = "risk_score",
+        sort: str = "res_hazard_npctl",
         direction: str = "asc",
         offset: int = 0,
         limit: int = 100,
@@ -406,8 +452,8 @@ class Store:
             "counties",
             search=search,
             state=state,
-            min_score=min_score,
-            max_score=max_score,
+            min_res_hazard=min_res_hazard,
+            max_res_hazard=max_res_hazard,
             community_conditions_group=community_conditions_group,
             max_community_conditions_group=max_community_conditions_group,
             mountain_magnitude_min=mountain_magnitude_min,
@@ -430,7 +476,7 @@ class Store:
             level,
             (
                 "place_id",
-                "risk_score",
+                "res_hazard_npctl",
                 "community_conditions_group",
                 "mountain_magnitude",
                 "cost_of_living_index",
@@ -445,7 +491,7 @@ class Store:
             level,
             (
                 "place_id",
-                "risk_score",
+                "res_hazard_npctl",
                 "community_conditions_group",
                 "mountain_magnitude",
             ),
@@ -472,7 +518,7 @@ class Store:
         level: str,
         map_columns: tuple[str, ...],
         *,
-        schema_version: int = 4,
+        schema_version: int = 5,
     ) -> dict[str, Any]:
         table = {"tract": "places", "county": "counties"}.get(level)
         if table is None:
@@ -544,8 +590,7 @@ class Store:
         self, table: str, place_id: str, notice: str, label: str
     ) -> dict[str, Any]:
         cursor = self.connection.execute(
-            f"SELECT {SUMMARY_COLUMNS}, total_weighted_housing, coverage_ratio, "
-            f"{hazard_select_sql()} "
+            f"SELECT {SUMMARY_COLUMNS}, {hazard_select_sql()} "
             f"FROM {table} WHERE place_id = ?",
             [place_id],
         )
@@ -555,22 +600,6 @@ class Store:
         columns = [item[0] for item in cursor.description]
         record = dict(zip(columns, row, strict=True))
         summary = {key: record[key] for key in SUMMARY_KEYS}
-        contributions: list[dict[str, Any]] = []
-        if table == "places":
-            contribution_cursor = self.connection.execute(
-                """
-                SELECT tract_id, housing_units, housing_weight, alr_npctl AS fema_percentile,
-                       weighted_contribution
-                FROM tract_contributions WHERE place_id = ?
-                ORDER BY weighted_contribution DESC NULLS LAST, tract_id ASC
-                """,
-                [place_id],
-            )
-            contribution_columns = [item[0] for item in contribution_cursor.description]
-            contributions = [
-                dict(zip(contribution_columns, item, strict=True))
-                for item in contribution_cursor.fetchall()
-            ]
         member_tract_count = None
         if table == "counties":
             member_tract_count = self.connection.execute(
@@ -579,10 +608,7 @@ class Store:
             ).fetchone()[0]
         return {
             "summary": summary,
-            "total_weighted_housing": record["total_weighted_housing"],
-            "coverage_ratio": record["coverage_ratio"],
             "methodology_notice": notice,
-            "tract_contributions": contributions,
             "hazard_percentiles": hazard_percentiles_from_record(record),
             "member_tract_count": member_tract_count,
             "source_notices": list(self.metadata.get("detail_notices", [])),
@@ -608,17 +634,19 @@ class Store:
         ):
             raise HouseHunterError("Export destination is inside managed HouseHunter data")
         destination.parent.mkdir(parents=True, exist_ok=True)
-        filename = "places.parquet" if table == "places" else "counties.parquet"
+        query = _export_select_sql(table)
         if format == "parquet":
-            shutil.copyfile(self.build / filename, destination)
+            self.connection.execute(
+                f"COPY ({query}) TO ? (FORMAT PARQUET, COMPRESSION ZSTD)", [str(destination)]
+            )
         elif format == "csv":
             self.connection.execute(
-                f"COPY (SELECT * FROM {table} ORDER BY place_id) TO ? (HEADER, DELIMITER ',')",
+                f"COPY ({query}) TO ? (HEADER, DELIMITER ',')",
                 [str(destination)],
             )
         elif format == "json":
             self.connection.execute(
-                f"COPY (SELECT * FROM {table} ORDER BY place_id) TO ? (FORMAT JSON, ARRAY true)",
+                f"COPY ({query}) TO ? (FORMAT JSON, ARRAY true)",
                 [str(destination)],
             )
         else:

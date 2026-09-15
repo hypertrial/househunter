@@ -17,7 +17,11 @@ export const COMMUNITY_GROUP_COLORS = [
 ] as const;
 
 export const METRIC_UI = {
-  fema: { name: "Natural Disaster Risk", source: "FEMA NRI", descriptorKey: "risk" },
+  "residential-hazard": {
+    name: "Residential Hazard Exposure",
+    source: "HouseHunter / FEMA NRI",
+    descriptorKey: "residential-hazard",
+  },
   "community-conditions": { name: "Community Conditions", source: "CHR&R", descriptorKey: "community-conditions" },
   mountain: { name: "Mountain Magnitude", source: "HouseHunter", descriptorKey: "mountain" },
   "cost-of-living": { name: "Cost of Living", source: "BEA RPP", descriptorKey: "cost-of-living" },
@@ -67,19 +71,19 @@ function gradient(colors: readonly string[]): string {
   ).join(", ")})`;
 }
 
-const FEMA_ANCHORS = Object.values(MAP_COLORS);
-export const FEMA_COLOR_SCALE = colorScale(FEMA_ANCHORS);
+const HAZARD_ANCHORS = Object.values(MAP_COLORS);
+export const HAZARD_COLOR_SCALE = colorScale(HAZARD_ANCHORS);
 export const COMMUNITY_COLOR_SCALE = colorScale(COMMUNITY_GROUP_COLORS);
 export const MOUNTAIN_COLOR_SCALE = MOUNTAIN_BAND_COLORS;
 export const COUNTY_MOUNTAIN_COLOR_SCALE = MOUNTAIN_BAND_COLORS.slice(0, 9);
-export const COST_OF_LIVING_COLOR_SCALE = colorScale(FEMA_ANCHORS);
-export const HOME_COSTS_COLOR_SCALE = colorScale([...FEMA_ANCHORS].reverse());
+export const COST_OF_LIVING_COLOR_SCALE = colorScale(HAZARD_ANCHORS);
+export const HOME_COSTS_COLOR_SCALE = colorScale([...HAZARD_ANCHORS].reverse());
 
 export const METRIC_COLOR_SCALES = {
-  fema: {
+  "residential-hazard": {
     minimum: 0, maximum: 100, ticks: [0, 20, 40, 60, 80, 100],
     distinguishAt: [20, 40, 60, 80],
-    colors: FEMA_COLOR_SCALE, gradient: gradient(FEMA_COLOR_SCALE),
+    colors: HAZARD_COLOR_SCALE, gradient: gradient(HAZARD_COLOR_SCALE),
   },
   "community-conditions": {
     minimum: 1, maximum: 10, ticks: [1, 3, 5, 7, 10],
@@ -145,7 +149,7 @@ export function scoreBand(value: number | null): ScoreBand | null {
 }
 
 export function scoreColor(value: number | null): string | null {
-  return scaleColor(value, METRIC_COLOR_SCALES.fema);
+  return scaleColor(value, METRIC_COLOR_SCALES["residential-hazard"]);
 }
 
 export function communityGroupColor(value: number | null): string | null {
@@ -199,7 +203,7 @@ export function metricColor(
   metric: Metric,
   level: Geography = "tract",
 ): string | null {
-  const value = metric === "fema" ? score?.risk_score
+  const value = metric === "residential-hazard" ? score?.res_hazard_npctl
     : metric === "community-conditions" ? score?.community_conditions_group
       : metric === "mountain" ? score?.mountain_magnitude
         : metric === "cost-of-living" ? score?.cost_of_living_index
@@ -259,7 +263,8 @@ export function readHash(hash: string) {
   const level: Geography = params.get("level") === "county" ? "county" : "tract";
   const metricValue = params.get("metric");
   const metric: Metric = metricValue === "community-conditions" || metricValue === "mountain"
-    || metricValue === "cost-of-living" || metricValue === "home-costs" ? metricValue : "fema";
+    || metricValue === "cost-of-living" || metricValue === "home-costs"
+    || metricValue === "residential-hazard" ? metricValue : "residential-hazard";
   const requestedState = params.get("state") || "";
   const state = requestedState in STATE_FIPS
     ? requestedState as keyof typeof STATE_FIPS

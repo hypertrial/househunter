@@ -1,10 +1,11 @@
 # Release-generated assets
 
 This directory may still hold historical Place parquet files from earlier
-HouseHunter releases. Runtime ranking uses FEMA tract and county `ALR_NPCTL`
-only and does not read these files. Inspect/detail/export also pass through the
-same layers' published `{CODE}_ALR_NPCTL` hazard percentiles. `./scripts/dev`
-does not generate Census assets here or under `data/`.
+HouseHunter releases. Runtime ranking uses the derived tract and county
+`RES_HAZARD_NPCTL` from the immutable runtime snapshot and does not read these files.
+Inspect/detail/export retain FEMA raw building-loss inputs and HouseHunter's 17 derived
+hazard percentiles. `./scripts/dev` does not generate Census assets here or under
+`data/`.
 
 A release may include a validated `mountain/` directory containing only the
 Mountain manifest plus tract and county Parquet files. The promoted build automatically

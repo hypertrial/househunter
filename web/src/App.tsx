@@ -43,7 +43,7 @@ async function json<T>(url: string, options?: RequestInit): Promise<T> {
 }
 
 export function scoreLabel(place: PlaceSummary): string {
-  return place.risk_score === null ? "Not ranked" : place.risk_score.toFixed(1);
+  return place.res_hazard_npctl === null ? "Not ranked" : place.res_hazard_npctl.toFixed(1);
 }
 
 export function communityLabel(place: PlaceSummary): string {
@@ -76,7 +76,7 @@ function percentileLabel(value: number | null): string {
 }
 
 function metricLabel(place: PlaceSummary, metric: Metric): string {
-  if (metric === "fema") return scoreLabel(place);
+  if (metric === "residential-hazard") return scoreLabel(place);
   if (metric === "community-conditions") return communityLabel(place);
   if (metric === "mountain") return mountainLabel(place);
   return metric === "cost-of-living" ? costOfLivingLabel(place) : homeCostsLabel(place);
@@ -108,8 +108,15 @@ function appendFilterParams(params: URLSearchParams, filters: MapFilters, level:
 }
 
 export function scorePillLabel(place: PlaceSummary): string | undefined {
-  const band = scoreBand(place.risk_score);
+  const band = scoreBand(place.res_hazard_npctl);
   return band ? `${scoreLabel(place)}, ${SCORE_BAND_LABELS[band]}` : undefined;
+}
+
+export function sensitivityLabel(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) return "Unavailable";
+  if (value < 10) return "Low";
+  if (value <= 20) return "Moderate";
+  return "High";
 }
 
 export function sortedHazardPercentiles(hazards: HazardPercentile[]): HazardPercentile[] {
@@ -128,7 +135,7 @@ function Setup({ token, onReady }: { token: string; onReady: () => void }) {
     if (!job || !["queued", "running"].includes(job.state)) return;
     const timer = window.setInterval(async () => {
       try {
-        const latest = await json<JobStatus>(`/api/v2/jobs/${job.job_id}`);
+        const latest = await json<JobStatus>(`/api/v3/jobs/${job.job_id}`);
         setJob(latest);
         if (latest.state === "succeeded") onReady();
         if (latest.state === "failed") setError(latest.error || "Preparation failed");
@@ -139,7 +146,7 @@ function Setup({ token, onReady }: { token: string; onReady: () => void }) {
   async function prepare() {
     setError("");
     try {
-      setJob(await json<JobStatus>("/api/v2/jobs", {
+      setJob(await json<JobStatus>("/api/v3/jobs", {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-HouseHunter-Token": token },
         body: JSON.stringify({ kind: "prepare" }),
@@ -149,13 +156,13 @@ function Setup({ token, onReady }: { token: string; onReady: () => void }) {
   async function cancel() {
     if (!job) return;
     try {
-      setJob(await json<JobStatus>(`/api/v2/jobs/${job.job_id}`, {
+      setJob(await json<JobStatus>(`/api/v3/jobs/${job.job_id}`, {
         method: "DELETE", headers: { "X-HouseHunter-Token": token },
       }));
     } catch (caught) { setError((caught as Error).message); }
   }
   return <section className="setup-card" aria-labelledby="prepare-title">
-    <p className="eyebrow">Private local snapshot</p><h1 id="prepare-title">Prepare the national risk map</h1>
+    <p className="eyebrow">Private local snapshot</p><h1 id="prepare-title">Prepare the national hazard map</h1>
     <p>HouseHunter downloads pinned FEMA and CHR&R county attributes and builds a read-only snapshot on this Mac.</p>
     {job && <div className="progress-card" aria-live="polite"><div><strong>{job.message}</strong><span>{job.progress}%</span></div><progress max="100" value={job.progress}>{job.progress}%</progress>{["queued", "running"].includes(job.state) && <button className="secondary" onClick={cancel}>Cancel</button>}</div>}
     {error && <p role="alert" className="error">{error}</p>}
@@ -169,10 +176,10 @@ function MetricLegend({ metric, level, descriptor }: {
 }) {
   const { minimum, maximum, ticks, gradient } = metricColorScale(metric, level);
   const peers = geographyPlural(level);
-  const missing = metric === "fema" ? "Unranked"
+  const missing = metric === "residential-hazard" ? "Unranked"
     : metric === "community-conditions" ? "Not grouped" : "Unavailable";
-  const label = metric === "fema"
-    ? "Continuous score color scale, lower is better"
+  const label = metric === "residential-hazard"
+    ? "Continuous Residential Hazard Exposure color scale, higher is worse"
     : metric === "mountain"
       ? `Stepped Mountain Magnitude color scale for U.S. ${peers}, higher means fewer equal-or-higher peers`
       : metric === "community-conditions"
@@ -180,8 +187,8 @@ function MetricLegend({ metric, level, descriptor }: {
         : metric === "cost-of-living"
           ? "Cost of Living color scale from 80 to 120, lower is better, U.S. equals 100"
           : "Home Costs national buying power percentile color scale, higher is better";
-  const rampLabel = metric === "fema"
-    ? "FEMA Risk continuous color ramp from 0 to 100"
+  const rampLabel = metric === "residential-hazard"
+    ? "Residential Hazard Exposure continuous color ramp from 0 to 100"
     : metric === "mountain"
       ? `Mountain Magnitude half-step color bands from M0 up to M${maximum} for U.S. ${peers}; M${maximum} and above use the separate cap color`
       : metric === "community-conditions"
@@ -189,8 +196,8 @@ function MetricLegend({ metric, level, descriptor }: {
         : metric === "cost-of-living"
           ? "BEA Regional Price Parity color ramp from 80 to 120 with U.S. 100 marked"
           : "Home buying power national percentile color ramp from 0 to 100";
-  const explanation = metric === "fema"
-    ? <><strong>FEMA ALR_NPCTL</strong> · lower is better · national percentile · not property-level risk</>
+  const explanation = metric === "residential-hazard"
+    ? <><strong>Residential Hazard Exposure</strong> · HouseHunter composite of FEMA building-specific loss rates · higher is worse · national percentile within {peers} · not property-level risk</>
     : metric === "mountain"
       ? <><strong>Mountain Magnitude</strong> · ½-step colors ≈ 3.2× fewer peers · M1 ≈ top 10% · M2 ≈ top 1% · M3 ≈ top 0.1% · U.S. {peers} · not comparable across grains · not property-specific</>
       : metric === "community-conditions"
@@ -224,8 +231,11 @@ function DetailDrawer({ detail, loading, error, level, metric, sources, onClose,
   const homeSource = sources.find((source) => source.source === "home_market");
   const orderedMetrics = [...METRICS].sort((left, right) =>
     Number(right === metric) - Number(left === metric));
+  const highestHazards = detail ? sortedHazardPercentiles(detail.hazard_percentiles)
+    .filter((hazard) => hazard.availability === "valid" && hazard.percentile !== null)
+    .slice(0, 3) : [];
   const card = (item: Metric, summary: PlaceSummary) => {
-    if (item === "fema") return <section key={item} className={`metric-card ${metric === item ? "active" : ""}`} aria-label="FEMA risk"><strong>Natural Disaster Risk</strong><span style={{ color: scoreColor(summary.risk_score) ?? undefined }}>{scoreLabel(summary)}</span><small>FEMA {level === "county" ? "county " : ""}ALR_NPCTL<br />Lower is better</small></section>;
+    if (item === "residential-hazard") return <section key={item} className={`metric-card dimension-card ${metric === item ? "active" : ""}`} aria-label="Residential Hazard Exposure"><strong>Residential Hazard Exposure</strong><span style={{ color: scoreColor(summary.res_hazard_npctl) ?? undefined }}>{scoreLabel(summary)}</span><small>HouseHunter composite of FEMA building-specific loss rates · Higher is worse</small><dl className="card-facts"><div><dt>Expected Property Loss</dt><dd>{percentileLabel(summary.property_loss_npctl)}</dd></div><div><dt>Model Sensitivity</dt><dd>{summary.res_hazard_spread === null ? "Unavailable" : `${summary.res_hazard_spread.toFixed(1)} · ${sensitivityLabel(summary.res_hazard_spread)}`}</dd></div><div><dt>FEMA ALR_NPCTL</dt><dd>{summary.alr_npctl.toFixed(1)}</dd></div><div><dt>FEMA ALR_VALB rate</dt><dd>{summary.alr_valb === null ? "Unavailable" : summary.alr_valb.toPrecision(4)}</dd></div><div><dt>Hazard data</dt><dd>{summary.res_hazard_data_quality} · {summary.res_hazard_available_count}/17 available</dd></div></dl></section>;
     if (item === "community-conditions") return <section key={item} className={`metric-card ${metric === item ? "active" : ""}`} aria-label="Community Conditions"><strong>Community Conditions</strong><span>{communityLabel(summary)}</span><small>CHR&amp;R Community Conditions<br />Group 1 is healthiest{level === "tract" ? ` · Inherited from ${summary.county_name} County` : " · County geography"} <button className="metric-help" title={COMMUNITY_EXPLANATION} aria-label={COMMUNITY_EXPLANATION}>ⓘ</button></small></section>;
     if (item === "mountain") return <section key={item} className={`metric-card ${metric === item ? "active" : ""}`} aria-label="Mountain Magnitude"><strong>Mountain Magnitude</strong><span>{mountainLabel(summary)}</span><small>{summary.mountain_magnitude !== null && <>{mountainRarityLabel(summary.mountain_magnitude, level)}<br /></>}Resident exposure · fewer equal-or-higher peers ↑</small><details className="card-breakdown"><summary>Mountain Magnitude breakdown</summary>{summary.mountain_magnitude === null ? <p>Mountain data is {summary.mountain_coverage_status.replaceAll("_", " ")} for this geography.</p> : <dl className="card-facts"><div><dt>Relief within 20 km</dt><dd>{summary.relief_20km_m === null ? "Unavailable" : `${number.format(summary.relief_20km_m)} m`} · {percentileLabel(summary.relief_20km_pct)}</dd></div><div><dt>Rugged terrain</dt><dd>{summary.rugged_fraction_20km === null ? "Unavailable" : `${(summary.rugged_fraction_20km * 100).toFixed(1)}%`} · {percentileLabel(summary.rugged_pct)}</dd></div><div><dt>Weighted public access</dt><dd>{summary.public_mountain_access_raw === null ? "Unavailable" : `${summary.public_mountain_access_raw.toFixed(1)} km²`} · {percentileLabel(summary.public_mountain_access_pct)}</dd></div><div><dt>Hiking access</dt><dd>{summary.nearest_mountain_trail_km === null ? "No mapped trail nearby" : `${summary.nearest_mountain_trail_km.toFixed(1)} km nearest`} · {percentileLabel(summary.trail_access_pct)}</dd></div></dl>}<p className="card-notice">{mountainExplanation(level)}</p></details></section>;
     if (item === "cost-of-living") return <section key={item} className={`metric-card dimension-card ${metric === item ? "active" : ""}`} aria-label="Cost of Living"><strong>Cost of Living</strong><span>{costOfLivingLabel(summary)}</span><small>BEA all-items Regional Price Parity · U.S. = 100 · Lower is better</small><dl className="card-facts"><div><dt>Goods</dt><dd>{displayValue(summary.cost_of_living_goods_index)}</dd></div><div><dt>Housing rents</dt><dd>{displayValue(summary.cost_of_living_housing_rents_index)}</dd></div><div><dt>Utilities</dt><dd>{displayValue(summary.cost_of_living_utilities_index)}</dd></div><div><dt>Other services</dt><dd>{displayValue(summary.cost_of_living_other_services_index)}</dd></div></dl><p className="card-notice">{level === "tract" && `Inherited from ${summary.county_name} County. `}{summary.cost_of_living_geography_name ? `BEA ${summary.cost_of_living_geography_name} ${summary.cost_of_living_geography_type === "metropolitan" ? "MSA" : "area"}. ` : `Coverage: ${summary.cost_of_living_coverage_status.replaceAll("_", " ")}. `}{summary.cost_of_living_release_year ? `Release ${summary.cost_of_living_release_year}.` : ""}</p></section>;
@@ -249,7 +259,8 @@ function DetailDrawer({ detail, loading, error, level, metric, sources, onClose,
       <dl className="facts"><div><dt>{level === "county" ? "County" : "Tract"} FIPS</dt><dd>{detail.summary.place_id}</dd></div><div><dt>State</dt><dd>{detail.summary.state}</dd></div>{level === "tract" && <div><dt>County</dt><dd>{detail.summary.county_name}</dd></div>}<div><dt>FEMA vintage</dt><dd>{detail.summary.fema_vintage}</dd></div></dl>
       {level === "county" && <button className="secondary" onClick={() => onViewTracts(detail.summary.place_id, detail.summary.state)}>View {number.format(detail.member_tract_count ?? 0)} tracts</button>}
       {level === "tract" && /^\d{5}$/.test(detail.summary.county_fips) && <button className="secondary" onClick={() => onViewCounty(detail.summary.county_fips)}>View {detail.summary.county_name} county</button>}
-      <h3>Published hazard percentiles</h3><div className="contributions">{sortedHazardPercentiles(detail.hazard_percentiles).map((hazard) => <div key={hazard.code} className="contribution"><div><span>{hazard.label}</span><span>{hazard.percentile === null ? "No rating" : hazard.percentile.toFixed(1)}</span></div><div className="bar"><i style={{ width: hazard.percentile === null ? "0%" : `${hazard.percentile}%`, backgroundColor: scoreColor(hazard.percentile) ?? undefined }} /></div></div>)}</div>
+      <h3>Highest Residential Hazards</h3><ol className="result-list">{highestHazards.map((hazard) => <li key={hazard.code}><span><strong>{hazard.label}</strong><b>{hazard.percentile!.toFixed(1)}</b></span></li>)}</ol>
+      <h3>All residential hazard percentiles</h3><div className="contributions">{sortedHazardPercentiles(detail.hazard_percentiles).map((hazard) => <div key={hazard.code} className="contribution"><div><span>{hazard.label}<small>FEMA ALRB {hazard.raw_alrb === null ? "unavailable" : hazard.raw_alrb.toPrecision(4)} · {hazard.fema_eal_rating ?? hazard.availability.replaceAll("_", " ")}</small></span><span>{hazard.availability === "not_applicable" ? "0.0 · Not applicable" : hazard.percentile === null ? hazard.availability.replaceAll("_", " ") : hazard.percentile.toFixed(1)}</span></div><div className="bar"><i style={{ width: hazard.percentile === null ? "0%" : `${hazard.percentile}%`, backgroundColor: scoreColor(hazard.percentile) ?? undefined }} /></div></div>)}</div>
       {(detail.source_notices ?? []).map((notice) => <p key={notice} className="notice">{notice}</p>)}
       <p className="notice">{detail.methodology_notice}</p></>}
   </aside>;
@@ -490,8 +501,8 @@ function Workspace({ meta }: { meta: Meta }) {
     if (!detailTarget) return;
     let cancelled = false; setDetailLoading(true);
     const path = detailTarget.level === "county"
-      ? `/api/v2/counties/${detailTarget.id}`
-      : `/api/v2/places/${detailTarget.id}`;
+      ? `/api/v3/counties/${detailTarget.id}`
+      : `/api/v3/places/${detailTarget.id}`;
     json<PlaceDetail>(path).then((value) => { if (!cancelled) { setDetail(value); setStatus(`${value.summary.name} selected`); } }).catch((caught) => { if (!cancelled) setDetailError((caught as Error).message); }).finally(() => { if (!cancelled) setDetailLoading(false); });
     return () => { cancelled = true; };
   }, [detailRetry, detailTarget]);
@@ -501,7 +512,7 @@ function Workspace({ meta }: { meta: Meta }) {
     setCountyOptions([]);
     if (!draftState) return;
     const params = new URLSearchParams({ state: draftState, limit: "500", sort: "name", direction: "asc", include_unranked: "true" });
-    void json<{ items: PlaceSummary[] }>(`/api/v2/counties?${params}`)
+    void json<{ items: PlaceSummary[] }>(`/api/v3/counties?${params}`)
       .then((value) => {
         if (generation === countyGeneration.current) {
           setCountyOptions(value.items.filter((item) => item.state === draftState));
@@ -525,7 +536,7 @@ function Workspace({ meta }: { meta: Meta }) {
     const sort = community ? "community_conditions_group"
       : metric === "mountain" ? "mountain_magnitude"
         : metric === "cost-of-living" ? "cost_of_living_index"
-          : metric === "home-costs" ? "home_sqft_for_1m" : "risk_score";
+          : metric === "home-costs" ? "home_sqft_for_1m" : "res_hazard_npctl";
     const base = new URLSearchParams({ limit: community ? "1" : "5", sort });
     appendFilterParams(base, filters, community ? "county" : level);
     if (community) base.set("include_unranked", "true");
@@ -536,7 +547,7 @@ function Workspace({ meta }: { meta: Meta }) {
     if (metric === "home-costs" && homeSqftFor1mMin === null) {
       base.set("home_sqft_for_1m_min", "0");
     }
-    const path = community ? "/api/v2/counties" : level === "tract" ? "/api/v2/places" : "/api/v2/counties";
+    const path = community ? "/api/v3/counties" : level === "tract" ? "/api/v3/places" : "/api/v3/counties";
     try {
       const [low, high] = await Promise.all([json<PlacePage>(`${path}?${base}&direction=asc`), json<PlacePage>(`${path}?${base}&direction=desc`)]);
       if (!community) {
@@ -548,7 +559,7 @@ function Workspace({ meta }: { meta: Meta }) {
           if (group === null || group === undefined) return { items: [], total: 0 };
           const params = new URLSearchParams({ limit: "5", sort: "name", direction: "asc", include_unranked: "true", community_conditions_group: String(group) });
           appendFilterParams(params, filters, "county");
-          return json<PlacePage>(`/api/v2/counties?${params}`);
+          return json<PlacePage>(`/api/v3/counties?${params}`);
         };
         const [lowSample, highSample] = await Promise.all([samples(lowGroup), samples(highGroup)]);
         if (generation === extremesGeneration.current) { setLowest(lowSample.items); setHighest(highSample.items); setLowestTotal(lowSample.total); setHighestTotal(highSample.total); }
@@ -569,7 +580,7 @@ function Workspace({ meta }: { meta: Meta }) {
     appendFilterParams(params, filters, "county");
     setExtremesLoading(true); setSearchError("");
     try {
-      const page = await json<PlacePage>(`/api/v2/counties?${params}`);
+      const page = await json<PlacePage>(`/api/v3/counties?${params}`);
       if (generation !== extremesGeneration.current) return;
       setBrowseGroup(group); setBrowseItems(page.items); setBrowseTotal(page.total); setBrowseOffset(offset);
     } catch (caught) {
@@ -591,7 +602,7 @@ function Workspace({ meta }: { meta: Meta }) {
     const address = query;
     setSearching(true); setSearchError(""); setConfirmation(null);
     try {
-      const result = await json<LookupResult>("/api/v2/lookup", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ address }) });
+      const result = await json<LookupResult>("/api/v3/lookup", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ address }) });
       if (generation !== addressGeneration.current) return;
       if (result.status === "confirmation_required") setConfirmation(result); else navigateToLookup(result);
     } catch (caught) {
@@ -606,7 +617,7 @@ function Workspace({ meta }: { meta: Meta }) {
     const address = confirmation.query;
     setSearching(true);
     try {
-      const result = await json<LookupResult>("/api/v2/lookup", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ address, candidate_id: candidateId }) });
+      const result = await json<LookupResult>("/api/v3/lookup", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ address, candidate_id: candidateId }) });
       if (generation !== addressGeneration.current) return;
       if (result.status === "resolved") navigateToLookup(result);
     } catch (caught) {
@@ -635,7 +646,7 @@ function Workspace({ meta }: { meta: Meta }) {
   }
   function clearFilters() { const cleared = { ...EMPTY_FILTERS, state: builtState }; setDraftFilters(cleared); setFilters(cleared); setFocusTarget(builtState ? { kind: "state", id: builtState, nonce: Date.now() } : null); setSelected(""); setDetailTarget(null); setOverlay(null); }
 
-  const tooltipScore = metric === "mountain" ? preview?.score?.mountain_magnitude : preview?.score?.risk_score;
+  const tooltipScore = metric === "mountain" ? preview?.score?.mountain_magnitude : preview?.score?.res_hazard_npctl;
   const tooltipBand = scoreBand(tooltipScore ?? null);
   const tooltipClass = preview ? mapTooltipClass(preview.x, preview.y, window.innerWidth, window.innerHeight) : "";
   const activeFilter = Boolean(
@@ -660,7 +671,7 @@ function Workspace({ meta }: { meta: Meta }) {
   const noCommunityGroups = metric === "community-conditions" && lowestGroup === null && highestGroup === null;
   const extremeButtonLabel = metric === "community-conditions" ? "Best / Worst"
     : metric === "home-costs" ? "Most / Least" : "Lowest / Highest";
-  const extremesLabel = metric === "fema" ? "Lowest and highest risk"
+  const extremesLabel = metric === "residential-hazard" ? "Lowest and highest Residential Hazard Exposure"
     : metric === "mountain" ? "Lowest and highest Mountain Magnitude"
       : metric === "community-conditions" ? "Best and worst Community Conditions"
         : metric === "cost-of-living" ? "Lowest and highest Cost of Living RPP"
@@ -669,26 +680,26 @@ function Workspace({ meta }: { meta: Meta }) {
     : metric === "home-costs" ? "Least square feet for $1M" : "Lowest";
   const highTitle = metric === "cost-of-living" ? "Highest RPP"
     : metric === "home-costs" ? "Most square feet for $1M" : "Highest";
-  const unavailableLabel = metric === "fema" ? "FEMA-unranked"
+  const unavailableLabel = metric === "residential-hazard" ? "hazard-unranked"
     : metric === "community-conditions" ? "Community-ungrouped"
       : metric === "mountain" ? "Mountain-unavailable"
         : metric === "cost-of-living" ? "Cost-of-Living-unavailable"
           : "Home-Costs-unavailable";
   const tooltipValue = !preview?.score ? `${metricName} unavailable`
-    : metric === "fema" ? preview.score.risk_score === null ? "Not ranked / unavailable" : `${preview.score.risk_score.toFixed(1)} · ${tooltipBand ? SCORE_BAND_LABELS[tooltipBand] : ""}`
+    : metric === "residential-hazard" ? preview.score.res_hazard_npctl === null ? "Not ranked / unavailable" : `${preview.score.res_hazard_npctl.toFixed(1)} · ${tooltipBand ? SCORE_BAND_LABELS[tooltipBand] : ""}`
       : metric === "mountain" ? preview.score.mountain_magnitude === null ? "Mountain Magnitude unavailable" : `M${preview.score.mountain_magnitude.toFixed(2)} · ${mountainRarityLabel(preview.score.mountain_magnitude, level)}`
         : metric === "community-conditions" ? preview.score.community_conditions_group === null ? "Not grouped · County-level" : `Group ${preview.score.community_conditions_group} of 10 · County-level`
           : metric === "cost-of-living" ? preview.score.cost_of_living_index === null ? "Cost of Living unavailable" : `${preview.score.cost_of_living_index.toFixed(1)} RPP · County assignment`
             : preview.score.home_sqft_for_1m === null ? "Home Costs unavailable" : `${number.format(preview.score.home_sqft_for_1m)} sq ft / $1M · ${preview.score.home_buying_power_percentile?.toFixed(1) ?? "–"}th pct`;
   return <main className="map-shell">
-    <RiskMap manifestUrl={meta.map_assets.manifest_url} scoreUrl={`/api/v2/map/scores/core?level=${level}`} expectedBuildId={meta.build?.build_id || ""} level={level} metric={metric} displayMetric={renderedMetric} busy={mapUpdating} selected={selected} filters={filters} neutralOnly={Boolean(scoreError)} retryGeneration={scoreReloadNonce} addonRetry={addonRetry} focusTarget={focusTarget} cameraTarget={cameraTarget} initialCamera={initial.camera} onSelect={selectFromMap} onPreview={setPreview} onCamera={cameraChanged} onStatus={setStatus} onScoresReady={mapScoresReady} onScoreError={mapScoreFailed} onAddonError={mapAddonFailed} onAddonReady={mapAddonReady} onVisibleCommit={mapVisibleCommit} onInteractiveCommit={mapInteractiveCommit} />
+    <RiskMap manifestUrl={meta.map_assets.manifest_url} scoreUrl={`/api/v3/map/scores/core?level=${level}`} expectedBuildId={meta.build?.build_id || ""} level={level} metric={metric} displayMetric={renderedMetric} busy={mapUpdating} selected={selected} filters={filters} neutralOnly={Boolean(scoreError)} retryGeneration={scoreReloadNonce} addonRetry={addonRetry} focusTarget={focusTarget} cameraTarget={cameraTarget} initialCamera={initial.camera} onSelect={selectFromMap} onPreview={setPreview} onCamera={cameraChanged} onStatus={setStatus} onScoresReady={mapScoresReady} onScoreError={mapScoreFailed} onAddonError={mapAddonFailed} onAddonReady={mapAddonReady} onVisibleCommit={mapVisibleCommit} onInteractiveCommit={mapInteractiveCommit} />
     <header className={`top-dock${overlay ? " overlay-open" : ""}`}><div className="brand"><strong>HouseHunter</strong><span>{METRIC_UI[metric].source}</span></div><div className="level-toggle" aria-label="Geography level"><button aria-pressed={level === "tract"} onClick={() => switchLevel("tract")}>Tracts</button><button aria-pressed={level === "county"} onClick={() => switchLevel("county")}>Counties</button></div><label className="layer-menu"><span>Layer</span><select aria-label="Map layer" value={metric} onChange={(event) => switchMetric(event.target.value as Metric)}>{METRICS.map((item) => <option key={item} value={item}>{METRIC_UI[item].name} — {METRIC_UI[item].source}</option>)}</select></label><div className="dock-actions"><button aria-expanded={overlay === "search"} aria-controls="search-panel" onClick={(event) => toggleOverlay("search", event.currentTarget)}>Search</button><button aria-expanded={overlay === "extremes"} aria-controls="extremes-panel" onClick={(event) => void openExtremes(event.currentTarget)}>{extremeButtonLabel}</button><button aria-expanded={overlay === "filters"} aria-controls="filters-panel" className={activeFilter ? "active" : ""} onClick={(event) => toggleOverlay("filters", event.currentTarget)}>Filters{activeFilter ? " · On" : ""}</button><button className="desktop-dock-action" aria-expanded={overlay === "exports"} aria-controls="exports-panel" onClick={(event) => toggleOverlay("exports", event.currentTarget)}>Exports</button><button className="desktop-dock-action" aria-expanded={overlay === "info"} aria-controls="info-panel" aria-label="Information" onClick={(event) => toggleOverlay("info", event.currentTarget)}>ⓘ</button><button className={`mobile-more${moreOpen ? " active" : ""}`} aria-expanded={moreOpen} aria-controls={moreControls} onClick={(event) => { if (moreOpen) { overlayTrigger.current = event.currentTarget; setOverlay(null); } else toggleOverlay("more", event.currentTarget); }}>More</button></div><div className={`build-pill ${scoreError ? "failed" : ""}`} title={meta.build?.build_id}>{scoreError ? "Score error" : status}</div></header>
     {overlay === "search" && <section id="search-panel" className="floating-panel search-panel" aria-label="Search"><form onSubmit={lookupAddress} aria-busy={searching}><label>Street address<input autoFocus autoComplete="street-address" autoCapitalize="words" enterKeyHint="search" value={query} onChange={(event) => { invalidateAddressLookup(); setSearchError(""); setQuery(event.target.value); }} placeholder="Street, city, state, ZIP" /></label><p className="privacy-note">Find tract contacts the US Census geocoder through this loopback server and may send it to OpenStreetMap only after a valid Census no-match. Addresses are not written to disk. Do not submit confidential addresses. The result shows tract context, never a property marker or property-specific score.</p><button className="primary" disabled={searching || !query.trim()}>{searching ? "Looking…" : "Find tract"}</button>{confirmation && <div className="confirm-card" role="region" aria-label="Approximate street match"><strong>Confirm approximate street match</strong><p>{confirmation.message}</p>{confirmation.candidates.map((candidate) => <button type="button" className="secondary" key={candidate.candidate_id} onClick={() => void confirmAddress(candidate.candidate_id)}>Use approximate street location: {candidate.matched_address}</button>)}<small>{confirmation.attribution}</small></div>}</form>{searchError && <p role="alert" className="error">{searchError}</p>}</section>}
     {overlay === "filters" && <section id="filters-panel" className="floating-panel filters-panel" aria-label="Map filters"><h2>Filters</h2><label>State<select value={draftState} disabled={Boolean(builtState)} onChange={(event) => setDraftFilters((current) => ({ ...current, state: event.target.value, county: "" }))}><option value="">All states & territories</option>{STATE_ABBREVIATIONS.map((item) => <option key={item}>{item}</option>)}</select></label>{level === "tract" && <label>County<select value={draftCounty} disabled={!draftState} onChange={(event) => setDraftFilter("county", event.target.value)}><option value="">All counties</option>{countyOptions.map((item) => <option value={item.place_id} key={item.place_id}>{item.name}</option>)}</select></label>}<label>Minimum Mountain Magnitude<input type="number" min="0" step="0.01" value={draftMountainMagnitudeMin ?? ""} onChange={(event) => { const value = Number(event.target.value); setDraftFilter("mountainMagnitudeMin", event.target.value === "" ? null : Number.isFinite(value) && value >= 0 ? value : null); }} placeholder="Any" /></label><label>Maximum Community Conditions group<input type="number" min="1" max="10" step="1" value={draftCommunityConditionsGroupMax ?? ""} onChange={(event) => { const value = Number(event.target.value); setDraftFilter("communityConditionsGroupMax", event.target.value === "" ? null : Number.isInteger(value) && value >= 1 && value <= 10 ? value : null); }} placeholder="Any" /></label><label>Maximum Cost of Living RPP<input type="number" min="0" step="0.1" value={draftCostOfLivingIndexMax ?? ""} onChange={(event) => { const value = Number(event.target.value); setDraftFilter("costOfLivingIndexMax", event.target.value === "" ? null : Number.isFinite(value) && value >= 0 ? value : null); }} placeholder="Any" /></label><label>Minimum square feet for $1M<input type="number" min="0" step="1" value={draftHomeSqftFor1mMin ?? ""} onChange={(event) => { const value = Number(event.target.value); setDraftFilter("homeSqftFor1mMin", event.target.value === "" ? null : Number.isFinite(value) && value >= 0 ? value : null); }} placeholder="Any" /></label><label>Minimum built 2000+ share (%)<input type="number" min="0" max="100" step="1" value={draftHousingBuilt2000PlusPctMin ?? ""} onChange={(event) => { const value = Number(event.target.value); setDraftFilter("housingBuilt2000PlusPctMin", event.target.value === "" ? null : Number.isFinite(value) && value >= 0 && value <= 100 ? value : null); }} placeholder="Any" /></label><label className="check"><input type="checkbox" checked={draftUnranked} onChange={(event) => setDraftFilter("showUnavailable", event.target.checked)} />Show {unavailableLabel} geographies</label><p className="filter-note">Explicit metric thresholds always exclude unavailable values, even when “show unavailable” is on.</p><div className="panel-buttons"><button className="primary" onClick={applyFilters}>Apply</button><button className="secondary" onClick={clearFilters}>Clear</button></div></section>}
     {overlay === "extremes" && <section id="extremes-panel" className="floating-panel extremes-panel" aria-label={extremesLabel} aria-busy={extremesLoading}><h2>Explore the range</h2>{browseGroup !== null ? <><button className="secondary" onClick={closeCommunityBrowse}>← Back to groups</button><ResultGroup title={`Group ${browseGroup} · ${number.format(browseTotal)} counties`} items={browseItems} metric={metric} onChoose={choose} /><div className="pager"><button className="secondary" disabled={browseOffset === 0} onClick={() => void browseCommunity(browseGroup, Math.max(0, browseOffset - 50))}>Previous</button><span>{number.format(browseOffset + 1)}–{number.format(Math.min(browseOffset + browseItems.length, browseTotal))} of {number.format(browseTotal)}</span><button className="secondary" disabled={browseOffset + 50 >= browseTotal} onClick={() => void browseCommunity(browseGroup, browseOffset + 50)}>Next</button></div></> : extremesLoading ? <p className="loading-copy" role="status">{metric === "community-conditions" ? "Loading best and worst groups…" : `Loading ${extremesLabel.toLowerCase()}…`}</p> : noCommunityGroups ? <p>No grouped counties in this scope.</p> : <div><ResultGroup title={metric === "community-conditions" ? `Best present · Group ${lowestGroup} · ${number.format(lowestTotal)} counties` : metric === "home-costs" ? highTitle : lowTitle} items={metric === "home-costs" ? highest : lowest} metric={metric} onChoose={choose} onBrowse={metric === "community-conditions" && lowestGroup !== null ? () => void browseCommunity(lowestGroup) : undefined} /><ResultGroup title={metric === "community-conditions" ? `Worst present · Group ${highestGroup} · ${number.format(highestTotal)} counties` : metric === "home-costs" ? lowTitle : highTitle} items={metric === "home-costs" ? lowest : highest} metric={metric} onChoose={choose} onBrowse={metric === "community-conditions" && highestGroup !== null ? () => void browseCommunity(highestGroup) : undefined} /></div>}{searchError && <p role="alert" className="error">{searchError}</p>}</section>}
     {overlay === "more" && <section id="more-panel" className="floating-panel more-panel" aria-label="More actions"><h2>More</h2><button className="secondary" onClick={() => setOverlay("exports")}>Export snapshot</button><button className="secondary" onClick={() => setOverlay("info")}>About this map</button></section>}
-    {overlay === "exports" && <nav id="exports-panel" className="floating-panel export-panel" aria-label="Exports"><h2>Export snapshot</h2><a ref={(node) => { overlayEntry.current = node; }} href="/api/v2/exports/places.csv" download>Tracts CSV</a><a href="/api/v2/exports/places.parquet" download>Tracts Parquet</a><a href="/api/v2/exports/counties.csv" download>Counties CSV</a><a href="/api/v2/exports/counties.parquet" download>Counties Parquet</a></nav>}
-    {overlay === "info" && <section id="info-panel" className="floating-panel info-panel" aria-label="About this map"><h2 ref={(node) => { overlayEntry.current = node; }} tabIndex={-1}>About this map</h2><p>HouseHunter keeps five independent dimensions. Filters can be combined, but the app never blends them into a composite score.</p><p>FEMA risk uses separate tract and county national percentile universes. County values are never tract averages. Hazard percentiles appear only in details.</p><p>{COMMUNITY_EXPLANATION} Tract colors inherit their county group and never imply tract-level resolution.</p><p>{mountainExplanation(level)}</p><p>Cost of Living uses BEA all-items Regional Price Parities (U.S. = 100). Tracts inherit their county’s metropolitan or U.S. nonmetropolitan assignment; lower is better.</p><p>Home Costs estimates square feet purchasable for $1M from county asking-market indicators. It is not a sale price, valuation, ownership-cost estimate, or promise that a matching home is listed. Housing-age context is an ACS 2024 five-year estimate.</p>{activeLayer && <p className={`layer-source ${activeLayer.availability}`}><strong>Active layer: {activeLayer.display_name}</strong> · {activeLayer.source} · {activeLayer.vintage} · {activeLayer.geography}. {activeLayer.attribution} {activeLayer.notice}</p>}{(meta.layers ?? []).filter((layer) => layer.availability !== "available").map((layer) => <p className="notice" key={layer.key}><strong>{layer.display_name} unavailable.</strong> {layer.notice}</p>)}{homeSource?.stale && <p className="notice"><strong>Home Costs market release is stale.</strong> The locally imported {homeSource.release ?? homeSource.version} release is older than 62 days.</p>}<p>To enable an approved local Home Costs release, run <code>househunter import-home-market FILE --acknowledge-personal-use</code>. Realtor.com source and derived market data remain local and are for the owner-selected personal/private-use workflow only.</p><p>HouseHunter is local-only and uses no basemap, telemetry, account, or hosted database.</p></section>}
+    {overlay === "exports" && <nav id="exports-panel" className="floating-panel export-panel" aria-label="Exports"><h2>Export snapshot</h2><a ref={(node) => { overlayEntry.current = node; }} href="/api/v3/exports/places.csv" download>Tracts CSV</a><a href="/api/v3/exports/places.parquet" download>Tracts Parquet</a><a href="/api/v3/exports/counties.csv" download>Counties CSV</a><a href="/api/v3/exports/counties.parquet" download>Counties Parquet</a></nav>}
+    {overlay === "info" && <section id="info-panel" className="floating-panel info-panel" aria-label="About this map"><h2 ref={(node) => { overlayEntry.current = node; }} tabIndex={-1}>About this map</h2><p>HouseHunter keeps five independent dimensions. Filters can be combined, but the app never blends dimensions into one score.</p><p>Residential Hazard Exposure is a HouseHunter composite of FEMA building-specific natural-hazard loss rates. Higher values indicate greater exposure to one or more significant hazards, with extra weight on the most elevated hazards. Tracts and counties use separate national percentile universes; county values are never tract averages. FEMA ALR_NPCTL remains available only as supporting detail.</p><p>{COMMUNITY_EXPLANATION} Tract colors inherit their county group and never imply tract-level resolution.</p><p>{mountainExplanation(level)}</p><p>Cost of Living uses BEA all-items Regional Price Parities (U.S. = 100). Tracts inherit their county’s metropolitan or U.S. nonmetropolitan assignment; lower is better.</p><p>Home Costs estimates square feet purchasable for $1M from county asking-market indicators. It is not a sale price, valuation, ownership-cost estimate, or promise that a matching home is listed. Housing-age context is an ACS 2024 five-year estimate.</p>{activeLayer && <p className={`layer-source ${activeLayer.availability}`}><strong>Active layer: {activeLayer.display_name}</strong> · {activeLayer.source} · {activeLayer.vintage} · {activeLayer.geography}. {activeLayer.attribution} {activeLayer.notice}</p>}{(meta.layers ?? []).filter((layer) => layer.availability !== "available").map((layer) => <p className="notice" key={layer.key}><strong>{layer.display_name} unavailable.</strong> {layer.notice}</p>)}{homeSource?.stale && <p className="notice"><strong>Home Costs market release is stale.</strong> The locally imported {homeSource.release ?? homeSource.version} release is older than 62 days.</p>}<p>To enable an approved local Home Costs release, run <code>househunter import-home-market FILE --acknowledge-personal-use</code>. Realtor.com source and derived market data remain local and are for the owner-selected personal/private-use workflow only.</p><p>HouseHunter is local-only and uses no basemap, telemetry, account, or hosted database.</p></section>}
     {preview && <div className={tooltipClass} style={{ left: preview.x, top: preview.y }}><strong>{preview.name}</strong><span>{preview.state} · {preview.placeId}</span><b>{tooltipValue}</b></div>}
     {scoreError && <section className="recovery-card" role="alert"><strong>Scores could not be loaded</strong><span>{scoreError}</span><button className="secondary" onClick={retryScores}>Retry scores</button></section>}
     {!scoreError && requiredAddonErrors.length > 0 && <div className="recovery-stack">{requiredAddonErrors.map((kind) => {
@@ -704,13 +715,13 @@ function Workspace({ meta }: { meta: Meta }) {
 
 function App() {
   const [meta, setMeta] = useState<Meta | null>(null); const [error, setError] = useState("");
-  const load = useCallback(() => { setError(""); void json<Meta>("/api/v2/meta").then(setMeta).catch((caught) => setError((caught as Error).message)); }, []);
+  const load = useCallback(() => { setError(""); void json<Meta>("/api/v3/meta").then(setMeta).catch((caught) => setError((caught as Error).message)); }, []);
   useEffect(load, [load]);
   if (!meta) return <main className="map-shell boot"><div className="boot-copy" role={error ? "alert" : "status"}>{error || "Opening HouseHunter map…"}{error && <button onClick={load}>Retry</button>}</div></main>;
   const mapAssets = meta.map_assets || { ready: false, error: "Map asset status is missing", schema_version: null, release: null, manifest_url: "/map-assets/manifest.json" };
-  if (!mapAssets.ready) return <main className="map-shell"><RiskMap manifestUrl={mapAssets.manifest_url} scoreUrl="/api/v2/map/scores?level=tract" expectedBuildId="" level="tract" selected="" filters={EMPTY_FILTERS} neutralOnly focusTarget={null} initialCamera={initial.camera} onSelect={() => undefined} onPreview={() => undefined} onCamera={() => undefined} onStatus={() => undefined} /><div className="asset-repair" role="alert"><h1>Map boundaries need repair</h1><p>{mapAssets.error}</p><p>Run <code>uv run python scripts/generate_map_assets.py</code> from the HouseHunter checkout, then restart the app.</p></div></main>;
+  if (!mapAssets.ready) return <main className="map-shell"><RiskMap manifestUrl={mapAssets.manifest_url} scoreUrl="/api/v3/map/scores?level=tract" expectedBuildId="" level="tract" selected="" filters={EMPTY_FILTERS} neutralOnly focusTarget={null} initialCamera={initial.camera} onSelect={() => undefined} onPreview={() => undefined} onCamera={() => undefined} onStatus={() => undefined} /><div className="asset-repair" role="alert"><h1>Map boundaries need repair</h1><p>{mapAssets.error}</p><p>Run <code>uv run python scripts/generate_map_assets.py</code> from the HouseHunter checkout, then restart the app.</p></div></main>;
   const readyMeta = { ...meta, map_assets: mapAssets };
-  if (!meta.build) return <main className="map-shell"><RiskMap manifestUrl={mapAssets.manifest_url} scoreUrl="/api/v2/map/scores?level=tract" expectedBuildId="" level="tract" selected="" filters={EMPTY_FILTERS} neutralOnly focusTarget={null} initialCamera={initial.camera} onSelect={() => undefined} onPreview={() => undefined} onCamera={() => undefined} onStatus={() => undefined} /><header className="top-dock"><div className="brand"><strong>HouseHunter</strong><span>FEMA ALR_NPCTL</span></div><div className="build-pill">Setup required</div></header><Setup token={meta.mutation_token} onReady={load} /><div className="legend"><p><strong>FEMA ALR_NPCTL</strong> · lower is better · not property-level risk</p></div></main>;
+  if (!meta.build) return <main className="map-shell"><RiskMap manifestUrl={mapAssets.manifest_url} scoreUrl="/api/v3/map/scores?level=tract" expectedBuildId="" level="tract" selected="" filters={EMPTY_FILTERS} neutralOnly focusTarget={null} initialCamera={initial.camera} onSelect={() => undefined} onPreview={() => undefined} onCamera={() => undefined} onStatus={() => undefined} /><header className="top-dock"><div className="brand"><strong>HouseHunter</strong><span>Residential Hazard Exposure</span></div><div className="build-pill">Setup required</div></header><Setup token={meta.mutation_token} onReady={load} /><div className="legend"><p><strong>Residential Hazard Exposure</strong> · higher is worse · not property-level risk</p></div></main>;
   return <Workspace meta={readyMeta} />;
 }
 

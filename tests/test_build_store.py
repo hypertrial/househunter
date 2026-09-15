@@ -14,6 +14,7 @@ from househunter.build import (
     SNAPSHOT_FILES,
     _attach_current_mountain,
     _cached_snapshot_artifacts_valid,
+    _hazard_values_are_valid,
     build_snapshot,
 )
 from househunter.config import RuntimePaths
@@ -213,7 +214,7 @@ def test_build_is_content_addressed_and_queryable(
         "home_market",
     }
     assert {layer["key"] for layer in first_metadata["layers"]} == {
-        "risk",
+        "residential-hazard",
         "community-conditions",
         "mountain",
         "cost-of-living",
@@ -243,21 +244,23 @@ def test_build_is_content_addressed_and_queryable(
             "02001000100",
             "01001000200",
             "01001000300",
-            "99999999999",
         ]
-        assert rows["items"][0]["risk_score"] == 10.0
+        assert rows["items"][0]["res_hazard_npctl"] == 0.0
+        assert rows["items"][0]["alr_npctl"] == 10.0
         assert rows["items"][0]["state"] == "AL"
         assert rows["items"][0]["county_fips"] == "01001"
         assert rows["items"][0]["county_name"] == "Autauga"
         detail = store.place_detail("01001000100")
-        assert detail["coverage_ratio"] == 1.0
-        assert detail["tract_contributions"][0]["fema_percentile"] == 10.0
+        assert detail["summary"]["res_hazard_coverage_ratio"] == 1.0
+        assert len(detail["hazard_percentiles"]) == 17
         counties = store.list_counties(limit=10)
         assert [item["place_id"] for item in counties["items"]] == ["02001", "01001"]
-        assert counties["items"][0]["risk_score"] == 12.0
+        assert counties["items"][0]["res_hazard_npctl"] == 0.0
         assert counties["items"][0]["name"] == "Aleutians East Borough"
-        assert counties["items"][1]["risk_score"] == 40.0
-        assert counties["items"][1]["risk_score"] != pytest.approx((10.0 + 50.0 + 80.0) / 3)
+        assert counties["items"][1]["res_hazard_npctl"] == 100.0
+        assert counties["items"][1]["res_hazard_npctl"] != pytest.approx(
+            (10.0 + 50.0 + 80.0) / 3
+        )
         filtered = store.list_places(county="01001")
         assert [item["place_id"] for item in filtered["items"]] == [
             "01001000100",
@@ -364,7 +367,7 @@ def test_build_joins_promoted_mountain_release_and_changes_identity(
         ] == ["02001000100"]
 
 
-def test_store_magnitude_filter_sort_ties_nulls_and_map_schema_four(
+def test_store_magnitude_filter_sort_ties_nulls_and_map_schema_five(
     fixture_environment: tuple[RuntimePaths, Path],
 ) -> None:
     paths, root = fixture_environment
@@ -404,10 +407,10 @@ def test_store_magnitude_filter_sort_ties_nulls_and_map_schema_four(
             store.list_places(sort="mountain_score")
 
         payload = store.map_scores("tract")
-        assert payload["schema_version"] == 4
+        assert payload["schema_version"] == 5
         assert set(payload["columns"]) == {
             "place_id",
-            "risk_score",
+            "res_hazard_npctl",
             "community_conditions_group",
             "mountain_magnitude",
             "cost_of_living_index",
@@ -420,7 +423,7 @@ def test_store_magnitude_filter_sort_ties_nulls_and_map_schema_four(
         core = store.map_scores_core("tract")
         assert set(core["columns"]) == {
             "place_id",
-            "risk_score",
+            "res_hazard_npctl",
             "community_conditions_group",
             "mountain_magnitude",
         }
@@ -712,9 +715,35 @@ def test_unknown_fips_prefix_is_retained(
     with Store(paths) as store:
         detail = store.place_detail("99999999999")
         assert detail["summary"]["state"] == "??"
-        assert detail["summary"]["risk_score"] == 99.0
+        assert detail["summary"]["alr_npctl"] == 99.0
+        assert detail["summary"]["res_hazard_npctl"] is None
         assert detail["summary"]["county_fips"] == "??"
         assert detail["summary"]["county_name"] == "Unknown"
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("res_hazard_coverage_ratio", 0.5),
+        ("res_hazard_data_quality", "unavailable"),
+        ("res_hazard_spectral", float("inf")),
+        ("alrb_wfir", -1.0),
+        ("alrb_npctl_wfir", 101.0),
+    ],
+)
+def test_hazard_artifact_validation_rejects_inconsistent_values(
+    fixture_environment: tuple[RuntimePaths, object], column: str, value: object
+) -> None:
+    paths, _ = fixture_environment
+    output = build_snapshot(paths)
+    frame = pl.read_parquet(output / "places.parquet").with_columns(
+        pl.when(pl.col("place_id") == "01001000100")
+        .then(pl.lit(value))
+        .otherwise(pl.col(column))
+        .alias(column)
+    )
+
+    assert not _hazard_values_are_valid(frame)
 
 
 def test_failed_build_preserves_current_pointer(
@@ -766,7 +795,8 @@ def test_build_and_store_reject_same_count_database_mutation(
     connection = duckdb.connect(str(output / "househunter.duckdb"))
     try:
         connection.execute(
-            "UPDATE places SET risk_score = 0 WHERE place_id = (SELECT min(place_id) FROM places)"
+            "UPDATE places SET res_hazard_npctl = 1 WHERE "
+            "place_id = (SELECT min(place_id) FROM places)"
         )
     finally:
         connection.close()
@@ -801,7 +831,8 @@ def test_store_caches_validation_until_an_artifact_changes(
     connection = duckdb.connect(str(output / "househunter.duckdb"))
     try:
         connection.execute(
-            "UPDATE places SET risk_score = 0 WHERE place_id = (SELECT min(place_id) FROM places)"
+            "UPDATE places SET res_hazard_npctl = 1 WHERE "
+            "place_id = (SELECT min(place_id) FROM places)"
         )
     finally:
         connection.close()
@@ -838,7 +869,7 @@ def test_export_cannot_overwrite_managed_data(
     assert protected.read_bytes() == before
 
 
-@pytest.mark.parametrize("schema_version", [2, 3, 4, BUILD_SCHEMA_VERSION - 1])
+@pytest.mark.parametrize("schema_version", [2, 3, 4, 10, BUILD_SCHEMA_VERSION - 1])
 def test_legacy_build_schema_is_not_reused(
     fixture_environment: tuple[RuntimePaths, object],
     schema_version: int,
@@ -853,16 +884,16 @@ def test_legacy_build_schema_is_not_reused(
         build_snapshot(paths)
 
 
-def test_schema_nine_current_pointer_requires_a_rebuild(
+def test_schema_ten_current_pointer_requires_a_rebuild(
     fixture_environment: tuple[RuntimePaths, object],
 ) -> None:
     paths, _ = fixture_environment
     build_snapshot(paths)
     pointer = json.loads(paths.current.read_text())
-    pointer["schema_version"] = 9
+    pointer["schema_version"] = 10
     paths.current.write_text(json.dumps(pointer))
 
-    with pytest.raises(BuildNotFoundError, match=r"Snapshot schema 9.*rebuild.*schema 10"):
+    with pytest.raises(BuildNotFoundError, match=r"Snapshot schema 10.*rebuild.*schema 11"):
         Store(paths)
 
 

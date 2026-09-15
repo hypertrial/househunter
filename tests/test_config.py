@@ -49,10 +49,10 @@ def test_chrr_source_is_fully_pinned() -> None:
 def test_fema_sources_are_content_pinned() -> None:
     config = load_config()
     assert config["fema"]["canonical_sha256"] == (
-        "7b12ca2f292c658a92cc4c9bc39eef5e11b606fa662a8280aa830b1624754bc6"
+        "1450dd1557c600f2b93824cbd52f83f9cdaa8640ec84d33c0e579e91f1b378ac"
     )
     assert config["fema_counties"]["canonical_sha256"] == (
-        "9f9be9b86fe1ae0b0637728f0867432367285dd8dfd7bc7badddb3b2b2c6a23a"
+        "8aa3ce57aaf8a934fda9fd55e7c9df1f4cba6dd2d813a524e1c7d1105a3d5b9a"
     )
 
 

@@ -65,27 +65,44 @@ fema:
   fields:
     TRACTFIPS: esriFieldTypeString
     ALR_NPCTL: esriFieldTypeDouble
+    ALR_VALB: esriFieldTypeDouble
     NRI_VER: esriFieldTypeString
-    AVLN_ALR_NPCTL: esriFieldTypeDouble
-    CFLD_ALR_NPCTL: esriFieldTypeDouble
-    CWAV_ALR_NPCTL: esriFieldTypeDouble
-    DRGT_ALR_NPCTL: esriFieldTypeDouble
-    ERQK_ALR_NPCTL: esriFieldTypeDouble
-    HAIL_ALR_NPCTL: esriFieldTypeDouble
-    HWAV_ALR_NPCTL: esriFieldTypeDouble
-    HRCN_ALR_NPCTL: esriFieldTypeDouble
-    ISTM_ALR_NPCTL: esriFieldTypeDouble
-    LNDS_ALR_NPCTL: esriFieldTypeDouble
-    LTNG_ALR_NPCTL: esriFieldTypeDouble
-    IFLD_ALR_NPCTL: esriFieldTypeDouble
-    SWND_ALR_NPCTL: esriFieldTypeDouble
-    TRND_ALR_NPCTL: esriFieldTypeDouble
-    TSUN_ALR_NPCTL: esriFieldTypeDouble
-    VLCN_ALR_NPCTL: esriFieldTypeDouble
-    WFIR_ALR_NPCTL: esriFieldTypeDouble
-    WNTW_ALR_NPCTL: esriFieldTypeDouble
-  schema_fingerprint: e0b94edbd7b1cde97abc67caa784749673980e538afdb031e3574d5e9482b5cc
-  canonical_sha256: 7b12ca2f292c658a92cc4c9bc39eef5e11b606fa662a8280aa830b1624754bc6
+    AVLN_ALRB: esriFieldTypeDouble
+    AVLN_EALR: esriFieldTypeString
+    CFLD_ALRB: esriFieldTypeDouble
+    CFLD_EALR: esriFieldTypeString
+    CWAV_ALRB: esriFieldTypeDouble
+    CWAV_EALR: esriFieldTypeString
+    ERQK_ALRB: esriFieldTypeDouble
+    ERQK_EALR: esriFieldTypeString
+    HAIL_ALRB: esriFieldTypeDouble
+    HAIL_EALR: esriFieldTypeString
+    HWAV_ALRB: esriFieldTypeDouble
+    HWAV_EALR: esriFieldTypeString
+    HRCN_ALRB: esriFieldTypeDouble
+    HRCN_EALR: esriFieldTypeString
+    ISTM_ALRB: esriFieldTypeDouble
+    ISTM_EALR: esriFieldTypeString
+    LNDS_ALRB: esriFieldTypeDouble
+    LNDS_EALR: esriFieldTypeString
+    LTNG_ALRB: esriFieldTypeDouble
+    LTNG_EALR: esriFieldTypeString
+    IFLD_ALRB: esriFieldTypeDouble
+    IFLD_EALR: esriFieldTypeString
+    SWND_ALRB: esriFieldTypeDouble
+    SWND_EALR: esriFieldTypeString
+    TRND_ALRB: esriFieldTypeDouble
+    TRND_EALR: esriFieldTypeString
+    TSUN_ALRB: esriFieldTypeDouble
+    TSUN_EALR: esriFieldTypeString
+    VLCN_ALRB: esriFieldTypeDouble
+    VLCN_EALR: esriFieldTypeString
+    WFIR_ALRB: esriFieldTypeDouble
+    WFIR_EALR: esriFieldTypeString
+    WNTW_ALRB: esriFieldTypeDouble
+    WNTW_EALR: esriFieldTypeString
+  schema_fingerprint: 446e778e48a7507ae66cf5a11e61354752e666daab113418137e415148b35f13
+  canonical_sha256: 1450dd1557c600f2b93824cbd52f83f9cdaa8640ec84d33c0e579e91f1b378ac
 fema_counties:
   name: FEMA National Risk Index Counties
   item_id: 39485e8035d446a5bff03259508ae355
@@ -104,24 +121,41 @@ fema_counties:
     COUNTYTYPE: esriFieldTypeString
     STATEABBRV: esriFieldTypeString
     ALR_NPCTL: esriFieldTypeDouble
+    ALR_VALB: esriFieldTypeDouble
     NRI_VER: esriFieldTypeString
-    AVLN_ALR_NPCTL: esriFieldTypeDouble
-    CFLD_ALR_NPCTL: esriFieldTypeDouble
-    CWAV_ALR_NPCTL: esriFieldTypeDouble
-    DRGT_ALR_NPCTL: esriFieldTypeDouble
-    ERQK_ALR_NPCTL: esriFieldTypeDouble
-    HAIL_ALR_NPCTL: esriFieldTypeDouble
-    HWAV_ALR_NPCTL: esriFieldTypeDouble
-    HRCN_ALR_NPCTL: esriFieldTypeDouble
-    ISTM_ALR_NPCTL: esriFieldTypeDouble
-    LNDS_ALR_NPCTL: esriFieldTypeDouble
-    LTNG_ALR_NPCTL: esriFieldTypeDouble
-    IFLD_ALR_NPCTL: esriFieldTypeDouble
-    SWND_ALR_NPCTL: esriFieldTypeDouble
-    TRND_ALR_NPCTL: esriFieldTypeDouble
-    TSUN_ALR_NPCTL: esriFieldTypeDouble
-    VLCN_ALR_NPCTL: esriFieldTypeDouble
-    WFIR_ALR_NPCTL: esriFieldTypeDouble
-    WNTW_ALR_NPCTL: esriFieldTypeDouble
-  schema_fingerprint: 557599b73577df1deedfb5946323d0760d200634e5f1ab315c58b703fb1f4b99
-  canonical_sha256: 9f9be9b86fe1ae0b0637728f0867432367285dd8dfd7bc7badddb3b2b2c6a23a
+    AVLN_ALRB: esriFieldTypeDouble
+    AVLN_EALR: esriFieldTypeString
+    CFLD_ALRB: esriFieldTypeDouble
+    CFLD_EALR: esriFieldTypeString
+    CWAV_ALRB: esriFieldTypeDouble
+    CWAV_EALR: esriFieldTypeString
+    ERQK_ALRB: esriFieldTypeDouble
+    ERQK_EALR: esriFieldTypeString
+    HAIL_ALRB: esriFieldTypeDouble
+    HAIL_EALR: esriFieldTypeString
+    HWAV_ALRB: esriFieldTypeDouble
+    HWAV_EALR: esriFieldTypeString
+    HRCN_ALRB: esriFieldTypeDouble
+    HRCN_EALR: esriFieldTypeString
+    ISTM_ALRB: esriFieldTypeDouble
+    ISTM_EALR: esriFieldTypeString
+    LNDS_ALRB: esriFieldTypeDouble
+    LNDS_EALR: esriFieldTypeString
+    LTNG_ALRB: esriFieldTypeDouble
+    LTNG_EALR: esriFieldTypeString
+    IFLD_ALRB: esriFieldTypeDouble
+    IFLD_EALR: esriFieldTypeString
+    SWND_ALRB: esriFieldTypeDouble
+    SWND_EALR: esriFieldTypeString
+    TRND_ALRB: esriFieldTypeDouble
+    TRND_EALR: esriFieldTypeString
+    TSUN_ALRB: esriFieldTypeDouble
+    TSUN_EALR: esriFieldTypeString
+    VLCN_ALRB: esriFieldTypeDouble
+    VLCN_EALR: esriFieldTypeString
+    WFIR_ALRB: esriFieldTypeDouble
+    WFIR_EALR: esriFieldTypeString
+    WNTW_ALRB: esriFieldTypeDouble
+    WNTW_EALR: esriFieldTypeString
+  schema_fingerprint: f7dd16407f1adc0f2275c530f4123f594c6f6b86fad11ac5dc62f47be1b76ebb
+  canonical_sha256: 8aa3ce57aaf8a934fda9fd55e7c9df1f4cba6dd2d813a524e1c7d1105a3d5b9a

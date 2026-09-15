@@ -325,18 +325,6 @@ def test_county_contract_rejects_duplicates() -> None:
             ],
             "invalid ALR_NPCTL",
         ),
-        (
-            [
-                {
-                    "TRACTFIPS": "01001000100",
-                    "ALR_NPCTL": 1.0,
-                    "NRI_VER": "December 2025",
-                    "WFIR_ALR_NPCTL": 101.0,
-                },
-                {"TRACTFIPS": "01001000200", "ALR_NPCTL": 2.0, "NRI_VER": "December 2025"},
-            ],
-            "invalid hazard ALR_NPCTL",
-        ),
     ],
 )
 def test_fema_contract_rejects_duplicates_and_invalid_range(
@@ -347,33 +335,38 @@ def test_fema_contract_rejects_duplicates_and_invalid_range(
         _validate_rows(rows, source)
 
 
-def test_fema_contract_allows_null_hazard_percentiles() -> None:
+def test_fema_contract_preserves_building_loss_and_rating_states() -> None:
     frame = _validate_rows(
         [
             {
                 "TRACTFIPS": "01001000100",
                 "ALR_NPCTL": 1.0,
+                "ALR_VALB": 0.25,
                 "NRI_VER": "December 2025",
-                "TSUN_ALR_NPCTL": None,
+                "WFIR_ALRB": None,
+                "WFIR_EALR": "Insufficient Data",
             },
             {
                 "TRACTFIPS": "01001000200",
                 "ALR_NPCTL": 2.0,
+                "ALR_VALB": 1.25,
                 "NRI_VER": "December 2025",
-                "WFIR_ALR_NPCTL": 12.5,
+                "WFIR_ALRB": 12.5,
+                "WFIR_EALR": "Relatively High",
             },
         ],
         {"expected_row_count": 2, "version": "December 2025"},
     )
-    assert frame["alr_npctl_tsun"].to_list() == [None, None]
-    assert frame["alr_npctl_wfir"].to_list() == [None, 12.5]
+    assert frame["alr_valb"].to_list() == [0.25, 1.25]
+    assert frame["alrb_wfir"].to_list() == [None, 12.5]
+    assert frame["ealr_wfir"].to_list() == ["Insufficient Data", "Relatively High"]
 
 
 @pytest.mark.parametrize("validator,id_field,id_value", [
     (_validate_rows, "TRACTFIPS", "01001000100"),
     (_validate_county_rows, "STCOFIPS", "01001"),
 ])
-@pytest.mark.parametrize("field", ["ALR_NPCTL", "WFIR_ALR_NPCTL"])
+@pytest.mark.parametrize("field", ["ALR_NPCTL", "ALR_VALB", "WFIR_ALRB"])
 @pytest.mark.parametrize("value", ["5.0", True, False])
 def test_fema_contract_rejects_coercible_percentile_types(
     validator, id_field: str, id_value: str, field: str, value: object
@@ -389,6 +382,84 @@ def test_fema_contract_rejects_coercible_percentile_types(
     }
     with pytest.raises(SourceContractError, match=f"FEMA {field} must be"):
         validator([row], {"expected_row_count": 1, "version": "December 2025"})
+
+
+@pytest.mark.parametrize("rating", ["Unexpected Rating", 12, None])
+def test_fema_contract_rejects_unknown_or_wrong_rating(rating: object) -> None:
+    row = {
+        "TRACTFIPS": "01001000100",
+        "ALR_NPCTL": 5.0,
+        "ALR_VALB": 1.0,
+        "NRI_VER": "December 2025",
+        "WFIR_ALRB": 2.0,
+        "WFIR_EALR": rating,
+    }
+    source = {
+        "expected_row_count": 1,
+        "version": "December 2025",
+        "fields": {
+            "WFIR_ALRB": "esriFieldTypeDouble",
+            "WFIR_EALR": "esriFieldTypeString",
+        },
+    }
+    with pytest.raises(SourceContractError, match="WFIR_EALR"):
+        _validate_rows([row], source)
+
+
+def test_fema_contract_nulls_known_invalid_pair_instead_of_imputing_zero() -> None:
+    frame = _validate_rows(
+        [
+            {
+                "TRACTFIPS": "01001000100",
+                "ALR_NPCTL": 5.0,
+                "ALR_VALB": 1.0,
+                "NRI_VER": "December 2025",
+                "WFIR_ALRB": -2.0,
+                "WFIR_EALR": "Relatively High",
+            }
+        ],
+        {"expected_row_count": 1, "version": "December 2025"},
+    )
+    assert frame["alrb_wfir"].item() is None
+    assert frame["ealr_wfir"].item() == "Relatively High"
+
+
+@pytest.mark.parametrize(
+    ("raw", "rating"),
+    [(1.0, "Not Applicable"), (0.0, "Insufficient Data")],
+)
+def test_fema_contract_preserves_invalid_status_pair_for_reporting(
+    raw: float, rating: str
+) -> None:
+    frame = _validate_rows(
+        [
+            {
+                "TRACTFIPS": "01001000100",
+                "ALR_NPCTL": 5.0,
+                "ALR_VALB": 1.0,
+                "NRI_VER": "December 2025",
+                "WFIR_ALRB": raw,
+                "WFIR_EALR": rating,
+            }
+        ],
+        {"expected_row_count": 1, "version": "December 2025"},
+    )
+    assert frame["alrb_wfir"].item() == raw
+    assert frame["ealr_wfir"].item() == rating
+
+
+@pytest.mark.parametrize("raw", [float("nan"), float("inf"), float("-inf")])
+def test_fema_contract_rejects_nonfinite_hazard_values(raw: float) -> None:
+    row = {
+        "TRACTFIPS": "01001000100",
+        "ALR_NPCTL": 5.0,
+        "ALR_VALB": 1.0,
+        "NRI_VER": "December 2025",
+        "WFIR_ALRB": raw,
+        "WFIR_EALR": "Relatively High",
+    }
+    with pytest.raises(SourceContractError, match="WFIR_ALRB must be finite"):
+        _validate_rows([row], {"expected_row_count": 1, "version": "December 2025"})
 
 
 @pytest.mark.parametrize(
@@ -672,6 +743,7 @@ def test_cached_fema_rejects_plausible_changes_against_pinned_checksum(
             {
                 id_column: ids,
                 "alr_npctl": [10.0, 20.0],
+                "alr_valb": [1.0, 2.0],
                 "nri_version": ["December 2025"] * 2,
                 **extra_columns,
             }

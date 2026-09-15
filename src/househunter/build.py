@@ -47,24 +47,28 @@ from .geography import (
     UNKNOWN_COUNTY_NAME,
     UNKNOWN_STATE,
 )
-from .hazards import HAZARD_COLUMNS, with_hazard_columns
+from .hazards import (
+    HAZARD_RATING_COLUMNS,
+    HAZARD_RAW_COLUMNS,
+    HAZARD_SNAPSHOT_COLUMNS,
+    HAZARDS,
+    KNOWN_EAL_RATINGS,
+    score_residential_hazards,
+    with_hazard_columns,
+)
 from .home_market import load_current_release, load_release_lock
 from .housing_stock import HousingStockBundle, validate_housing_stock_assets
 
 Progress = Callable[[int, str], None]
 Cancelled = Callable[[], bool]
 
-BUILD_SCHEMA_VERSION = 10
+BUILD_SCHEMA_VERSION = 11
 MOUNTAIN_RUNTIME_GEOGRAPHY_VERSION = "mountain_runtime_geography_v1"
 _CONNECTICUT_UNMATCHED_ZERO_POPULATION_TRACTS = frozenset(
     {"09001990000", "09007990100", "09009990000", "09011990100"}
 )
 _SNAPSHOT_TABLES = {
     "places": ("places.parquet", ("place_id",)),
-    "tract_contributions": (
-        "tract_contributions.parquet",
-        ("place_id", "tract_id"),
-    ),
     "counties": ("counties.parquet", ("place_id",)),
     "chrr_county": ("chrr_county.parquet", ("county_fips",)),
     "cost_of_living": (
@@ -275,10 +279,10 @@ def _layer_descriptors(
     )
     return [
         {
-            "key": "risk",
-            "display_name": "Natural Disaster Risk",
+            "key": "residential-hazard",
+            "display_name": "Residential Hazard Exposure",
             "source": "FEMA National Risk Index",
-            "direction": "lower",
+            "direction": "higher",
             "availability": "available",
             "vintage": str(fema["version"]),
             "geography": "FEMA tract or county",
@@ -518,7 +522,7 @@ def compute_scores(
     *,
     fema_vintage: str = "December 2025",
     chrr_release_year: int = 2025,
-) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
+) -> tuple[pl.DataFrame, pl.DataFrame]:
     if counties is None:
         counties = pl.DataFrame(
             {
@@ -527,6 +531,7 @@ def compute_scores(
                 "county_type": [],
                 "state": [],
                 "alr_npctl": [],
+                "alr_valb": [],
                 "nri_version": [],
             },
             schema={
@@ -535,6 +540,7 @@ def compute_scores(
                 "county_type": pl.String,
                 "state": pl.String,
                 "alr_npctl": pl.Float64,
+                "alr_valb": pl.Float64,
                 "nri_version": pl.String,
             },
         )
@@ -543,10 +549,9 @@ def compute_scores(
             {"county_fips": [], "community_conditions_group": []},
             schema={"county_fips": pl.String, "community_conditions_group": pl.Int8},
         )
-    fema = with_hazard_columns(fema)
-    counties = with_hazard_columns(counties)
-    hazard_cols = [pl.col(column) for column in HAZARD_COLUMNS]
-    county_complete = pl.col("alr_npctl").is_not_null()
+    fema = score_residential_hazards(with_hazard_columns(fema))
+    counties = score_residential_hazards(with_hazard_columns(counties))
+    hazard_cols = [pl.col(column) for column in HAZARD_SNAPSHOT_COLUMNS]
     stripped_state = pl.col("state").str.strip_chars()
     county_state = (
         pl.when(stripped_state != "")
@@ -565,19 +570,17 @@ def compute_scores(
             pl.lit("county").alias("place_type"),
             pl.lit(0, dtype=pl.Int64).alias("population_2020"),
             pl.lit(0, dtype=pl.Int64).alias("housing_units_2020"),
-            pl.when(county_complete)
-            .then(pl.col("alr_npctl"))
-            .otherwise(pl.lit(None, dtype=pl.Float64))
-            .alias("risk_score"),
-            pl.when(county_complete)
-            .then(pl.lit("complete"))
-            .otherwise(pl.lit("missing_fema"))
-            .alias("coverage_status"),
-            pl.when(county_complete)
-            .then(pl.lit(1.0))
-            .otherwise(pl.lit(0.0))
-            .alias("coverage_ratio"),
-            pl.lit(0, dtype=pl.Int64).alias("total_weighted_housing"),
+            "res_hazard_npctl",
+            "res_hazard_spread",
+            "res_hazard_spectral",
+            "res_hazard_tail",
+            "res_hazard_power4",
+            "property_loss_npctl",
+            "res_hazard_data_quality",
+            "res_hazard_available_count",
+            "res_hazard_coverage_ratio",
+            "alr_npctl",
+            "alr_valb",
             pl.lit(fema_vintage).alias("fema_vintage"),
             pl.lit("n/a").alias("census_vintage"),
             pl.col("county_fips"),
@@ -600,7 +603,6 @@ def compute_scores(
         pl.col("name").alias("matched_county_name"),
         "community_conditions_group",
     )
-    complete = pl.col("alr_npctl").is_not_null()
     tract_state = (
         pl.col("tract_id").str.slice(0, 2).replace_strict(STATE_BY_FIPS, default=UNKNOWN_STATE)
     )
@@ -614,16 +616,17 @@ def compute_scores(
             pl.lit("tract").alias("place_type"),
             pl.lit(0, dtype=pl.Int64).alias("population_2020"),
             pl.lit(0, dtype=pl.Int64).alias("housing_units_2020"),
-            pl.when(complete)
-            .then(pl.col("alr_npctl"))
-            .otherwise(pl.lit(None, dtype=pl.Float64))
-            .alias("risk_score"),
-            pl.when(complete)
-            .then(pl.lit("complete"))
-            .otherwise(pl.lit("missing_fema"))
-            .alias("coverage_status"),
-            pl.when(complete).then(pl.lit(1.0)).otherwise(pl.lit(0.0)).alias("coverage_ratio"),
-            pl.lit(0, dtype=pl.Int64).alias("total_weighted_housing"),
+            "res_hazard_npctl",
+            "res_hazard_spread",
+            "res_hazard_spectral",
+            "res_hazard_tail",
+            "res_hazard_power4",
+            "property_loss_npctl",
+            "res_hazard_data_quality",
+            "res_hazard_available_count",
+            "res_hazard_coverage_ratio",
+            "alr_npctl",
+            "alr_valb",
             pl.lit(fema_vintage).alias("fema_vintage"),
             pl.lit("n/a").alias("census_vintage"),
             pl.when(pl.col("matched_county_name").is_null())
@@ -641,18 +644,7 @@ def compute_scores(
         )
         .sort("place_id")
     )
-    contributions = fema.select(
-        pl.col("tract_id").alias("place_id"),
-        pl.col("tract_id"),
-        pl.lit(0, dtype=pl.Int64).alias("housing_units"),
-        pl.lit(1.0).alias("housing_weight"),
-        pl.col("alr_npctl"),
-        pl.when(complete)
-        .then(pl.col("alr_npctl"))
-        .otherwise(pl.lit(None, dtype=pl.Float64))
-        .alias("weighted_contribution"),
-    ).sort(["place_id", "tract_id"])
-    return scored, contributions, county_scored
+    return scored, county_scored
 
 
 def _write_duckdb(
@@ -669,7 +661,6 @@ def _write_duckdb(
         connection.execute("CREATE INDEX places_id_idx ON places(place_id)")
         connection.execute("CREATE INDEX places_state_idx ON places(state)")
         connection.execute("CREATE INDEX places_county_idx ON places(county_fips)")
-        connection.execute("CREATE INDEX contribution_place_idx ON tract_contributions(place_id)")
         connection.execute("CREATE INDEX counties_id_idx ON counties(place_id)")
         connection.execute("CREATE INDEX counties_state_idx ON counties(state)")
         connection.execute("CREATE INDEX chrr_county_id_idx ON chrr_county(county_fips)")
@@ -706,6 +697,90 @@ def _snapshot_signature(target: Path) -> tuple[tuple[int, int, int, int, int], .
     )
 
 
+def _hazard_values_are_valid(frame: pl.DataFrame) -> bool:
+    percentile_columns = [hazard.percentile_column for hazard in HAZARDS]
+    bounded_columns = [
+        "res_hazard_npctl",
+        "res_hazard_spread",
+        "res_hazard_spectral",
+        "res_hazard_tail",
+        "res_hazard_power4",
+        "property_loss_npctl",
+        "alr_npctl",
+        *percentile_columns,
+    ]
+    nonnegative_columns = ["alr_valb", *HAZARD_RAW_COLUMNS]
+    available_count = pl.sum_horizontal(
+        [pl.col(column).is_not_null().cast(pl.Int8) for column in percentile_columns]
+    )
+    expected_quality = (
+        pl.when(available_count == len(HAZARDS))
+        .then(pl.lit("complete"))
+        .when(available_count > 0)
+        .then(pl.lit("partial"))
+        .otherwise(pl.lit("unavailable"))
+    )
+    invalid_bounded = pl.any_horizontal(
+        [
+            pl.col(column).is_not_null()
+            & (
+                ~pl.col(column).is_finite()
+                | ~pl.col(column).is_between(0, 100, closed="both")
+            )
+            for column in bounded_columns
+        ]
+    )
+    invalid_nonnegative = pl.any_horizontal(
+        [
+            pl.col(column).is_not_null()
+            & (~pl.col(column).is_finite() | (pl.col(column) < 0))
+            for column in nonnegative_columns
+        ]
+    )
+    invalid_aggregate_nulls = pl.any_horizontal(
+        [
+            pl.col(column).is_null() != (available_count == 0)
+            for column in (
+                "res_hazard_npctl",
+                "res_hazard_spread",
+                "res_hazard_spectral",
+                "res_hazard_tail",
+                "res_hazard_power4",
+            )
+        ]
+    )
+    invalid_zero_percentile = pl.any_horizontal(
+        [
+            (pl.col(hazard.raw_column) == 0) & (pl.col(hazard.percentile_column) != 0)
+            for hazard in HAZARDS
+        ]
+    )
+    invalid_rows = frame.filter(
+        pl.col("res_hazard_available_count").is_null()
+        | pl.col("res_hazard_coverage_ratio").is_null()
+        | (pl.col("res_hazard_available_count") != available_count)
+        | (
+            (
+                pl.col("res_hazard_coverage_ratio")
+                - available_count.cast(pl.Float64) / len(HAZARDS)
+            ).abs()
+            > 1e-12
+        )
+        | (pl.col("res_hazard_data_quality") != expected_quality)
+        | invalid_bounded
+        | invalid_nonnegative
+        | invalid_aggregate_nulls
+        | invalid_zero_percentile
+    )
+    return (
+        invalid_rows.is_empty()
+        and all(
+            set(frame[column].drop_nulls().unique()).issubset(KNOWN_EAL_RATINGS)
+            for column in HAZARD_RATING_COLUMNS
+        )
+    )
+
+
 def _validate_snapshot_artifacts(target: Path) -> bool:
     try:
         metadata = json.loads((target / "build.json").read_text())
@@ -729,8 +804,27 @@ def _validate_snapshot_artifacts(target: Path) -> bool:
             or "mountain_magnitude_version" not in frame.columns
             or "mountain_score" in frame.columns
             or "mountain_score_version" in frame.columns
+            or "risk_score" in frame.columns
+            or "coverage_status" in frame.columns
+            or "coverage_ratio" in frame.columns
+            or not set(HAZARD_SNAPSHOT_COLUMNS).issubset(frame.columns)
+            or not {
+                "res_hazard_npctl",
+                "res_hazard_spread",
+                "res_hazard_spectral",
+                "res_hazard_tail",
+                "res_hazard_power4",
+                "property_loss_npctl",
+                "res_hazard_data_quality",
+                "res_hazard_available_count",
+                "res_hazard_coverage_ratio",
+                "alr_npctl",
+                "alr_valb",
+            }.issubset(frame.columns)
             or not set(SUMMARY_DIMENSION_COLUMNS).issubset(frame.columns)
         ):
+            return False
+        if not _hazard_values_are_valid(frame):
             return False
         if (
             not set(frame["cost_of_living_coverage_status"].unique()).issubset(
@@ -748,7 +842,7 @@ def _validate_snapshot_artifacts(target: Path) -> bool:
             MapScoreColumns.model_validate(
                 frame.select(
                     "place_id",
-                    "risk_score",
+                    "res_hazard_npctl",
                     "community_conditions_group",
                     "mountain_magnitude",
                     "cost_of_living_index",
@@ -812,12 +906,12 @@ def _validate_snapshot_artifacts(target: Path) -> bool:
             return False
     if (
         metadata.get("ranked_place_count")
-        != places.filter(pl.col("coverage_status") == "complete").height
+        != places.filter(pl.col("res_hazard_npctl").is_not_null()).height
     ):
         return False
     if (
         metadata.get("ranked_county_count")
-        != counties.filter(pl.col("coverage_status") == "complete").height
+        != counties.filter(pl.col("res_hazard_npctl").is_not_null()).height
     ):
         return False
     checksums = metadata.get("logical_checksums", {})
@@ -1008,7 +1102,7 @@ def build_snapshot(
         return target
     if progress:
         progress(25, "Ranking FEMA geographies")
-    scored, contributions, county_scored = compute_scores(
+    scored, county_scored = compute_scores(
         fema,
         counties,
         chrr_counties,
@@ -1036,26 +1130,16 @@ def build_snapshot(
     optional["warnings"].extend(enrichment_warnings)
     if state:
         scored = scored.filter(pl.col("state") == state)
-        contributions = contributions.join(scored.select("place_id"), on="place_id", how="semi")
         county_scored = county_scored.filter(pl.col("state") == state)
         chrr_counties = chrr_counties.filter(pl.col("state") == state)
         if scored.height == 0:
             raise HouseHunterError(f"Unknown state abbreviation: {state}")
     _cancelled(cancelled)
-    complete = scored.filter(pl.col("coverage_status") == "complete")
-    if complete.filter(pl.col("coverage_ratio") != 1.0).height:
-        raise HouseHunterError(
-            "Internal validation failed: ranked tracts do not have full coverage"
-        )
-    county_complete = county_scored.filter(pl.col("coverage_status") == "complete")
-    if county_complete.filter(pl.col("coverage_ratio") != 1.0).height:
-        raise HouseHunterError(
-            "Internal validation failed: ranked counties do not have full coverage"
-        )
+    complete = scored.filter(pl.col("res_hazard_npctl").is_not_null())
+    county_complete = county_scored.filter(pl.col("res_hazard_npctl").is_not_null())
     source_tables = optional["source_tables"]
     snapshot_frames = {
         "places": scored,
-        "tract_contributions": contributions,
         "counties": county_scored,
         "chrr_county": chrr_counties,
         **source_tables,

@@ -8,7 +8,7 @@ import pytest
 import yaml
 
 from househunter.config import RuntimePaths
-from househunter.hazards import with_hazard_columns
+from househunter.hazards import HAZARDS, INSUFFICIENT_DATA, NOT_APPLICABLE, with_hazard_columns
 
 
 @pytest.fixture
@@ -128,6 +128,25 @@ def fixture_environment(
         )
         + "\n"
     )
+    tract_hazards = {
+        column: values
+        for hazard in HAZARDS
+        for column, values in (
+            (hazard.raw_column, [None] * 5),
+            (
+                hazard.rating_column,
+                [NOT_APPLICABLE, NOT_APPLICABLE, NOT_APPLICABLE, NOT_APPLICABLE, INSUFFICIENT_DATA],
+            ),
+        )
+    }
+    tract_hazards["alrb_wfir"] = [0.0, 10.0, 20.0, 5.0, None]
+    tract_hazards["ealr_wfir"] = [
+        "No Expected Annual Losses",
+        "Relatively Low",
+        "Relatively High",
+        "Very Low",
+        INSUFFICIENT_DATA,
+    ]
     fema = with_hazard_columns(
         pl.DataFrame(
             {
@@ -139,13 +158,23 @@ def fixture_environment(
                     "99999999999",
                 ],
                 "alr_npctl": [10.0, 50.0, 80.0, 25.0, 99.0],
+                "alr_valb": [0.0, 5.0, 10.0, 2.0, None],
                 "nri_version": ["December 2025"] * 5,
-                "alr_npctl_wfir": [8.0, 20.0, 30.0, 15.0, None],
-                "alr_npctl_tsun": [None, None, None, None, None],
+                **tract_hazards,
             }
         )
     )
     fema.write_parquet(paths.cache / "fema_nri_tracts.parquet")
+    county_hazards = {
+        column: values
+        for hazard in HAZARDS
+        for column, values in (
+            (hazard.raw_column, [None, None]),
+            (hazard.rating_column, [NOT_APPLICABLE, NOT_APPLICABLE]),
+        )
+    }
+    county_hazards["alrb_wfir"] = [10.0, 0.0]
+    county_hazards["ealr_wfir"] = ["Relatively High", "No Expected Annual Losses"]
     counties = with_hazard_columns(
         pl.DataFrame(
             {
@@ -154,9 +183,9 @@ def fixture_environment(
                 "county_type": ["County", "Borough"],
                 "state": ["AL", "AK"],
                 "alr_npctl": [40.0, 12.0],
+                "alr_valb": [8.0, 0.0],
                 "nri_version": ["December 2025", "December 2025"],
-                "alr_npctl_wfir": [9.0, 4.0],
-                "alr_npctl_tsun": [None, 50.0],
+                **county_hazards,
             }
         )
     )

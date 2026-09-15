@@ -1,15 +1,17 @@
 # HouseHunter project notes
 
-HouseHunter is a local-only macOS application that ranks FEMA National Risk Index
-tracts by the published tract-level `ALR_NPCTL`, and separately ranks FEMA
-counties by the published county-level `ALR_NPCTL`. Lower is better.
+HouseHunter is a local-only macOS application that independently ranks FEMA National
+Risk Index tracts and counties by HouseHunter's `RES_HAZARD_NPCTL`. The metric derives
+same-grain national percentiles from 17 building-specific `*_ALRB` fields and combines
+spectral, worst-quartile-tail, and fourth-order power aggregations. Higher is worse.
 
-A HouseHunter tract score is FEMA's published tract percentile. A county score is
-FEMA's published county percentile, ranked among counties — not the mean of tract
-scores. Detail and export surfaces also pass through FEMA's 18 published
-`{CODE}_ALR_NPCTL` values at that grain; they are not a HouseHunter blend and do
-not change list ranking. Neither score is a property-level assessment, a loss
-probability, an insurance quote, or a prediction.
+Never rank counties against tracts or average tract scores into counties. Preserve the
+three source states: valid rates rank nationally, not-applicable hazards contribute
+zero, and missing/invalid hazards remain null and lower the explicit data-quality count.
+FEMA `ALR_NPCTL` and `ALR_VALB` remain supporting detail/export provenance only;
+`PROPERTY_LOSS_NPCTL` is derived from `ALR_VALB` but never blended into the primary
+metric. No score is a property-level assessment, loss probability, insurance quote,
+or prediction.
 
 CHR&R Community Conditions is a separate county-level thematic metric. Preserve the
 official 2025 integer group (1 healthiest, 10 least healthy, or null), join only on
@@ -52,15 +54,17 @@ and local Pad state out of this public repository.
   change the UI.
 - Never commit credentials, fetched FEMA/BEA payloads, Realtor.com source rows, or
   derived home-market snapshots. Real home-market data is loopback/local-export only.
-- FEMA ranking semantics use FEMA only; Community Conditions sorting uses only the
-  official CHR&R group. Mountain Magnitude filtering does not alter either metric. Do not
+- Residential Hazard Exposure uses only FEMA building-loss inputs; Community Conditions
+  sorting uses only the official CHR&R group. Mountain Magnitude filtering does not alter
+  either metric. Do not
   contact census.gov from the normal prepare, download, or build flow. Normal download
   also never contacts Realtor.com. FEMA tract/county and CHR&R county layers are
   required; BEA RPP and the local home-market import are optional and fail open with
   explicit statuses.
-- Runtime snapshots are schema 10, map-score payloads are schema 4, and public HTTP
-  routes are `/api/v2` only. Public artifacts, filters, and types use
-  `mountain_magnitude`; do not add score aliases or cap stored magnitudes.
+- Runtime snapshots are schema 11, map-score payloads are schema 5, and public HTTP
+  routes are `/api/v3` only. `/api/v1` and `/api/v2` remain unsupported. Public
+  artifacts use `res_hazard_npctl` and `mountain_magnitude`; do not add legacy score
+  aliases or cap stored magnitudes.
 - Keep the compatible full map-score endpoint. The browser uses the build-bound core
   plus lazy Cost and Home/ACS add-ons to preserve the initial payload envelope. Never
   weaken the 5.7 MB decoded, 1.3 MB gzip, or existing interaction thresholds.

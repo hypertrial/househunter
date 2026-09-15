@@ -42,6 +42,35 @@ def test_mountain_rank_uses_high_scores_for_best_and_low_scores_for_worst(
     assert directions == ["desc", "asc"]
 
 
+def test_residential_hazard_filters_use_documented_cli_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    class FakeStore:
+        def __init__(self, paths: RuntimePaths) -> None:
+            pass
+
+        def __enter__(self) -> FakeStore:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            pass
+
+        def list_places(self, **kwargs: object) -> dict[str, object]:
+            calls.append(kwargs)
+            return {"items": []}
+
+    monkeypatch.setattr(cli_module, "Store", FakeStore)
+    result = CliRunner().invoke(
+        app, ["rank", "--res-hazard-min", "10", "--res-hazard-max", "90"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls[0]["min_res_hazard"] == 10
+    assert calls[0]["max_res_hazard"] == 90
+
+
 @pytest.mark.parametrize(
     ("metric", "expected_sort", "best_direction", "worst_direction"),
     [
@@ -183,12 +212,12 @@ def test_cli_build_rank_inspect_export_and_sources(
     ranked = runner.invoke(app, ["rank", "--state", "AL", "--limit", "2"])
     assert ranked.exit_code == 0
     assert "01001000100" in ranked.output
-    assert "10.0" in ranked.output
+    assert "0.0" in ranked.output
 
     counties = runner.invoke(app, ["rank", "--level", "county", "--state", "AL"])
     assert counties.exit_code == 0
     assert "01001" in counties.output
-    assert "40.0" in counties.output
+    assert "100.0" in counties.output
 
     community = runner.invoke(
         app,
@@ -240,8 +269,8 @@ def test_cli_build_rank_inspect_export_and_sources(
     tract_hazards = {
         item["code"]: item["percentile"] for item in tract_detail["hazard_percentiles"]
     }
-    assert tract_hazards["WFIR"] == 8.0
-    assert tract_hazards["TSUN"] is None
+    assert tract_hazards["WFIR"] == 0.0
+    assert tract_hazards["TSUN"] == 0.0
 
     inspected_county = runner.invoke(app, ["inspect", "01001"])
     assert inspected_county.exit_code == 0
@@ -251,15 +280,23 @@ def test_cli_build_rank_inspect_export_and_sources(
     county_hazards = {
         item["code"]: item["percentile"] for item in county_detail["hazard_percentiles"]
     }
-    assert county_hazards["WFIR"] == 9.0
+    assert county_hazards["WFIR"] == 100.0
 
     output = tmp_path / "places.csv"
     exported = runner.invoke(app, ["export", "--format", "csv", "--output", str(output)])
     assert exported.exit_code == 0
     header = output.read_text().splitlines()[0]
     assert header.startswith("place_id,")
-    assert "alr_npctl_wfir" in header
-    assert "alr_npctl_tsun" in header
+    assert "RES_HAZARD_NPCTL" in header
+    assert "RES_HAZARD_SPREAD" in header
+    assert "PROPERTY_LOSS_NPCTL" in header
+    assert "RES_HAZARD_SPECTRAL" in header
+    assert "RES_HAZARD_TAIL" in header
+    assert "RES_HAZARD_POWER4" in header
+    assert "WFIR_ALRB_NPCTL" in header
+    assert "TSUN_ALRB_NPCTL" in header
+    assert "ALR_NPCTL" in header
+    assert "ALR_VALB" in header
     assert "community_conditions_group" in header
     assert "community_conditions_geography" in header
     assert "chrr_release_year" in header

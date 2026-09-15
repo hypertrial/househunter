@@ -29,8 +29,11 @@ from househunter.mountain import MOUNTAIN_RUNTIME_COLUMNS
 
 
 @pytest.mark.parametrize("method", ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
-@pytest.mark.parametrize("path", ["/api/v1", "/api/v1/meta", "/api/v1/jobs/example"])
-def test_api_v1_is_removed_for_every_http_method(
+@pytest.mark.parametrize(
+    "path",
+    ["/api/v1", "/api/v1/meta", "/api/v2", "/api/v2/meta", "/api/v2/jobs/example"],
+)
+def test_old_apis_are_removed_for_every_http_method(
     fixture_environment: tuple[RuntimePaths, object], method: str, path: str
 ) -> None:
     paths, _ = fixture_environment
@@ -39,7 +42,7 @@ def test_api_v1_is_removed_for_every_http_method(
 
     assert response.status_code == 404
     if method != "HEAD":
-        assert response.json()["detail"] == "HouseHunter API v1 has been removed"
+        assert response.json()["detail"] == "Not Found"
 
 
 def test_api_filters_details_exports_and_token(
@@ -49,31 +52,30 @@ def test_api_filters_details_exports_and_token(
     build_snapshot(paths)
     with TestClient(create_app(paths, testing=True)) as client:
         assert "HouseHunter" in client.get("/").text
-        meta_response = client.get("/api/v2/meta")
+        meta_response = client.get("/api/v3/meta")
         assert meta_response.headers["cache-control"] == "no-store"
         assert "frame-ancestors 'none'" in meta_response.headers["content-security-policy"]
         meta = meta_response.json()
-        assert meta["app_version"] == __version__ == "2.0.0"
+        assert meta["app_version"] == __version__ == "3.0.0"
         assert meta["reference_assets_ready"] is True
-        assert meta["methodology"] == (
-            "Separate FEMA tract-level and county-level ALR_NPCTL percentiles"
-        )
+        assert "Residential Hazard Exposure" in meta["methodology"]
         assert [layer["key"] for layer in meta["layers"]] == [
-            "risk",
+            "residential-hazard",
             "community-conditions",
             "mountain",
             "cost-of-living",
             "home-costs",
         ]
-        response = client.get("/api/v2/places", params={"state": "AL"})
+        response = client.get("/api/v3/places", params={"state": "AL"})
         assert response.status_code == 200
         assert [row["place_id"] for row in response.json()["items"]] == [
             "01001000100",
             "01001000200",
             "01001000300",
         ]
-        summary = client.get("/api/v2/places/01001000100").json()["summary"]
-        assert summary["risk_score"] == 10.0
+        summary = client.get("/api/v3/places/01001000100").json()["summary"]
+        assert summary["res_hazard_npctl"] == 0.0
+        assert summary["alr_npctl"] == 10.0
         assert summary["place_type"] == "tract"
         assert set(summary) == {
             "place_id",
@@ -82,8 +84,17 @@ def test_api_filters_details_exports_and_token(
             "place_type",
             "population_2020",
             "housing_units_2020",
-            "risk_score",
-            "coverage_status",
+            "res_hazard_npctl",
+            "res_hazard_spread",
+            "res_hazard_spectral",
+            "res_hazard_tail",
+            "res_hazard_power4",
+            "property_loss_npctl",
+            "res_hazard_data_quality",
+            "res_hazard_available_count",
+            "res_hazard_coverage_ratio",
+            "alr_npctl",
+            "alr_valb",
             "fema_vintage",
             "census_vintage",
             "county_fips",
@@ -102,19 +113,22 @@ def test_api_filters_details_exports_and_token(
         assert summary["housing_stock_release_year"] is None
         assert summary["housing_stock_coverage_status"] == "missing_acs"
         assert (
-            "alr_npctl_wfir"
-            not in client.get("/api/v2/places", params={"state": "AL"}).json()["items"][0]
+            "alrb_npctl_wfir"
+            not in client.get("/api/v3/places", params={"state": "AL"}).json()["items"][0]
         )
-        tract_detail = client.get("/api/v2/places/01001000100").json()
+        tract_detail = client.get("/api/v3/places/01001000100").json()
         hazards = {item["code"]: item for item in tract_detail["hazard_percentiles"]}
-        assert len(tract_detail["hazard_percentiles"]) == 18
+        assert len(tract_detail["hazard_percentiles"]) == 17
         assert hazards["WFIR"]["label"] == "Wildfire"
-        assert hazards["WFIR"]["percentile"] == 8.0
-        assert hazards["TSUN"]["percentile"] is None
+        assert hazards["WFIR"]["percentile"] == 0.0
+        assert hazards["WFIR"]["raw_alrb"] == 0.0
+        assert hazards["WFIR"]["availability"] == "valid"
+        assert hazards["TSUN"]["percentile"] == 0.0
+        assert hazards["TSUN"]["availability"] == "not_applicable"
         assert tract_detail["member_tract_count"] is None
         assert summary["county_fips"] == "01001"
         assert summary["county_name"] == "Autauga"
-        sources = client.get("/api/v2/sources").json()
+        sources = client.get("/api/v3/sources").json()
         assert [source["source"] for source in sources] == [
             "fema",
             "fema_counties",
@@ -124,7 +138,7 @@ def test_api_filters_details_exports_and_token(
             "housing_stock",
         ]
         grouped = client.get(
-            "/api/v2/counties",
+            "/api/v3/counties",
             params={
                 "community_conditions_group": 5,
                 "sort": "community_conditions_group",
@@ -133,49 +147,56 @@ def test_api_filters_details_exports_and_token(
         assert grouped.status_code == 200
         assert [row["place_id"] for row in grouped.json()["items"]] == ["01001"]
         assert (
-            client.get("/api/v2/counties", params={"community_conditions_group": 11}).status_code
+            client.get("/api/v3/counties", params={"community_conditions_group": 11}).status_code
             == 422
         )
-        map_columns = client.get("/api/v2/map/scores", params={"level": "tract"}).json()["columns"]
+        map_columns = client.get("/api/v3/map/scores", params={"level": "tract"}).json()["columns"]
         assert map_columns["community_conditions_group"][0] == 5
         assert map_columns["mountain_magnitude"][0] is None
         assert "mountain_score" not in map_columns
         assert "coverage_status" not in map_columns
         assert "mountain_coverage_status" not in map_columns
         assert (
-            client.get("/api/v2/places", params={"mountain_magnitude_min": 80}).json()["total"] == 0
+            client.get("/api/v3/places", params={"mountain_magnitude_min": 80}).json()["total"] == 0
         )
-        unknown = client.get("/api/v2/places/99999999999")
+        unknown = client.get("/api/v3/places/99999999999")
         assert unknown.status_code == 200
         assert unknown.json()["summary"]["state"] == "??"
         assert unknown.json()["summary"]["county_fips"] == "??"
-        county_rows = client.get("/api/v2/counties", params={"state": "AL"}).json()
+        county_rows = client.get("/api/v3/counties", params={"state": "AL"}).json()
         assert [row["place_id"] for row in county_rows["items"]] == ["01001"]
-        assert county_rows["items"][0]["risk_score"] == 40.0
-        county_detail = client.get("/api/v2/counties/01001").json()
-        assert "ranked among counties" in county_detail["methodology_notice"]
-        assert county_detail["summary"]["risk_score"] == 40.0
+        assert county_rows["items"][0]["res_hazard_npctl"] == 100.0
+        county_detail = client.get("/api/v3/counties/01001").json()
+        assert "ranks counties nationally" in county_detail["methodology_notice"]
+        assert county_detail["summary"]["res_hazard_npctl"] == 100.0
         assert county_detail["summary"]["housing_stock_release_year"] == 2024
         assert county_detail["member_tract_count"] == 3
         assert county_detail["source_notices"]
         county_hazards = {item["code"]: item for item in county_detail["hazard_percentiles"]}
-        assert county_hazards["WFIR"]["percentile"] == 9.0
-        assert county_hazards["TSUN"]["percentile"] is None
-        filtered = client.get("/api/v2/places", params={"county": "01001"}).json()
+        assert county_hazards["WFIR"]["percentile"] == 100.0
+        assert county_hazards["TSUN"]["percentile"] == 0.0
+        filtered = client.get("/api/v3/places", params={"county": "01001"}).json()
         assert [row["place_id"] for row in filtered["items"]] == [
             "01001000100",
             "01001000200",
             "01001000300",
         ]
-        assert client.get("/api/v2/places", params={"county": "0100"}).status_code == 400
-        assert client.get("/api/v2/places", params={"county": ""}).status_code == 200
-        assert client.get("/api/v2/exports/places.parquet").status_code == 200
-        assert client.get("/api/v2/exports/counties.parquet").status_code == 200
-        place_json = client.get("/api/v2/exports/places.json").json()
-        county_json = client.get("/api/v2/exports/counties.json").json()
+        assert client.get("/api/v3/places", params={"county": "0100"}).status_code == 400
+        assert client.get("/api/v3/places", params={"county": ""}).status_code == 200
+        assert client.get("/api/v3/exports/places.parquet").status_code == 200
+        assert client.get("/api/v3/exports/counties.parquet").status_code == 200
+        place_json = client.get("/api/v3/exports/places.json").json()
+        county_json = client.get("/api/v3/exports/counties.json").json()
         assert place_json[0]["place_id"] == "01001000100"
         assert county_json[0]["place_id"] == "01001"
         for row in (place_json[0], county_json[0]):
+            assert "RES_HAZARD_NPCTL" in row
+            assert "PROPERTY_LOSS_NPCTL" in row
+            assert "WFIR_ALRB" in row
+            assert "WFIR_EALR" in row
+            assert "WFIR_ALRB_NPCTL" in row
+            assert "res_hazard_npctl" not in row
+            assert "risk_score" not in row
             assert "community_conditions_group" in row
             assert row["community_conditions_geography"] == "county"
             assert row["chrr_release_year"] == 2025
@@ -183,29 +204,57 @@ def test_api_filters_details_exports_and_token(
             assert "mountain_magnitude_version" in row
             assert "mountain_score" not in row
             assert "mountain_score_version" not in row
-        place_header = client.get("/api/v2/exports/places.csv").text.splitlines()[0]
-        county_header = client.get("/api/v2/exports/counties.csv").text.splitlines()[0]
-        assert "alr_npctl_wfir" in place_header
-        assert "alr_npctl_tsun" in place_header
-        assert "alr_npctl_wfir" in county_header
+        place_header = client.get("/api/v3/exports/places.csv").text.splitlines()[0]
+        county_header = client.get("/api/v3/exports/counties.csv").text.splitlines()[0]
+        assert "RES_HAZARD_NPCTL" in place_header
+        assert "PROPERTY_LOSS_NPCTL" in place_header
+        assert "WFIR_ALRB_NPCTL" in place_header
+        assert "TSUN_ALRB_NPCTL" in place_header
+        assert "WFIR_ALRB_NPCTL" in county_header
+        assert "risk_score" not in place_header
         assert "mountain_magnitude" in place_header
         assert "mountain_score" not in place_header
         assert "mountain_magnitude" in county_header
         assert "mountain_score" not in county_header
-        assert client.post("/api/v2/jobs", json={"kind": "build"}).status_code == 403
+        assert client.post("/api/v3/jobs", json={"kind": "build"}).status_code == 403
         accepted = client.post(
-            "/api/v2/jobs",
+            "/api/v3/jobs",
             headers={"X-HouseHunter-Token": meta["mutation_token"]},
             json={"kind": "build", "state": "AL"},
         )
         assert accepted.status_code == 202
         job_id = accepted.json()["job_id"]
         for _ in range(100):
-            status = client.get(f"/api/v2/jobs/{job_id}").json()
+            status = client.get(f"/api/v3/jobs/{job_id}").json()
             if status["state"] not in {"queued", "running"}:
                 break
             time.sleep(0.01)
         assert status["state"] == "succeeded"
+
+
+def test_failed_parquet_export_removes_temporary_file(
+    fixture_environment: tuple[RuntimePaths, object],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths, _ = fixture_environment
+    build_snapshot(paths)
+    temporary = tmp_path / "failed-export.parquet"
+
+    def temporary_file(*_args: object, **_kwargs: object) -> tuple[int, str]:
+        return os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600), str(temporary)
+
+    def fail_export(*_args: object, **_kwargs: object) -> None:
+        raise HouseHunterError("forced export failure")
+
+    monkeypatch.setattr(api_module.tempfile, "mkstemp", temporary_file)
+    monkeypatch.setattr(api_module.Store, "export", fail_export)
+    with TestClient(create_app(paths, testing=True)) as client:
+        response = client.get("/api/v3/exports/places.parquet")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "forced export failure"
+    assert not temporary.exists()
 
 
 def test_api_refreshes_home_market_staleness_across_immutable_build_reuse(
@@ -247,7 +296,7 @@ def test_api_refreshes_home_market_staleness_across_immutable_build_reuse(
         lambda month: is_stale(month, today=today["value"]),
     )
     with TestClient(create_app(paths, testing=True)) as client:
-        fresh_meta = client.get("/api/v2/meta").json()
+        fresh_meta = client.get("/api/v3/meta").json()
         assert fresh_meta["build"]["build_id"] == immutable_build_id
         fresh_source = next(
             source
@@ -257,7 +306,7 @@ def test_api_refreshes_home_market_staleness_across_immutable_build_reuse(
         assert fresh_source["stale"] is False
         fresh_status = next(
             source
-            for source in client.get("/api/v2/sources").json()
+            for source in client.get("/api/v3/sources").json()
             if source["source"] == "home_market"
         )
         assert fresh_status["stale"] is False
@@ -265,7 +314,7 @@ def test_api_refreshes_home_market_staleness_across_immutable_build_reuse(
         today["value"] = date(2026, 11, 2)
         assert build_snapshot(paths) == first
         assert metadata_path.read_bytes() == immutable_metadata
-        stale_meta = client.get("/api/v2/meta").json()
+        stale_meta = client.get("/api/v3/meta").json()
         assert stale_meta["build"]["build_id"] == immutable_build_id
         stale_source = next(
             source
@@ -274,7 +323,7 @@ def test_api_refreshes_home_market_staleness_across_immutable_build_reuse(
         )
         stale_status = next(
             source
-            for source in client.get("/api/v2/sources").json()
+            for source in client.get("/api/v3/sources").json()
             if source["source"] == "home_market"
         )
         assert stale_source["stale"] is True
@@ -302,7 +351,7 @@ def test_api_rejects_invalid_magnitude_bounds(
     paths, _ = fixture_environment
     build_snapshot(paths)
     with TestClient(create_app(paths, testing=True)) as client:
-        response = client.get(f"/api/v2/{resource}", params=params)
+        response = client.get(f"/api/v3/{resource}", params=params)
 
     assert response.status_code == status_code
 
@@ -317,15 +366,15 @@ def test_api_filters_and_sorts_uncapped_mountain_magnitude(
 
     with TestClient(create_app(paths, testing=True)) as client:
         ranked = client.get(
-            f"/api/v2/{resource}",
+            f"/api/v3/{resource}",
             params={"sort": "mountain_magnitude", "direction": "desc"},
         )
         exact_zero = client.get(
-            f"/api/v2/{resource}",
+            f"/api/v3/{resource}",
             params={"mountain_magnitude_min": 0, "mountain_magnitude_max": 0},
         )
-        uncapped = client.get(f"/api/v2/{resource}", params={"mountain_magnitude_min": 100_000})
-        legacy_sort = client.get(f"/api/v2/{resource}", params={"sort": "mountain_score"})
+        uncapped = client.get(f"/api/v3/{resource}", params={"mountain_magnitude_min": 100_000})
+        legacy_sort = client.get(f"/api/v3/{resource}", params={"sort": "mountain_score"})
 
     assert ranked.status_code == 200
     assert ranked.json()["items"][0]["state"] == "AK"
@@ -349,7 +398,7 @@ def test_api_combines_new_dimension_filters_and_sorts(
 
     with TestClient(create_app(paths, testing=True)) as client:
         combined = client.get(
-            f"/api/v2/{resource}",
+            f"/api/v3/{resource}",
             params={
                 "max_community_conditions_group": 2,
                 "cost_of_living_index_max": 100,
@@ -359,11 +408,11 @@ def test_api_combines_new_dimension_filters_and_sorts(
             },
         )
         home_ranked = client.get(
-            f"/api/v2/{resource}",
+            f"/api/v3/{resource}",
             params={"sort": "home_buying_power_percentile", "direction": "desc"},
         )
         impossible = client.get(
-            f"/api/v2/{resource}",
+            f"/api/v3/{resource}",
             params={
                 "community_conditions_group": 5,
                 "max_community_conditions_group": 2,
@@ -409,7 +458,7 @@ def test_api_rejects_invalid_dimension_bounds(
     paths, _ = fixture_environment
     build_snapshot(paths)
     with TestClient(create_app(paths, testing=True)) as client:
-        response = client.get(f"/api/v2/{resource}", params=params)
+        response = client.get(f"/api/v3/{resource}", params=params)
     assert response.status_code == status_code
 
 
@@ -425,16 +474,16 @@ def test_map_scores_and_assets_are_complete_ordered_and_safe(
     filename = write_assets(asset_root, monkeypatch)
     monkeypatch.setattr("househunter.api.asset_directory", lambda: asset_root)
     with TestClient(create_app(paths, testing=True)) as client:
-        tract = client.get("/api/v2/map/scores", params={"level": "tract"})
+        tract = client.get("/api/v3/map/scores", params={"level": "tract"})
         assert tract.status_code == 200
         assert tract.headers["content-encoding"] == "gzip"
         body = tract.json()
-        assert body["schema_version"] == 4
+        assert body["schema_version"] == 5
         assert body["level"] == "tract"
         assert body["scope"] == {"kind": "national", "state": None}
         assert set(body["columns"]) == {
             "place_id",
-            "risk_score",
+            "res_hazard_npctl",
             "community_conditions_group",
             "mountain_magnitude",
             "cost_of_living_index",
@@ -445,14 +494,14 @@ def test_map_scores_and_assets_are_complete_ordered_and_safe(
         assert body["columns"]["place_id"] == sorted(body["columns"]["place_id"])
         assert len({len(column) for column in body["columns"].values()}) == 1
         assert len(body["columns"]["place_id"]) == 5
-        assert body["columns"]["risk_score"][-1] == 99.0
+        assert body["columns"]["res_hazard_npctl"][-1] is None
         assert tract.headers["cache-control"] == "no-store"
-        core = client.get("/api/v2/map/scores/core", params={"level": "tract"})
+        core = client.get("/api/v3/map/scores/core", params={"level": "tract"})
         assert core.status_code == 200
         core_body = core.json()
         assert set(core_body["columns"]) == {
             "place_id",
-            "risk_score",
+            "res_hazard_npctl",
             "community_conditions_group",
             "mountain_magnitude",
         }
@@ -470,13 +519,13 @@ def test_map_scores_and_assets_are_complete_ordered_and_safe(
         ]
         assert home.json()["columns"]["home_sqft_for_1m"] == body["columns"]["home_sqft_for_1m"]
         assert client.get(
-            "/api/v2/map/scores/addons/home-costs",
+            "/api/v3/map/scores/addons/home-costs",
             params={"level": "tract", "build_id": "stale"},
         ).status_code == 409
-        county = client.get("/api/v2/map/scores", params={"level": "county"}).json()
+        county = client.get("/api/v3/map/scores", params={"level": "county"}).json()
         assert county["columns"]["place_id"] == ["01001", "02001"]
-        assert county["columns"]["risk_score"][0] == 40.0
-        meta = client.get("/api/v2/meta").json()
+        assert county["columns"]["res_hazard_npctl"][0] == 100.0
+        meta = client.get("/api/v3/meta").json()
         assert meta["map_assets"] == {
             "ready": True,
             "error": None,
@@ -514,22 +563,22 @@ def test_map_scores_and_assets_are_complete_ordered_and_safe(
     build_snapshot(paths, state="AL")
     write_assets(asset_root, monkeypatch)
     with TestClient(create_app(paths, testing=True)) as client:
-        scoped = client.get("/api/v2/map/scores", params={"level": "tract"}).json()
+        scoped = client.get("/api/v3/map/scores", params={"level": "tract"}).json()
         assert scoped["scope"] == {"kind": "state", "state": "AL"}
         assert scoped["columns"]["place_id"] == [
             "01001000100",
             "01001000200",
             "01001000300",
         ]
-        scoped_meta = client.get("/api/v2/meta").json()["build"]
+        scoped_meta = client.get("/api/v3/meta").json()["build"]
         chrr_source = next(
             source
-            for source in client.get("/api/v2/sources").json()
+            for source in client.get("/api/v3/sources").json()
             if source["source"] == "chrr"
         )
         assert chrr_source["row_count"] == 3
         assert chrr_source["sha256"] == scoped_meta["input_checksums"]["chrr"]
-        assert client.get("/api/v2/map/scores", params={"level": "invalid"}).status_code == 422
+        assert client.get("/api/v3/map/scores", params={"level": "invalid"}).status_code == 422
 
 
 def test_map_score_addon_serves_the_retained_build_after_pointer_swap(
@@ -538,7 +587,7 @@ def test_map_score_addon_serves_the_retained_build_after_pointer_swap(
     paths, fixture_root = fixture_environment
     first = build_snapshot(paths)
     with TestClient(create_app(paths, testing=True)) as client:
-        core = client.get("/api/v2/map/scores/core", params={"level": "tract"}).json()
+        core = client.get("/api/v3/map/scores/core", params={"level": "tract"}).json()
         old_addon_url = core["add_ons"]["cost_of_living"]
 
         config_path = fixture_root / "sources.yml"
@@ -552,7 +601,7 @@ def test_map_score_addon_serves_the_retained_build_after_pointer_swap(
         assert retained.status_code == 200
         assert retained.json()["build_id"] == first.name
         assert client.get(
-            "/api/v2/map/scores/addons/cost-of-living",
+            "/api/v3/map/scores/addons/cost-of-living",
             params={"level": "tract", "build_id": "../../current.json"},
         ).status_code == 409
 
@@ -562,7 +611,7 @@ def test_map_scores_require_a_current_build(
 ) -> None:
     paths, _ = fixture_environment
     with TestClient(create_app(paths, testing=True)) as client:
-        response = client.get("/api/v2/map/scores")
+        response = client.get("/api/v3/map/scores")
         assert response.status_code == 404
         assert "No published build" in response.json()["detail"]
 
@@ -570,7 +619,7 @@ def test_map_scores_require_a_current_build(
 @pytest.mark.parametrize(
     "overrides",
     [
-        {"risk_score": [10.0]},
+        {"res_hazard_npctl": [10.0]},
         {"place_id": ["01001000200", "01001000100"]},
         {"place_id": ["01001000100", "01001000100"]},
     ],
@@ -580,7 +629,7 @@ def test_map_score_response_model_rejects_misaligned_or_ambiguous_columns(
 ) -> None:
     columns: dict[str, list[object]] = {
         "place_id": ["01001000100", "01001000200"],
-        "risk_score": [10.0, None],
+        "res_hazard_npctl": [10.0, None],
         "community_conditions_group": [5, None],
         "mountain_magnitude": [None, 2.5],
         "cost_of_living_index": [95.0, None],
@@ -596,7 +645,7 @@ def test_map_score_response_model_rejects_misaligned_or_ambiguous_columns(
 @pytest.mark.parametrize(
     ("column", "values"),
     [
-        ("risk_score", [101.0, None]),
+        ("res_hazard_npctl", [101.0, None]),
         ("community_conditions_group", [0, None]),
         ("mountain_magnitude", [-0.1, None]),
         ("cost_of_living_index", [0.0, None]),
@@ -610,7 +659,7 @@ def test_map_score_response_model_rejects_invalid_dimension_values(
 ) -> None:
     columns: dict[str, list[object]] = {
         "place_id": ["01001000100", "01001000200"],
-        "risk_score": [10.0, None],
+        "res_hazard_npctl": [10.0, None],
         "community_conditions_group": [5, None],
         "mountain_magnitude": [None, 2.5],
         "cost_of_living_index": [95.0, None],
@@ -641,12 +690,12 @@ def test_api_rejects_hostile_origin(fixture_environment: tuple[RuntimePaths, obj
     paths, _ = fixture_environment
     with TestClient(create_app(paths, testing=True)) as client:
         response = client.get(
-            "/api/v2/meta",
+            "/api/v3/meta",
             headers={"origin": "https://attacker.example"},
         )
         assert response.status_code == 403
         cross_site = client.get(
-            "/api/v2/map/scores",
+            "/api/v3/map/scores",
             headers={"sec-fetch-site": "cross-site"},
         )
         assert cross_site.status_code == 403
@@ -660,9 +709,9 @@ def test_api_rejects_hostile_origin(fixture_environment: tuple[RuntimePaths, obj
 def test_api_rejects_non_loopback_host(fixture_environment: tuple[RuntimePaths, object]) -> None:
     paths, _ = fixture_environment
     with TestClient(create_app(paths)) as client:
-        response = client.get("/api/v2/meta", headers={"host": "attacker.example"})
+        response = client.get("/api/v3/meta", headers={"host": "attacker.example"})
         assert response.status_code == 400
-        malformed = client.get("/api/v2/meta", headers={"host": "localhost:80@attacker.example"})
+        malformed = client.get("/api/v3/meta", headers={"host": "localhost:80@attacker.example"})
         assert malformed.status_code == 400
 
 
@@ -684,17 +733,17 @@ def test_lookup_maps_an_address_to_tract_detail(
 
     monkeypatch.setattr("househunter.geocode.geocode_tract", fake_geocode)
     with TestClient(create_app(paths, testing=True)) as client:
-        empty = client.post("/api/v2/lookup", json={"address": "   "})
+        empty = client.post("/api/v3/lookup", json={"address": "   "})
         assert empty.status_code == 400
         assert empty.json()["detail"] == "Address is required"
-        response = client.post("/api/v2/lookup", json={"address": "1 Main St, Autauga, AL"})
+        response = client.post("/api/v3/lookup", json={"address": "1 Main St, Autauga, AL"})
         assert response.status_code == 200
         body = response.json()
         assert body["tract_id"] == "01001000100"
         assert body["matched_address"] == "1 MAIN ST, AUTAUGA, AL, 36003"
-        assert body["detail"]["summary"]["risk_score"] == 10.0
-        assert "alr_npctl_wfir" not in body["detail"]["summary"]
-        assert len(body["detail"]["hazard_percentiles"]) == 18
+        assert body["detail"]["summary"]["res_hazard_npctl"] == 0.0
+        assert "alrb_npctl_wfir" not in body["detail"]["summary"]
+        assert len(body["detail"]["hazard_percentiles"]) == 17
 
 
 def test_lookup_reports_a_geoid_missing_from_the_snapshot(
@@ -709,7 +758,7 @@ def test_lookup_reports_a_geoid_missing_from_the_snapshot(
         ),
     )
     with TestClient(create_app(paths, testing=True)) as client:
-        response = client.post("/api/v2/lookup", json={"address": "1 Main St, Boulder, CO"})
+        response = client.post("/api/v3/lookup", json={"address": "1 Main St, Boulder, CO"})
         assert response.status_code == 400
         assert response.json()["detail"] == "Tract not found: 08013012101"
 
@@ -730,7 +779,7 @@ def test_lookup_returns_candidates_when_matches_disagree(
 
     monkeypatch.setattr("househunter.geocode.geocode_tract", fake_geocode)
     with TestClient(create_app(paths, testing=True)) as client:
-        response = client.post("/api/v2/lookup", json={"address": "1 Main St"})
+        response = client.post("/api/v3/lookup", json={"address": "1 Main St"})
         assert response.status_code == 400
         body = response.json()
         assert body["detail"].startswith("Ambiguous place name:")
@@ -780,7 +829,7 @@ def test_lookup_confirms_a_street_fallback_and_rejects_tampering(
     monkeypatch.setattr("househunter.geocode.httpx.Client", FakeClient)
     with TestClient(create_app(paths, testing=True)) as client:
         first = client.post(
-            "/api/v2/lookup",
+            "/api/v3/lookup",
             json={"address": "1720 Lazy Cat Ln, Monument, CO 80132"},
         )
         assert first.status_code == 200
@@ -791,7 +840,7 @@ def test_lookup_confirms_a_street_fallback_and_rejects_tampering(
         assert "lat" not in body["candidates"][0]
         candidate_id = body["candidates"][0]["candidate_id"]
         tampered = client.post(
-            "/api/v2/lookup",
+            "/api/v3/lookup",
             json={
                 "address": "1720 Lazy Cat Ln, Monument, CO 80132",
                 "candidate_id": "forged",
@@ -799,7 +848,7 @@ def test_lookup_confirms_a_street_fallback_and_rejects_tampering(
         )
         assert tampered.status_code == 400
         confirmed = client.post(
-            "/api/v2/lookup",
+            "/api/v3/lookup",
             json={
                 "address": "1720 Lazy Cat Ln, Monument, CO 80132",
                 "candidate_id": candidate_id,
@@ -833,7 +882,7 @@ def test_lookup_does_not_fallback_when_census_is_down(
 
     monkeypatch.setattr("househunter.geocode.httpx.Client", FakeClient)
     with TestClient(create_app(paths, testing=True)) as client:
-        response = client.post("/api/v2/lookup", json={"address": "1 Main St, Autauga, AL"})
+        response = client.post("/api/v3/lookup", json={"address": "1 Main St, Autauga, AL"})
         assert response.status_code == 400
         assert response.json()["detail"] == "Census geocoder request failed"
     assert hosts == ["geocoding.geo.census.gov"]

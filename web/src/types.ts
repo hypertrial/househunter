@@ -1,5 +1,3 @@
-export type CoverageStatus = "complete" | "zero_housing" | "missing_fema" | "unmatched_geography";
-
 export interface PlaceSummary {
   place_id: string;
   name: string;
@@ -7,8 +5,17 @@ export interface PlaceSummary {
   place_type: string;
   population_2020: number;
   housing_units_2020: number;
-  risk_score: number | null;
-  coverage_status: CoverageStatus;
+  res_hazard_npctl: number | null;
+  res_hazard_spread: number | null;
+  res_hazard_spectral: number | null;
+  res_hazard_tail: number | null;
+  res_hazard_power4: number | null;
+  property_loss_npctl: number | null;
+  res_hazard_data_quality: "complete" | "partial" | "unavailable";
+  res_hazard_available_count: number;
+  res_hazard_coverage_ratio: number;
+  alr_npctl: number;
+  alr_valb: number | null;
   fema_vintage: string;
   census_vintage: string;
   county_fips: string;
@@ -72,26 +79,18 @@ export interface PlaceSummary {
   housing_stock_attribution: string;
 }
 
-export interface TractContribution {
-  tract_id: string | null;
-  housing_units: number;
-  housing_weight: number;
-  fema_percentile: number | null;
-  weighted_contribution: number | null;
-}
-
 export interface HazardPercentile {
   code: string;
   label: string;
   percentile: number | null;
+  raw_alrb: number | null;
+  availability: "valid" | "not_applicable" | "missing" | "invalid";
+  fema_eal_rating: string | null;
 }
 
 export interface PlaceDetail {
   summary: PlaceSummary;
-  total_weighted_housing: number;
-  coverage_ratio: number;
   methodology_notice: string;
-  tract_contributions: TractContribution[];
   hazard_percentiles: HazardPercentile[];
   member_tract_count: number | null;
   source_notices: string[];
@@ -134,7 +133,7 @@ export interface JobStatus {
 }
 
 export type Geography = "tract" | "county";
-export type Metric = "fema" | "community-conditions" | "mountain" | "cost-of-living" | "home-costs";
+export type Metric = "residential-hazard" | "community-conditions" | "mountain" | "cost-of-living" | "home-costs";
 export type MapScope = { kind: "national"; state: null } | { kind: "state"; state: string };
 
 export interface MapFilters {
@@ -149,7 +148,7 @@ export interface MapFilters {
 }
 
 export interface LayerDescriptor {
-  key: "risk" | "community-conditions" | "mountain" | "cost-of-living" | "home-costs";
+  key: "residential-hazard" | "community-conditions" | "mountain" | "cost-of-living" | "home-costs";
   display_name: string;
   source: string;
   direction: "lower" | "higher";
@@ -205,7 +204,7 @@ export interface Meta {
 
 export interface MapScore {
   place_id: string;
-  risk_score: number | null;
+  res_hazard_npctl: number | null;
   community_conditions_group: number | null;
   mountain_magnitude: number | null;
   cost_of_living_index: number | null;
@@ -216,7 +215,7 @@ export interface MapScore {
 
 export interface MapScoreColumns {
   place_id: string[];
-  risk_score: Array<number | null>;
+  res_hazard_npctl: Array<number | null>;
   community_conditions_group: Array<number | null>;
   mountain_magnitude: Array<number | null>;
   cost_of_living_index: Array<number | null>;
@@ -228,7 +227,7 @@ export interface MapScoreColumns {
 export type MapScoreAddonKind = "cost-of-living" | "home-costs";
 
 export interface MapScores {
-  schema_version: 4;
+  schema_version: 5;
   build_id: string;
   level: Geography;
   scope: MapScope;
