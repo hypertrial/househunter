@@ -36,7 +36,10 @@ It requires an approved, manually imported Realtor.com county file and never dow
 one automatically. ACS 2024 five-year housing-stock context remains available
 independently: built-2000+, built-2010+, built-2020+, and median year built. These are
 not sale prices, valuations, total ownership costs, or promises that a matching home
-is listed. HouseHunter never combines any of its five dimensions into one score.
+is listed. The map and `househunter rank` never combine the five dimensions into one score.
+The optional `househunter top-counties` command is a named, non-persisted preference
+model over complete national county rows; it is not a map layer, snapshot field, or
+universal livability score.
 
 Residential Hazard Exposure derives national same-grain percentiles from 17 FEMA
 building-specific `*_ALRB` fields, treating not-applicable hazards as zero while
@@ -78,6 +81,9 @@ uv run househunter build
 uv run househunter rank --state CO --metric mountain --mountain-magnitude-min 1.5 --limit 20
 uv run househunter rank --level county --metric cost-of-living --cost-of-living-index-max 100
 uv run househunter rank --level county --metric home-costs --home-sqft-for-1m-min 2500
+uv run househunter top-counties
+uv run househunter top-counties --preset mountain-lifestyle --limit 10
+uv run househunter top-counties --preset affordability --json
 uv run househunter rank --level county --state CO
 uv run househunter rank --level county --metric community-conditions --order best
 uv run househunter inspect 08013012101
@@ -110,6 +116,7 @@ househunter download [--source fema|fema_counties|chrr|bea_rpp|all]
 househunter import-home-market FILE --acknowledge-personal-use
 househunter build [--state CO]
 househunter rank [--state CO] [--county STCOFIPS] [--level tract|county] [--metric residential-hazard|community-conditions|mountain|cost-of-living|home-costs] [--res-hazard-min N] [--res-hazard-max N] [--mountain-magnitude-min N] [--max-community-conditions-group 1..10] [--cost-of-living-index-min N] [--cost-of-living-index-max N] [--home-sqft-for-1m-min N] [--home-sqft-for-1m-max N] [--housing-built-2000-plus-pct-min 0..100] [--housing-built-2000-plus-pct-max 0..100] [--order best|worst] [--limit N] [--include-unranked]
+househunter top-counties [--preset balanced|safety-health|affordability|mountain-lifestyle] [--limit N] [--json]
 househunter inspect TRACT_FIPS|COUNTY_FIPS
 househunter lookup "1670 Broadway, Denver, CO" [--allow-approximate]
 househunter export --format parquet|csv|json [--level tract|county] [--output PATH]
@@ -200,6 +207,24 @@ built 2020+ is `E002 / E001`, built 2010+ is `(E002 + E003) / E001`, and built 2
 is `(E002 + E003 + E004) / E001`. Counties use county estimates, not averages of
 tract percentages. ACS sentinels and zero denominators become null with an explicit
 status; v1 does not invent a combined percentage margin of error.
+
+`househunter top-counties` is an optional CLI preference model, not a sixth stored
+metric. It requires a national snapshot whose five layers are all available: FEMA and
+CHR&R from `househunter download`/`build`, BEA RPP from `househunter download --source bea_rpp`,
+an approved `househunter import-home-market` release, and a promoted Mountain compact
+release. Counties missing any of `res_hazard_npctl`, `community_conditions_group`,
+`mountain_magnitude`, `cost_of_living_index`, or `home_buying_power_percentile` are
+excluded, never imputed. Mountain `partial` scores remain eligible. Higher-is-better
+utilities are `1 - res_hazard_npctl/100`, `(10 - community_conditions_group)/9`, an
+average-tie empirical percentile of Mountain among eligible counties, the inverse
+average-tie percentile of Cost of Living, and `home_buying_power_percentile/100`.
+Weighted TOPSIS closeness is the preference-fit score. Exact ties break by county FIPS.
+Named presets in hazard/community/mountain/cost/home order are `balanced` 20/20/20/20/20
+(default), `safety-health` 40/25/10/10/15, `affordability` 10/10/5/35/40, and
+`mountain-lifestyle` 10/10/50/10/20. The score is a user-selected preference model, not
+a property assessment, loss probability, insurance quote, or universal livability truth.
+State-scoped snapshots and unavailable optional layers fail closed with rebuild/import
+guidance; `househunter rank` continues to fail open.
 
 Read [DATA_SOURCES.md](DATA_SOURCES.md) for source provenance, release maintenance, and
 limitations.

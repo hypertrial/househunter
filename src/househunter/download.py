@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import tempfile
@@ -32,14 +33,23 @@ Cancelled = Callable[[], bool]
 MAX_ARCGIS_JSON_BYTES = 16 * 1024 * 1024
 
 
-def _validate_raw_percentiles(rows: list[dict[str, Any]]) -> None:
+def _validate_raw_percentiles(
+    rows: list[dict[str, Any]], source: dict[str, Any]
+) -> None:
+    required_fields = source.get("fields", {})
     for row in rows:
         for field in ("ALR_NPCTL", "ALR_VALB"):
+            if field in required_fields and field not in row:
+                raise SourceContractError(f"FEMA row is missing {field}")
             value = row.get(field)
             if value is not None and (
                 isinstance(value, bool) or type(value) not in {int, float}
             ):
                 raise SourceContractError(f"FEMA {field} must be a JSON number or null")
+            if field == "ALR_VALB" and value is not None and (
+                not math.isfinite(float(value)) or value < 0
+            ):
+                raise SourceContractError("FEMA ALR_VALB must be finite and nonnegative")
 
 
 def _schema_fingerprint(fields: dict[str, str]) -> str:
@@ -178,7 +188,7 @@ def _invalid_composite_percentile(frame: pl.DataFrame) -> pl.DataFrame:
 def _validate_rows(rows: list[dict[str, Any]], source: dict[str, Any]) -> pl.DataFrame:
     if any(not isinstance(row, dict) for row in rows):
         raise SourceContractError("FEMA returned a malformed data row")
-    _validate_raw_percentiles(rows)
+    _validate_raw_percentiles(rows, source)
     try:
         validate_hazard_source_values(rows, source)
     except (TypeError, ValueError) as exc:
@@ -227,7 +237,7 @@ def _validate_rows(rows: list[dict[str, Any]], source: dict[str, Any]) -> pl.Dat
 def _validate_county_rows(rows: list[dict[str, Any]], source: dict[str, Any]) -> pl.DataFrame:
     if any(not isinstance(row, dict) for row in rows):
         raise SourceContractError("FEMA returned a malformed data row")
-    _validate_raw_percentiles(rows)
+    _validate_raw_percentiles(rows, source)
     try:
         validate_hazard_source_values(rows, source)
     except (TypeError, ValueError) as exc:

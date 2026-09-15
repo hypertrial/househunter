@@ -4,12 +4,14 @@ import json
 from pathlib import Path
 
 import pytest
+from test_build_store import _install_dimension_fixture, _promote_mountain_fixture
 from typer.testing import CliRunner
 
 import househunter.cli as cli_module
 from househunter.cli import app
 from househunter.config import RuntimePaths
 from househunter.errors import HouseHunterError
+from househunter.top_counties import PREFERENCE_NOTICE, PRESETS
 
 
 def test_mountain_rank_uses_high_scores_for_best_and_low_scores_for_worst(
@@ -417,3 +419,150 @@ def test_cli_lookup_requires_opt_in_for_street_matches(
     assert allowed_payload["provider"] == "nominatim"
     assert allowed_payload["precision"] == "street"
     assert allowed_payload["approximate"] is True
+
+
+def _complete_national_snapshot(
+    fixture_environment: tuple[RuntimePaths, Path], monkeypatch: pytest.MonkeyPatch
+) -> tuple[RuntimePaths, Path, CliRunner]:
+    paths, root = fixture_environment
+    _install_dimension_fixture(monkeypatch)
+    _promote_mountain_fixture(paths, root)
+    runner = CliRunner()
+    built = runner.invoke(app, ["build"])
+    assert built.exit_code == 0, built.output
+    return paths, root, runner
+
+
+def test_top_counties_requires_published_snapshot(
+    fixture_environment: tuple[RuntimePaths, Path],
+) -> None:
+    result = CliRunner().invoke(app, ["top-counties"])
+    assert result.exit_code == 1, result.output
+    assert "No published build" in result.output
+
+
+def test_top_counties_requires_available_optional_layers(
+    fixture_environment: tuple[RuntimePaths, Path],
+) -> None:
+    _, _ = fixture_environment
+    runner = CliRunner()
+    built = runner.invoke(app, ["build"])
+    assert built.exit_code == 0, built.output
+    missing = runner.invoke(app, ["top-counties"])
+    assert missing.exit_code == 1, missing.output
+    assert "all five layers available" in missing.output
+    assert "mountain" in missing.output
+    assert "cost-of-living" in missing.output
+    assert "home-costs" in missing.output
+    assert "RANK" not in missing.output
+
+    ranked = runner.invoke(app, ["rank", "--level", "county", "--limit", "2"])
+    assert ranked.exit_code == 0, ranked.output
+    assert "COUNTY_FIPS" in ranked.output
+    assert "preference_fit" not in ranked.output
+    assert "PRESET" not in ranked.output
+
+
+def test_top_counties_rejects_state_scoped_snapshots(
+    fixture_environment: tuple[RuntimePaths, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, root = fixture_environment
+    _install_dimension_fixture(monkeypatch)
+    _promote_mountain_fixture(paths, root)
+    runner = CliRunner()
+    built = runner.invoke(app, ["build", "--state", "AL"])
+    assert built.exit_code == 0, built.output
+    result = runner.invoke(app, ["top-counties"])
+    assert result.exit_code == 1, result.output
+    assert "national snapshot" in result.output
+
+    ranked = runner.invoke(app, ["rank", "--level", "county", "--state", "AL"])
+    assert ranked.exit_code == 0, ranked.output
+    assert "01001" in ranked.output
+    assert "preference_fit" not in ranked.output
+
+
+def test_top_counties_rejects_unknown_preset(
+    fixture_environment: tuple[RuntimePaths, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _complete_national_snapshot(fixture_environment, monkeypatch)
+    result = CliRunner().invoke(app, ["top-counties", "--preset", "livability"])
+    assert result.exit_code == 1, result.output
+    assert "preset" in result.output
+
+
+def test_top_counties_rejects_out_of_range_limit() -> None:
+    runner = CliRunner()
+    too_small = runner.invoke(app, ["top-counties", "--limit", "0"])
+    too_large = runner.invoke(app, ["top-counties", "--limit", "501"])
+    assert too_small.exit_code != 0
+    assert too_large.exit_code != 0
+    assert "RANK" not in too_small.output
+    assert "RANK" not in too_large.output
+
+
+def test_top_counties_ranks_complete_counties_for_each_preset(
+    fixture_environment: tuple[RuntimePaths, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, runner = _complete_national_snapshot(fixture_environment, monkeypatch)
+    default = runner.invoke(app, ["top-counties"])
+    assert default.exit_code == 0, default.output
+    assert "BUILD  " in default.output
+    assert "PRESET  balanced" in default.output
+    assert "ELIGIBLE  2" in default.output
+    assert "LIMIT  10" in default.output
+    assert "PARETO" in default.output
+    assert PREFERENCE_NOTICE in default.output
+    assert "02001" in default.output
+    assert default.output.index("02001") < default.output.index("01001")
+    assert "HAZARD" in default.output
+    assert "HOME%" in default.output
+
+    cased = runner.invoke(app, ["top-counties", "--preset", "BALANCED", "--limit", "1"])
+    assert cased.exit_code == 0, cased.output
+    assert "PRESET  balanced" in cased.output
+    assert "01001" not in cased.output
+
+    for preset in PRESETS:
+        ranked = runner.invoke(app, ["top-counties", "--preset", preset, "--limit", "1"])
+        assert ranked.exit_code == 0, ranked.output
+        assert f"PRESET  {preset}" in ranked.output
+        assert "02001" in ranked.output
+        assert "01001" not in ranked.output
+
+
+def test_top_counties_json_includes_utilities_and_weights(
+    fixture_environment: tuple[RuntimePaths, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, runner = _complete_national_snapshot(fixture_environment, monkeypatch)
+    result = runner.invoke(app, ["top-counties", "--json", "--limit", "2"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["preset"] == "balanced"
+    assert isinstance(payload["build_id"], str) and payload["build_id"]
+    assert payload["weights"] == {
+        "hazard": 0.2,
+        "community": 0.2,
+        "mountain": 0.2,
+        "cost": 0.2,
+        "home": 0.2,
+    }
+    assert payload["eligible_count"] == 2
+    assert payload["notice"] == PREFERENCE_NOTICE
+    assert payload["scope"]["kind"] == "national"
+    assert [item["place_id"] for item in payload["items"]] == ["02001", "01001"]
+    first = payload["items"][0]
+    assert first["rank"] == 1
+    assert first["pareto_optimal"] is True
+    assert first["preference_fit"] > payload["items"][1]["preference_fit"]
+    assert set(first["values"]) == {
+        "res_hazard_npctl",
+        "community_conditions_group",
+        "mountain_magnitude",
+        "cost_of_living_index",
+        "home_buying_power_percentile",
+    }
+    assert "housing_built_2000_plus_pct" not in first["values"]
+    assert "home_sqft_for_1m" not in first["values"]
+    assert set(first["utilities"]) == {"hazard", "community", "mountain", "cost", "home"}
+    assert all(value is not None for value in first["values"].values())

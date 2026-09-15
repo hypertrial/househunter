@@ -425,6 +425,28 @@ class Store:
             search_county_name=True,
         )
 
+    def list_county_candidates(self) -> list[dict[str, Any]]:
+        columns = (
+            "place_id",
+            "name",
+            "state",
+            "res_hazard_npctl",
+            "community_conditions_group",
+            "mountain_magnitude",
+            "cost_of_living_index",
+            "home_buying_power_percentile",
+            "home_sqft_for_1m",
+            "res_hazard_data_quality",
+            "mountain_coverage_status",
+            "cost_of_living_coverage_status",
+            "home_costs_coverage_status",
+        )
+        cursor = self.connection.execute(
+            f"SELECT {', '.join(columns)} FROM counties ORDER BY place_id"
+        )
+        names = [item[0] for item in cursor.description]
+        return [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
+
     def list_counties(
         self,
         *,

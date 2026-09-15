@@ -37,12 +37,24 @@ MSA or U.S. nonmetropolitan geography and inherited through counties by tracts. 
 Costs uses a manually imported, approved county asking-market release; square feet for
 $1M and its national county percentile are higher-is-better and inherited by tracts.
 ACS 2024 housing-stock estimates are direct at tract/county grain. Never blend these
-dimensions, imply tract-level BEA/market precision, substitute ACS home value, or
-describe asking-market indicators as sales, valuations, or total ownership costs.
+dimensions into the map, `househunter rank`, snapshot fields, or HTTP payloads.
+`househunter top-counties` is the only explicit exception: a named, non-persisted
+TOPSIS preference-fit over complete national county rows. Do not imply tract-level
+BEA/market precision, substitute ACS home value, or describe asking-market indicators
+as sales, valuations, or total ownership costs.
 
 Use the `househunter-engineering` workspace from `.pad.toml`. Follow `AGENTS.md`
 and the local `pad-engineering` skill. Keep ticket bodies, exports, credentials,
 and local Pad state out of this public repository.
+
+## Automation policy
+
+HouseHunter has no CI service. Local verification is the source of truth for this
+repository, so the generic Universal Pad wording that assigns verification to CI
+does not apply here. GitHub Actions and Dependabot are intentionally disabled to
+protect the organization's free-tier quota. Do not add `.github/workflows/*`, add
+`.github/dependabot.yml`, or re-enable either service without explicit owner
+approval. Use the local verification commands below.
 
 ## Invariants
 

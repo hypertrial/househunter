@@ -25,6 +25,11 @@ from .geocode import lookup_address
 from .geography import STATE_BY_FIPS
 from .locking import exclusive_lock
 from .store import Store
+from .top_counties import (
+    PREFERENCE_NOTICE,
+    rank_counties,
+    require_complete_national_snapshot,
+)
 
 app = typer.Typer(no_args_is_help=True, pretty_exceptions_show_locals=False)
 mountain_app = typer.Typer(no_args_is_help=True, pretty_exceptions_show_locals=False)
@@ -1033,6 +1038,77 @@ def rank(
                 typer.echo(f"{row['place_id']:<12} {score:>9}  {row['state']:<5}  {row['name']}")
             else:
                 typer.echo(f"{row['place_id']:<12} {score:>9}  {row['state']}")
+    except HouseHunterError as exc:
+        _abort(exc)
+
+
+@app.command("top-counties")
+def top_counties(
+    preset: Annotated[
+        str,
+        typer.Option(
+            "--preset",
+            help="balanced, safety-health, affordability, or mountain-lifestyle",
+        ),
+    ] = "balanced",
+    limit: Annotated[int, typer.Option("--limit", min=1, max=500)] = 10,
+    as_json: Annotated[bool, typer.Option("--json", help="Print JSON")] = False,
+) -> None:
+    """Rank national counties with a named five-dimension preference model."""
+    try:
+        with Store(_paths()) as store:
+            require_complete_national_snapshot(store.metadata)
+            ranking = rank_counties(
+                store.list_county_candidates(),
+                preset=preset,
+                limit=limit,
+            )
+            payload = {
+                "build_id": store.metadata["build_id"],
+                "scope": store.metadata["scope"],
+                "preset": ranking.preset,
+                "weights": ranking.weights,
+                "eligible_count": ranking.eligible_count,
+                "limit": ranking.limit,
+                "notice": PREFERENCE_NOTICE,
+                "items": [
+                    {
+                        "rank": item.rank,
+                        "place_id": item.place_id,
+                        "name": item.name,
+                        "state": item.state,
+                        "preference_fit": item.preference_fit,
+                        "pareto_optimal": item.pareto_optimal,
+                        "values": item.values,
+                        "utilities": item.utilities,
+                    }
+                    for item in ranking.items
+                ],
+            }
+        if as_json:
+            typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+            return
+        typer.echo(
+            f"BUILD  {payload['build_id']}  PRESET  {payload['preset']}  "
+            f"ELIGIBLE  {payload['eligible_count']}  LIMIT  {payload['limit']}"
+        )
+        typer.echo(PREFERENCE_NOTICE)
+        typer.echo(
+            "RANK  FIT     PARETO  COUNTY_FIPS  STATE  HAZARD  GROUP  MAGNITUDE  "
+            "RPP    HOME%  NAME"
+        )
+        for item in ranking.items:
+            values = item.values
+            pareto = "yes" if item.pareto_optimal else "no"
+            typer.echo(
+                f"{item.rank:<4}  {item.preference_fit:0.4f}  {pareto:<6}  "
+                f"{item.place_id:<12} {item.state:<5}  "
+                f"{values['res_hazard_npctl']:6.1f}  "
+                f"{int(values['community_conditions_group']):5d}  "
+                f"M{values['mountain_magnitude']:<8.2f}  "
+                f"{values['cost_of_living_index']:6.1f}  "
+                f"{values['home_buying_power_percentile']:5.1f}  {item.name}"
+            )
     except HouseHunterError as exc:
         _abort(exc)
 

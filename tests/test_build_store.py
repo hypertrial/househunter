@@ -492,9 +492,43 @@ def test_store_combines_dimension_filters_sorts_and_null_rules(
     assert [row["place_id"] for row in best_home] == ["02001", "01001"]
     assert [row["place_id"] for row in lowest_cost] == ["02001", "01001"]
     assert [row["place_id"] for row in combined["items"]] == ["02001"]
-    assert contradictory_groups["total"] == 0
+    assert         contradictory_groups["total"] == 0
     assert explicit_bound["total"] == 4
     assert all(row["home_sqft_for_1m"] is not None for row in explicit_bound["items"])
+
+    with Store(paths) as store:
+        candidates = store.list_county_candidates()
+    assert [row["place_id"] for row in candidates] == ["01001", "02001"]
+    assert all(row["home_buying_power_percentile"] is not None for row in candidates)
+    assert all(row["cost_of_living_index"] is not None for row in candidates)
+    assert all("preference_fit" not in row for row in candidates)
+
+
+def test_list_county_candidates_keep_incomplete_rows_without_preference_score(
+    fixture_environment: tuple[RuntimePaths, Path],
+) -> None:
+    paths, _ = fixture_environment
+    build = build_snapshot(paths)
+    forbidden = {"preference_fit", "pareto_optimal", "topsis"}
+
+    with Store(paths) as store:
+        candidates = store.list_county_candidates()
+        county_scores = store.map_scores("county")
+        tract_scores = store.map_scores("tract")
+
+    assert [row["place_id"] for row in candidates] == ["01001", "02001"]
+    assert all(len(row["place_id"]) == 5 for row in candidates)
+    assert all(not forbidden & set(row) for row in candidates)
+    assert any(row["cost_of_living_index"] is None for row in candidates)
+    assert any(row["home_buying_power_percentile"] is None for row in candidates)
+    assert any(row["mountain_magnitude"] is None for row in candidates)
+    assert "mountain_coverage_status" in candidates[0]
+    assert not forbidden & set(county_scores["columns"])
+    assert not forbidden & set(tract_scores["columns"])
+
+    for artifact in ("places.parquet", "counties.parquet"):
+        columns = set(pl.read_parquet_schema(build / artifact))
+        assert not forbidden & columns
 
 
 @pytest.mark.parametrize(

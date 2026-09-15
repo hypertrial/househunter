@@ -384,6 +384,56 @@ def test_fema_contract_rejects_coercible_percentile_types(
         validator([row], {"expected_row_count": 1, "version": "December 2025"})
 
 
+@pytest.mark.parametrize("validator,id_field,id_value", [
+    (_validate_rows, "TRACTFIPS", "01001000100"),
+    (_validate_county_rows, "STCOFIPS", "01001"),
+])
+@pytest.mark.parametrize("value", [-1.0, float("nan"), float("inf"), float("-inf")])
+def test_fema_contract_rejects_invalid_building_loss_rates(
+    validator, id_field: str, id_value: str, value: float
+) -> None:  # type: ignore[no-untyped-def]
+    row = {
+        id_field: id_value,
+        "COUNTY": "Autauga",
+        "COUNTYTYPE": "County",
+        "STATEABBRV": "AL",
+        "ALR_NPCTL": 5.0,
+        "ALR_VALB": value,
+        "NRI_VER": "December 2025",
+    }
+    source = {
+        "expected_row_count": 1,
+        "version": "December 2025",
+        "fields": {"ALR_VALB": "esriFieldTypeDouble"},
+    }
+    with pytest.raises(SourceContractError, match="ALR_VALB must be finite and nonnegative"):
+        validator([row], source)
+
+
+@pytest.mark.parametrize("validator,id_field,id_value", [
+    (_validate_rows, "TRACTFIPS", "01001000100"),
+    (_validate_county_rows, "STCOFIPS", "01001"),
+])
+def test_fema_contract_requires_configured_building_loss_rate(
+    validator, id_field: str, id_value: str
+) -> None:  # type: ignore[no-untyped-def]
+    row = {
+        id_field: id_value,
+        "COUNTY": "Autauga",
+        "COUNTYTYPE": "County",
+        "STATEABBRV": "AL",
+        "ALR_NPCTL": 5.0,
+        "NRI_VER": "December 2025",
+    }
+    source = {
+        "expected_row_count": 1,
+        "version": "December 2025",
+        "fields": {"ALR_VALB": "esriFieldTypeDouble"},
+    }
+    with pytest.raises(SourceContractError, match="missing ALR_VALB"):
+        validator([row], source)
+
+
 @pytest.mark.parametrize("rating", ["Unexpected Rating", 12, None])
 def test_fema_contract_rejects_unknown_or_wrong_rating(rating: object) -> None:
     row = {

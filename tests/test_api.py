@@ -386,6 +386,22 @@ def test_api_filters_and_sorts_uncapped_mountain_magnitude(
     assert legacy_sort.status_code == 400
 
 
+def test_api_county_list_does_not_expose_preference_fit(
+    fixture_environment: tuple[RuntimePaths, Path],
+) -> None:
+    paths, _ = fixture_environment
+    build_snapshot(paths)
+    with TestClient(create_app(paths, testing=True)) as client:
+        response = client.get("/api/v3/counties")
+        missing = client.get("/api/v3/top-counties")
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert "preference_fit" not in payload
+    assert all("preference_fit" not in item for item in payload["items"])
+    assert missing.status_code == 404
+
+
 @pytest.mark.parametrize("resource", ["places", "counties"])
 def test_api_combines_new_dimension_filters_and_sorts(
     fixture_environment: tuple[RuntimePaths, Path],

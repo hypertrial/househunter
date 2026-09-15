@@ -1128,6 +1128,12 @@ it("keeps an unavailable Home Costs layer selectable and explains the local impo
   expect(legend).toHaveTextContent("Unavailable in this snapshot");
   fireEvent.click(screen.getByRole("button", { name: "Information" }));
   expect(screen.getByRole("region", { name: "About this map" })).toHaveTextContent(
+    "this map never blends dimensions into one score",
+  );
+  expect(screen.getByRole("region", { name: "About this map" })).toHaveTextContent(
+    "househunter top-counties",
+  );
+  expect(screen.getByRole("region", { name: "About this map" })).toHaveTextContent(
     "househunter import-home-market FILE --acknowledge-personal-use",
   );
 });
