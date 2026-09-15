@@ -303,15 +303,7 @@ class Store:
         clauses: list[str] = []
         parameters: list[Any] = []
         if not include_unranked:
-            rank_column = {
-                "res_hazard_npctl": "res_hazard_npctl",
-                "mountain_magnitude": "mountain_magnitude",
-                "cost_of_living_index": "cost_of_living_index",
-                "home_sqft_for_1m": "home_sqft_for_1m",
-                "home_buying_power_percentile": "home_buying_power_percentile",
-                "housing_built_2000_plus_pct": "housing_built_2000_plus_pct",
-            }.get(sort, "res_hazard_npctl")
-            clauses.append(f"{rank_column} IS NOT NULL")
+            clauses.append(f"{sort_columns[sort]} IS NOT NULL")
         if search:
             if search_county_name:
                 clauses.append("(name ILIKE ? OR place_id = ? OR county_name ILIKE ?)")
@@ -426,23 +418,14 @@ class Store:
         )
 
     def list_county_candidates(self) -> list[dict[str, Any]]:
-        columns = (
-            "place_id",
-            "name",
-            "state",
-            "res_hazard_npctl",
-            "community_conditions_group",
-            "mountain_magnitude",
-            "cost_of_living_index",
-            "home_buying_power_percentile",
-            "home_sqft_for_1m",
-            "res_hazard_data_quality",
-            "mountain_coverage_status",
-            "cost_of_living_coverage_status",
-            "home_costs_coverage_status",
+        available = (
+            isinstance(self.metadata.get("ranking"), dict)
+            and self.metadata["ranking"].get("available")
         )
+        if not available:
+            return []
         cursor = self.connection.execute(
-            f"SELECT {', '.join(columns)} FROM counties ORDER BY place_id"
+            "SELECT * FROM ranking_counties ORDER BY place_id"
         )
         names = [item[0] for item in cursor.description]
         return [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]

@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import hashlib
-import ipaddress
 import json
 import math
 import os
 import re
 import shutil
-import socket
 import stat
 import uuid
 import zipfile
@@ -35,6 +33,8 @@ from .config import canonical_json, sha256_bytes, sha256_file
 from .errors import HouseHunterError
 from .geography import STATE_BY_FIPS
 from .mountain import IN_SCOPE_STATES, RAW_PRECISION, access_metrics, terrain_metrics
+from .secure_fetch import validate_public_dns as shared_validate_public_dns
+from .secure_fetch import validated_https_url
 
 CELL_SIZE_M = 250.0
 TILE_SIZE_M = 100_000.0
@@ -551,46 +551,11 @@ def extract_locked_archive(source: dict[str, Any], archive_path: Path, destinati
 
 
 def _validated_source_url(value: object, allowed_hosts: set[str]) -> str:
-    url = str(value)
-    parsed = urlsplit(url)
-    hostname = (parsed.hostname or "").lower()
-    try:
-        port = parsed.port
-    except ValueError as exc:
-        raise HouseHunterError("Mountain source URL has an invalid port") from exc
-    try:
-        ipaddress.ip_address(hostname)
-    except ValueError:
-        pass
-    else:
-        raise HouseHunterError("Mountain source URL cannot use an IP address")
-    if (
-        parsed.scheme != "https"
-        or not hostname
-        or hostname not in allowed_hosts
-        or hostname == "localhost"
-        or hostname.endswith((".localhost", ".local", ".internal"))
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.query
-        or parsed.fragment
-        or port not in (None, 443)
-    ):
-        raise HouseHunterError("Mountain source URL violates the reviewed HTTPS host policy")
-    return url
+    return validated_https_url(value, allowed_hosts, label="Mountain source")
 
 
 def _validate_public_dns(url: str) -> None:
-    hostname = urlsplit(url).hostname
-    assert hostname is not None
-    try:
-        addresses = {
-            item[4][0] for item in socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)
-        }
-    except OSError as exc:
-        raise HouseHunterError("Mountain source hostname cannot be resolved") from exc
-    if not addresses or any(not ipaddress.ip_address(value).is_global for value in addresses):
-        raise HouseHunterError("Mountain source hostname resolves to a non-public address")
+    shared_validate_public_dns(url, label="Mountain source")
 
 
 def _validate_gis_contract_shape(contract: dict[str, Any], suffix: str) -> None:

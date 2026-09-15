@@ -27,3 +27,7 @@ source rows or derived market values. Real imports and normalized releases stay 
 the user's untracked runtime data root. `scripts/check_private_data_boundary.py`
 inspects the repository, staged index, wheel, and source distribution for forbidden
 source signatures, filenames, headers, and derived market fields.
+
+Ranking v2 public inputs, when generated, live under `ranking_v2/` as compact county
+rows plus calibration/citation metadata. Maintainer generators never copy raw Census,
+FBI, FCC fabric, NIBRS, HRSA, EPA, or NOAA downloads into this directory.

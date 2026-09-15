@@ -17,6 +17,7 @@ from househunter.config import RuntimePaths
 from househunter.cost_of_living import (
     BEA_CACHE_NAME,
     assign_counties,
+    assign_counties_v2,
     download_bea_rpp,
     inherit_county_costs,
     logical_checksum,
@@ -177,6 +178,40 @@ def test_bea_assigns_msas_nonmetro_micros_and_territory_then_inherits_to_tracts(
     )
     inherited = inherit_county_costs(tracts, assigned)
     assert inherited["cost_of_living_index"].to_list() == [91.0, 86.0, 86.0, None, None]
+
+
+def test_bea_assignment_v2_uses_state_rpp_not_00999() -> None:
+    content, source = _archive()
+    rpp = parse_archive(content, source)
+    counties = pl.DataFrame({"county_fips": ["01001", "01003", "10001"]})
+    crosswalk = pl.DataFrame(
+        {
+            "county_fips": ["01001"],
+            "cbsa_id": ["10180"],
+        }
+    )
+    state_rpp = pl.DataFrame(
+        {
+            "state_fips": ["01", "10"],
+            "cost_of_living_geography_id": ["01", "10"],
+            "cost_of_living_geography_name": ["Alabama", "Delaware"],
+            "cost_of_living_index": [88.0, 102.0],
+            "cost_of_living_goods_index": [88.0, 102.0],
+            "cost_of_living_housing_rents_index": [88.0, 102.0],
+            "cost_of_living_utilities_index": [88.0, 102.0],
+            "cost_of_living_other_services_index": [88.0, 102.0],
+            "cost_of_living_release_year": [2024, 2024],
+        }
+    )
+    assigned = assign_counties_v2(counties, crosswalk, rpp, source, state_rpp)
+    assert assigned["cost_of_living_geography_id"].to_list() == ["10180", "01", "10"]
+    assert assigned["cost_of_living_geography_type"].to_list() == [
+        "metropolitan",
+        "state",
+        "state",
+    ]
+    assert assigned["cost_of_living_index"].to_list() == [91.0, 88.0, 102.0]
+    assert "00999" not in assigned["cost_of_living_geography_id"].to_list()
 
 
 def test_bea_assignment_rejects_null_county_fips() -> None:

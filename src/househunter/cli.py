@@ -29,6 +29,7 @@ from .top_counties import (
     PREFERENCE_NOTICE,
     rank_counties,
     require_complete_national_snapshot,
+    require_ranking_sidecar,
 )
 
 app = typer.Typer(no_args_is_help=True, pretty_exceptions_show_locals=False)
@@ -831,13 +832,29 @@ def import_home_market_command(
             help="Confirm that the approved file and derivatives remain for personal local use.",
         ),
     ] = False,
+    history: Annotated[
+        bool,
+        typer.Option(
+            "--history",
+            help="Import one approved historical file and split it into month releases.",
+        ),
+    ] = False,
 ) -> None:
     """Validate and atomically import an approved private home-market release."""
-    from .home_market import import_home_market
+    from .home_market import import_home_market, import_home_market_history
 
     paths = _paths()
     try:
         with exclusive_lock(paths.job_lock):
+            if history:
+                outputs = import_home_market_history(
+                    paths,
+                    source_file,
+                    acknowledge_personal_use=acknowledge_personal_use,
+                    progress=_progress,
+                )
+                typer.echo("\n".join(str(path) for path in outputs))
+                return
             output = import_home_market(
                 paths,
                 source_file,
@@ -1053,27 +1070,105 @@ def top_counties(
     ] = "balanced",
     limit: Annotated[int, typer.Option("--limit", min=1, max=500)] = 10,
     as_json: Annotated[bool, typer.Option("--json", help="Print JSON")] = False,
+    min_population: Annotated[int, typer.Option("--min-population")] = 25_000,
+    min_active_listings: Annotated[int, typer.Option("--min-active-listings")] = 100,
+    min_valid_months: Annotated[int, typer.Option("--min-valid-months")] = 9,
+    states: Annotated[
+        list[str] | None,
+        typer.Option("--state", help="Keep only these states after national scoring"),
+    ] = None,
+    exclude_states: Annotated[
+        list[str] | None,
+        typer.Option("--exclude-state", help="Drop these states after national scoring"),
+    ] = None,
+    exclude_region: Annotated[
+        str | None,
+        typer.Option("--exclude-region", help="Drop a reviewed region after scoring"),
+    ] = None,
+    min_jan_temp_f: Annotated[float | None, typer.Option("--min-jan-temp-f")] = None,
+    max_jan_temp_f: Annotated[float | None, typer.Option("--max-jan-temp-f")] = None,
+    min_jul_temp_f: Annotated[float | None, typer.Option("--min-jul-temp-f")] = None,
+    max_jul_temp_f: Annotated[float | None, typer.Option("--max-jul-temp-f")] = None,
+    max_extreme_heat_days: Annotated[
+        float | None, typer.Option("--max-extreme-heat-days")
+    ] = None,
+    max_extreme_cold_days: Annotated[
+        float | None, typer.Option("--max-extreme-cold-days")
+    ] = None,
+    min_safety: Annotated[float | None, typer.Option("--min-safety")] = None,
+    min_health: Annotated[float | None, typer.Option("--min-health")] = None,
+    min_affordability: Annotated[float | None, typer.Option("--min-affordability")] = None,
+    min_opportunity: Annotated[float | None, typer.Option("--min-opportunity")] = None,
+    min_lifestyle: Annotated[float | None, typer.Option("--min-lifestyle")] = None,
+    min_family: Annotated[float | None, typer.Option("--min-family")] = None,
 ) -> None:
-    """Rank national counties with a named five-dimension preference model."""
+    """Rank national counties with the top-counties-v2 weighted-utility model."""
     try:
+        pillar_gates = {
+            name: value
+            for name, value in {
+                "safety": min_safety,
+                "health": min_health,
+                "affordability": min_affordability,
+                "opportunity": min_opportunity,
+                "lifestyle": min_lifestyle,
+                "family": min_family,
+            }.items()
+            if value is not None
+        }
         with Store(_paths()) as store:
             require_complete_national_snapshot(store.metadata)
+            candidates = store.list_county_candidates()
+            require_ranking_sidecar(store.metadata, candidates)
+            ranking_meta = store.metadata.get("ranking") or {}
             ranking = rank_counties(
-                store.list_county_candidates(),
+                candidates,
                 preset=preset,
                 limit=limit,
+                min_population=min_population,
+                min_active_listings=min_active_listings,
+                min_valid_months=min_valid_months,
+                states=states or (),
+                exclude_states=exclude_states or (),
+                exclude_region=exclude_region,
+                min_jan_temp_f=min_jan_temp_f,
+                max_jan_temp_f=max_jan_temp_f,
+                min_jul_temp_f=min_jul_temp_f,
+                max_jul_temp_f=max_jul_temp_f,
+                max_extreme_heat_days=max_extreme_heat_days,
+                max_extreme_cold_days=max_extreme_cold_days,
+                min_pillars=pillar_gates,
+                vintages=ranking_meta.get("vintages") or {},
+                calibration_id=str(ranking_meta.get("calibration_id") or ""),
             )
+            cohort_warning = None
+            if ranking.eligible_count < 50:
+                cohort_warning = (
+                    f"Only {ranking.eligible_count} counties remain after eligibility gates "
+                    "on the national reference; results are not a silent top ten from a "
+                    "partial cohort."
+                )
             payload = {
                 "build_id": store.metadata["build_id"],
                 "scope": store.metadata["scope"],
+                "methodology_id": ranking.methodology_id,
+                "calibration_id": ranking.calibration_id,
                 "preset": ranking.preset,
                 "weights": ranking.weights,
+                "reference_count": ranking.reference_count,
                 "eligible_count": ranking.eligible_count,
+                "filtered_count": ranking.filtered_count,
                 "limit": ranking.limit,
+                "gates": ranking.gates,
+                "exclusions": ranking.exclusions,
+                "vintages": ranking.vintages,
                 "notice": PREFERENCE_NOTICE,
+                "cohort_warning": cohort_warning,
                 "items": [
                     {
                         "rank": item.rank,
+                        "national_rank": item.national_rank,
+                        "filtered_rank": item.filtered_rank,
                         "place_id": item.place_id,
                         "name": item.name,
                         "state": item.state,
@@ -1081,6 +1176,8 @@ def top_counties(
                         "pareto_optimal": item.pareto_optimal,
                         "values": item.values,
                         "utilities": item.utilities,
+                        "pillars": item.pillars,
+                        "weights": item.weights,
                     }
                     for item in ranking.items
                 ],
@@ -1090,24 +1187,34 @@ def top_counties(
             return
         typer.echo(
             f"BUILD  {payload['build_id']}  PRESET  {payload['preset']}  "
-            f"ELIGIBLE  {payload['eligible_count']}  LIMIT  {payload['limit']}"
+            f"METHODOLOGY  {payload['methodology_id']}  "
+            f"CALIBRATION  {payload['calibration_id']}  "
+            f"REFERENCE  {payload['reference_count']}  "
+            f"ELIGIBLE  {payload['eligible_count']}  "
+            f"FILTERED  {payload['filtered_count']}  LIMIT  {payload['limit']}"
         )
         typer.echo(PREFERENCE_NOTICE)
+        if cohort_warning:
+            typer.echo(cohort_warning)
+        if payload["exclusions"]:
+            reasons = ", ".join(
+                f"{name}={count}" for name, count in sorted(payload["exclusions"].items())
+            )
+            typer.echo(f"EXCLUSIONS  {reasons}")
         typer.echo(
-            "RANK  FIT     PARETO  COUNTY_FIPS  STATE  HAZARD  GROUP  MAGNITUDE  "
-            "RPP    HOME%  NAME"
+            "RANK  NAT  FILT  FIT     PARETO  COUNTY_FIPS  STATE  SAFETY  HEALTH  "
+            "AFFORD  OPPORT  LIFE    FAMILY  NAME"
         )
         for item in ranking.items:
-            values = item.values
+            pillars = item.pillars
             pareto = "yes" if item.pareto_optimal else "no"
             typer.echo(
-                f"{item.rank:<4}  {item.preference_fit:0.4f}  {pareto:<6}  "
+                f"{item.rank:<4}  {item.national_rank:<4}  {item.filtered_rank:<4}  "
+                f"{item.preference_fit:0.4f}  {pareto:<6}  "
                 f"{item.place_id:<12} {item.state:<5}  "
-                f"{values['res_hazard_npctl']:6.1f}  "
-                f"{int(values['community_conditions_group']):5d}  "
-                f"M{values['mountain_magnitude']:<8.2f}  "
-                f"{values['cost_of_living_index']:6.1f}  "
-                f"{values['home_buying_power_percentile']:5.1f}  {item.name}"
+                f"{pillars['safety']:0.3f}   {pillars['health']:0.3f}   "
+                f"{pillars['affordability']:0.3f}   {pillars['opportunity']:0.3f}   "
+                f"{pillars['lifestyle']:0.3f}   {pillars['family']:0.3f}  {item.name}"
             )
     except HouseHunterError as exc:
         _abort(exc)

@@ -12,6 +12,7 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
+from ranking_fixtures import install_ranking_fixture
 from test_build_store import _install_dimension_fixture, _promote_mountain_fixture
 from test_map_assets import write_assets
 
@@ -399,7 +400,58 @@ def test_api_county_list_does_not_expose_preference_fit(
     assert response.status_code == 200
     assert "preference_fit" not in payload
     assert all("preference_fit" not in item for item in payload["items"])
+    assert all("u_safety" not in item for item in payload["items"])
+    assert all("methodology_id" not in item for item in payload["items"])
+    assert "top-counties-v2" not in json.dumps(payload)
     assert missing.status_code == 404
+
+
+def test_ranking_sidecar_does_not_leak_into_map_or_api(
+    fixture_environment: tuple[RuntimePaths, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, root = fixture_environment
+    _install_dimension_fixture(monkeypatch)
+    install_ranking_fixture(monkeypatch, root)
+    build_snapshot(paths)
+    forbidden = {
+        "preference_fit",
+        "pareto_optimal",
+        "topsis",
+        "u_safety",
+        "methodology_id",
+        "cohort_warning",
+    }
+    with TestClient(create_app(paths, testing=True)) as client:
+        counties = client.get("/api/v3/counties")
+        county = client.get("/api/v3/counties/01001")
+        tract_map = client.get("/api/v3/map/scores", params={"level": "tract"})
+        county_map = client.get("/api/v3/map/scores", params={"level": "county"})
+        missing = client.get("/api/v3/top-counties")
+        meta = client.get("/api/v3/meta")
+
+    assert counties.status_code == 200
+    assert county.status_code == 200
+    assert tract_map.status_code == 200
+    assert county_map.status_code == 200
+    assert missing.status_code == 404
+    assert meta.status_code == 200
+    meta_payload = meta.json()
+    assert "ranking" not in (meta_payload.get("build") or {})
+    for payload in (
+        counties.json(),
+        county.json(),
+        tract_map.json(),
+        county_map.json(),
+        meta_payload,
+    ):
+        blob = json.dumps(payload)
+        assert "preference_fit" not in blob
+        assert "top-counties-v2" not in blob
+        assert "u_safety" not in blob
+        assert "pareto_optimal" not in blob
+    assert not forbidden & set(tract_map.json()["columns"])
+    assert not forbidden & set(county_map.json()["columns"])
 
 
 @pytest.mark.parametrize("resource", ["places", "counties"])

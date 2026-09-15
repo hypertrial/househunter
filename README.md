@@ -37,9 +37,11 @@ one automatically. ACS 2024 five-year housing-stock context remains available
 independently: built-2000+, built-2010+, built-2020+, and median year built. These are
 not sale prices, valuations, total ownership costs, or promises that a matching home
 is listed. The map and `househunter rank` never combine the five dimensions into one score.
-The optional `househunter top-counties` command is a named, non-persisted preference
-model over complete national county rows; it is not a map layer, snapshot field, or
-universal livability score.
+The optional `househunter top-counties` command is a named, non-persisted
+`top-counties-v2` weighted-utility preference model. It is not a map layer, snapshot
+field, HTTP resource, or universal livability score. Preset names are unchanged from
+earlier releases, but the score formula and results are not comparable to the former
+TOPSIS model.
 
 Residential Hazard Exposure derives national same-grain percentiles from 17 FEMA
 building-specific `*_ALRB` fields, treating not-applicable hazards as zero while
@@ -77,6 +79,7 @@ uv sync
 uv run househunter sources
 uv run househunter download --source all
 uv run househunter import-home-market RDC_Inventory_Core_Metrics_County.csv --acknowledge-personal-use
+uv run househunter import-home-market history.csv --acknowledge-personal-use --history
 uv run househunter build
 uv run househunter rank --state CO --metric mountain --mountain-magnitude-min 1.5 --limit 20
 uv run househunter rank --level county --metric cost-of-living --cost-of-living-index-max 100
@@ -84,6 +87,7 @@ uv run househunter rank --level county --metric home-costs --home-sqft-for-1m-mi
 uv run househunter top-counties
 uv run househunter top-counties --preset mountain-lifestyle --limit 10
 uv run househunter top-counties --preset affordability --json
+uv run househunter top-counties --exclude-region appalachia --min-population 25000
 uv run househunter rank --level county --state CO
 uv run househunter rank --level county --metric community-conditions --order best
 uv run househunter inspect 08013012101
@@ -113,10 +117,10 @@ addresses.
 ./scripts/dev [--port PORT] [--no-open] [--state CO] [--skip-prepare]
 househunter sources [--json]
 househunter download [--source fema|fema_counties|chrr|bea_rpp|all]
-househunter import-home-market FILE --acknowledge-personal-use
+househunter import-home-market FILE --acknowledge-personal-use [--history]
 househunter build [--state CO]
 househunter rank [--state CO] [--county STCOFIPS] [--level tract|county] [--metric residential-hazard|community-conditions|mountain|cost-of-living|home-costs] [--res-hazard-min N] [--res-hazard-max N] [--mountain-magnitude-min N] [--max-community-conditions-group 1..10] [--cost-of-living-index-min N] [--cost-of-living-index-max N] [--home-sqft-for-1m-min N] [--home-sqft-for-1m-max N] [--housing-built-2000-plus-pct-min 0..100] [--housing-built-2000-plus-pct-max 0..100] [--order best|worst] [--limit N] [--include-unranked]
-househunter top-counties [--preset balanced|safety-health|affordability|mountain-lifestyle] [--limit N] [--json]
+househunter top-counties [--preset balanced|safety-health|affordability|mountain-lifestyle] [--limit N] [--json] [--min-population N] [--min-active-listings N] [--min-valid-months N] [--state ST] [--exclude-state ST] [--exclude-region appalachia]
 househunter inspect TRACT_FIPS|COUNTY_FIPS
 househunter lookup "1670 Broadway, Denver, CO" [--allow-approximate]
 househunter export --format parquet|csv|json [--level tract|county] [--output PATH]
@@ -209,22 +213,38 @@ tract percentages. ACS sentinels and zero denominators become null with an expli
 status; v1 does not invent a combined percentage margin of error.
 
 `househunter top-counties` is an optional CLI preference model, not a sixth stored
-metric. It requires a national snapshot whose five layers are all available: FEMA and
-CHR&R from `househunter download`/`build`, BEA RPP from `househunter download --source bea_rpp`,
-an approved `househunter import-home-market` release, and a promoted Mountain compact
-release. Counties missing any of `res_hazard_npctl`, `community_conditions_group`,
-`mountain_magnitude`, `cost_of_living_index`, or `home_buying_power_percentile` are
-excluded, never imputed. Mountain `partial` scores remain eligible. Higher-is-better
-utilities are `1 - res_hazard_npctl/100`, `(10 - community_conditions_group)/9`, an
-average-tie empirical percentile of Mountain among eligible counties, the inverse
-average-tie percentile of Cost of Living, and `home_buying_power_percentile/100`.
-Weighted TOPSIS closeness is the preference-fit score. Exact ties break by county FIPS.
-Named presets in hazard/community/mountain/cost/home order are `balanced` 20/20/20/20/20
-(default), `safety-health` 40/25/10/10/15, `affordability` 10/10/5/35/40, and
-`mountain-lifestyle` 10/10/50/10/20. The score is a user-selected preference model, not
-a property assessment, loss probability, insurance quote, or universal livability truth.
-State-scoped snapshots and unavailable optional layers fail closed with rebuild/import
-guidance; `househunter rank` continues to fail open.
+metric. Methodology `top-counties-v2` scores the full pinned 50-state/DC national
+reference first, then applies eligibility and user gates. Gates drop rows; they never
+recompute utilities or renormalize weights. Rebuild older snapshots to schema 12
+with `househunter build` before ranking. National rank is assigned on the
+complete-core reference before population, market, state, region, climate, or
+pillar gates.
+
+Public inputs come from the maintainer `ranking_v2` county bundle. Private trailing
+12-month housing metrics come from approved `import-home-market` month or `--history`
+imports. Defaults are population `>= 25,000`, `>= 9` valid months in the trailing 12,
+and median active listings `>= 100`. Crime scores only when reporting-population
+coverage is `>= 90%`. Missing cores exclude the county; null stays null.
+
+Pillar internals are Safety 50/35/15 hazard/crime/water, Health 60/40 healthcare/CHR&R
+context, Affordability 45/35/20 housing/RPP/property tax, Opportunity 60/40
+employment/broadband, Lifestyle 100 Mountain, Family Autonomy 100 homeschool-policy fit.
+The score is exactly `sum(effective_weight * utility)` with weights summing to 1.
+Named presets in safety/health/affordability/opportunity/lifestyle/family order are
+`balanced` 20/15/25/15/15/10 (default), `safety-health` 35/25/15/10/5/10,
+`affordability` 15/10/45/15/5/10, and `mountain-lifestyle` 10/10/15/10/45/10.
+Exact ties break by county FIPS. Pareto flags annotate pillar utilities and are not a
+ranking input. Climate bounds are optional and default off. Homeschool-policy fit is
+not legal advice.
+
+Map Cost of Living remains MSA or U.S. Nonmetropolitan Portion `00999`. Ranking
+assignment uses MSA MARPP or official state all-items RPP labeled `state`. The map,
+`househunter rank`, map-score schema 5, and `/api/v3` never persist or expose the
+blended preference-fit. `/api/v3/top-counties` remains absent.
+
+The score is a user-selected preference model, not a property assessment, loss
+probability, insurance quote, or universal livability truth. Tiny remaining cohorts are
+reported with exclusion counts rather than silently presented as a national top ten.
 
 Read [DATA_SOURCES.md](DATA_SOURCES.md) for source provenance, release maintenance, and
 limitations.
@@ -242,8 +262,9 @@ npm test
 npm run build
 ```
 
-Runtime snapshots use schema 11. Older snapshots are rejected with a rebuild
-instruction. The full `GET /api/v3/map/scores?level=tract|county` contract
+Runtime snapshots use schema 12. Older snapshots are rejected with a rebuild
+instruction. Ranking v2 refuses schema 11 with the same rebuild guidance. The full
+`GET /api/v3/map/scores?level=tract|county` contract
 uses map schema 5 and returns aligned `place_id`, `res_hazard_npctl`,
 `community_conditions_group`, `mountain_magnitude`, `cost_of_living_index`,
 `home_buying_power_percentile`, `home_sqft_for_1m`, and
@@ -262,7 +283,8 @@ interfaces; they are intentionally absent from this compact rendering payload.
 All public HTTP routes are under `/api/v3`; `/api/v1/*` and `/api/v2/*` are intentionally unsupported.
 Place and county lists support symmetric bounds for Mountain Magnitude, Cost of Living,
 square feet for $1M, and built-2000+ share, plus the compatible exact
-`community_conditions_group` and additive `max_community_conditions_group`. Explicit
+`community_conditions_group` and additive `max_community_conditions_group`. Without
+`include_unranked`, lists omit rows whose active sort metric is null. Explicit
 metric bounds exclude null rows even with `include_unranked`; exact and maximum group
 filters both apply when supplied. Bounds reject nonfinite, out-of-domain, and inverted
 ranges. The map uses a visual domain of M0–M5 for tracts and M0–M4 for counties without

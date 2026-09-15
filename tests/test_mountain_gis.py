@@ -538,7 +538,7 @@ def test_source_dns_rejects_private_answers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "househunter.mountain_gis.socket.getaddrinfo",
+        "househunter.secure_fetch.socket.getaddrinfo",
         lambda *args, **kwargs: [(2, 1, 6, "", ("127.0.0.1", 443))],
     )
 

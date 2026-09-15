@@ -496,6 +496,75 @@ def assign_counties(
     return output
 
 
+def assign_counties_v2(
+    counties: pl.DataFrame,
+    county_msa: pl.DataFrame,
+    rpp: pl.DataFrame,
+    source: dict[str, Any],
+    state_rpp: pl.DataFrame,
+) -> pl.DataFrame:
+    """Assign MSA MARPP values or official state all-items RPP labeled `state`."""
+    if "state_fips" not in state_rpp.columns or "cost_of_living_index" not in state_rpp.columns:
+        raise SourceContractError("State RPP table is missing required columns")
+    if state_rpp["state_fips"].n_unique() != state_rpp.height:
+        raise SourceContractError("State RPP table contains duplicate states")
+    if state_rpp.filter(
+        pl.col("state_fips").is_null() | ~pl.col("state_fips").str.contains(r"^\d{2}$")
+    ).height:
+        raise SourceContractError("State RPP table contains invalid state FIPS")
+    if "00999" in set(state_rpp["state_fips"].to_list()):
+        raise SourceContractError("State RPP table must not use the 00999 nonmetro code")
+    metro = assign_counties(counties, county_msa, rpp, source)
+    state_values = state_rpp.rename(
+        {
+            column: f"state_{column}"
+            for column in state_rpp.columns
+            if column != "state_fips"
+        }
+    )
+    assigned = metro.with_columns(pl.col("county_fips").str.slice(0, 2).alias("state_fips")).join(
+        state_values, on="state_fips", how="left", validate="m:1"
+    )
+    nonmetro = pl.col("cost_of_living_geography_type") == "nonmetropolitan"
+    output = assigned.with_columns(
+        pl.when(nonmetro)
+        .then(pl.col("state_cost_of_living_geography_id"))
+        .otherwise(pl.col("cost_of_living_geography_id"))
+        .alias("cost_of_living_geography_id"),
+        pl.when(nonmetro)
+        .then(pl.lit("state"))
+        .otherwise(pl.col("cost_of_living_geography_type"))
+        .alias("cost_of_living_geography_type"),
+        pl.when(nonmetro)
+        .then(pl.col("state_cost_of_living_geography_name"))
+        .otherwise(pl.col("cost_of_living_geography_name"))
+        .alias("cost_of_living_geography_name"),
+        *[
+            pl.when(nonmetro)
+            .then(pl.col(f"state_{column}"))
+            .otherwise(pl.col(column))
+            .alias(column)
+            for column in VALUE_COLUMNS.values()
+        ],
+    )
+    if "state_cost_of_living_release_year" in output.columns:
+        output = output.with_columns(
+            pl.when(nonmetro)
+            .then(pl.col("state_cost_of_living_release_year"))
+            .otherwise(pl.col("cost_of_living_release_year"))
+            .alias("cost_of_living_release_year")
+        )
+    drop = [column for column in output.columns if column.startswith("state_")]
+    output = output.drop(drop).sort("county_fips")
+    labeled_state = output.filter(pl.col("cost_of_living_geography_type") == "state")
+    if labeled_state.filter(
+        pl.col("cost_of_living_geography_id").eq("00999")
+        | pl.col("cost_of_living_index").is_null()
+    ).height:
+        raise SourceContractError("State RPP assignment retained 00999 or left values null")
+    return output
+
+
 def inherit_county_costs(tracts: pl.DataFrame, county_costs: pl.DataFrame) -> pl.DataFrame:
     if "tract_id" not in tracts.columns or tracts["tract_id"].n_unique() != tracts.height:
         raise SourceContractError("Cost-of-living tract input is invalid")

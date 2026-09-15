@@ -56,6 +56,10 @@ DERIVED_MARKET_COLUMNS = frozenset(
         "home_active_listing_count",
         "home_market_month",
         "home_costs_coverage_status",
+        "sqft_for_1m_t12",
+        "median_ppsf",
+        "median_active_listings",
+        "housing_valid_months",
     }
 )
 DENIED_DATA_NAME_TOKENS = (
@@ -65,6 +69,13 @@ DENIED_DATA_NAME_TOKENS = (
     "home-costs",
     "home_costs",
     "realtor",
+    "nibrs_incident",
+    "nibrs_person",
+    "location_fabric",
+    "fcc_location_fabric",
+    "student_record",
+    "cms_identifiable",
+    "tax_identifiable",
 )
 
 
@@ -78,10 +89,24 @@ class LockSignatures:
 def load_lock_signatures(path: Path = RELEASE_LOCK) -> LockSignatures:
     lock = json.loads(path.read_text())
     releases = lock["releases"]
+    history = lock.get("history") if isinstance(lock.get("history"), dict) else {}
     return LockSignatures(
-        raw_sha256=frozenset(str(item["sha256"]) for item in releases),
-        header_sha256=frozenset(str(item["header_sha256"]) for item in releases),
-        filenames=frozenset(str(item["expected_filename"]).lower() for item in releases),
+        raw_sha256=frozenset(
+            [str(item["sha256"]) for item in releases]
+            + ([str(history["sha256"])] if history.get("sha256") else [])
+        ),
+        header_sha256=frozenset(
+            [str(item["header_sha256"]) for item in releases]
+            + ([str(history["header_sha256"])] if history.get("header_sha256") else [])
+        ),
+        filenames=frozenset(
+            [str(item["expected_filename"]).lower() for item in releases]
+            + (
+                [str(history["expected_filename"]).lower()]
+                if history.get("expected_filename")
+                else []
+            )
+        ),
     )
 
 

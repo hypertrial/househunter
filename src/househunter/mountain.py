@@ -1508,6 +1508,24 @@ def publish_release_pointer(
     _publish_pointer(root, release_id, rollback_release_id)
 
 
+def _release_manifest_schema_version(path: Path) -> object:
+    try:
+        return json.loads((path / "manifest.json").read_text()).get("schema_version")
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _require_promotable_current_release(path: Path) -> dict[str, object]:
+    try:
+        return validate_release(path)
+    except HouseHunterError as exc:
+        if _release_manifest_schema_version(path) == 1:
+            raise HouseHunterError(
+                "Current Mountain release is v1; run `househunter mountain rescore-v1`"
+            ) from exc
+        raise
+
+
 def _promote_validated_release(
     paths: RuntimePaths,
     candidate: Path,
@@ -1521,12 +1539,7 @@ def _promote_validated_release(
         raise HouseHunterError("Current Mountain release pointer is invalid")
     if previous is not None:
         previous_path = root / "releases" / previous
-        try:
-            previous_manifest = validate_release(previous_path)
-        except HouseHunterError as exc:
-            raise HouseHunterError(
-                "Current Mountain release is v1; run `househunter mountain rescore-v1`"
-            ) from exc
+        previous_manifest = _require_promotable_current_release(previous_path)
         if previous_manifest.get("release_id") != previous:
             raise HouseHunterError("Current Mountain pointer and release disagree")
     target = stage_validated_release(paths, candidate, manifest, move_candidate=move_candidate)
@@ -1649,12 +1662,7 @@ def write_and_promote_release(
     if (paths.data / "mountain" / "current.json").is_file() and previous is None:
         raise HouseHunterError("Current Mountain release pointer is invalid")
     if previous is not None:
-        try:
-            validate_release(paths.data / "mountain" / "releases" / previous)
-        except HouseHunterError as exc:
-            raise HouseHunterError(
-                "Current Mountain release is v1; run `househunter mountain rescore-v1`"
-            ) from exc
+        _require_promotable_current_release(paths.data / "mountain" / "releases" / previous)
     release_id = str(manifest["release_id"])
     rollback = previous_rollback if previous == release_id else previous
     publish_release_pointer(paths, release_id, rollback_release_id=rollback)

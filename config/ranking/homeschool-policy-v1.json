@@ -1,0 +1,830 @@
+{
+  "jurisdictions": {
+    "AK": {
+      "access_rights": 0.95,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "Alaska Stat. \u00a7 14.30.010"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.92,
+      "notification_burden": 0.97,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.87,
+      "utility": 0.95
+    },
+    "AL": {
+      "access_rights": 0.82,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "Ala. Code \u00a7 16-28-3"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.79,
+      "notification_burden": 0.84,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.74,
+      "utility": 0.82
+    },
+    "AR": {
+      "access_rights": 0.68,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "Ark. Code Ann. \u00a7 6-15-503"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.65,
+      "notification_burden": 0.7,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.6,
+      "utility": 0.68
+    },
+    "AZ": {
+      "access_rights": 0.82,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "Ariz. Rev. Stat. \u00a7 15-802"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.79,
+      "notification_burden": 0.84,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.74,
+      "utility": 0.82
+    },
+    "CA": {
+      "access_rights": 0.82,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "Cal. Educ. Code \u00a7 48222"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.79,
+      "notification_burden": 0.84,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.74,
+      "utility": 0.82
+    },
+    "CO": {
+      "access_rights": 0.68,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "Colo. Rev. Stat. \u00a7 22-33-104.5"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.65,
+      "notification_burden": 0.7,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.6,
+      "utility": 0.68
+    },
+    "CT": {
+      "access_rights": 0.52,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "Conn. Gen. Stat. \u00a7 10-184"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.49,
+      "notification_burden": 0.54,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.44,
+      "utility": 0.52
+    },
+    "DC": {
+      "access_rights": 0.52,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "D.C. Mun. Regs. tit. 5-A, \u00a7 5200"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.49,
+      "notification_burden": 0.54,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.44,
+      "utility": 0.52
+    },
+    "DE": {
+      "access_rights": 0.52,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "Del. Code Ann. tit. 14, \u00a7 2703A"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.49,
+      "notification_burden": 0.54,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.44,
+      "utility": 0.52
+    },
+    "FL": {
+      "access_rights": 0.68,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "Fla. Stat. \u00a7 1002.41"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.65,
+      "notification_burden": 0.7,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.6,
+      "utility": 0.68
+    },
+    "GA": {
+      "access_rights": 0.68,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "Ga. Code Ann. \u00a7 20-2-690"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.65,
+      "notification_burden": 0.7,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.6,
+      "utility": 0.68
+    },
+    "HI": {
+      "access_rights": 0.52,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "Haw. Rev. Stat. \u00a7 302A-1132"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.49,
+      "notification_burden": 0.54,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.44,
+      "utility": 0.52
+    },
+    "IA": {
+      "access_rights": 0.95,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "Iowa Code \u00a7 299A.1"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.92,
+      "notification_burden": 0.97,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.87,
+      "utility": 0.95
+    },
+    "ID": {
+      "access_rights": 0.95,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "Idaho Code \u00a7 33-202"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.92,
+      "notification_burden": 0.97,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.87,
+      "utility": 0.95
+    },
+    "IL": {
+      "access_rights": 0.95,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "105 Ill. Comp. Stat. 5/26-1"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.92,
+      "notification_burden": 0.97,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.87,
+      "utility": 0.95
+    },
+    "IN": {
+      "access_rights": 0.95,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "Ind. Code \u00a7 20-33-2-4"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.92,
+      "notification_burden": 0.97,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.87,
+      "utility": 0.95
+    },
+    "KS": {
+      "access_rights": 0.82,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "Kan. Stat. Ann. \u00a7 72-3120"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.79,
+      "notification_burden": 0.84,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.74,
+      "utility": 0.82
+    },
+    "KY": {
+      "access_rights": 0.82,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "Ky. Rev. Stat. \u00a7 159.030"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.79,
+      "notification_burden": 0.84,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.74,
+      "utility": 0.82
+    },
+    "LA": {
+      "access_rights": 0.52,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "La. Rev. Stat. \u00a7 17:236"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.49,
+      "notification_burden": 0.54,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.44,
+      "utility": 0.52
+    },
+    "MA": {
+      "access_rights": 0.32,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "Mass. Gen. Laws ch. 76, \u00a7 1"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.29,
+      "notification_burden": 0.34,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.24,
+      "utility": 0.32
+    },
+    "MD": {
+      "access_rights": 0.52,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "Md. Code Ann., Educ. \u00a7 7-301"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.49,
+      "notification_burden": 0.54,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.44,
+      "utility": 0.52
+    },
+    "ME": {
+      "access_rights": 0.32,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "Me. Stat. tit. 20-A, \u00a7 5001-A"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.29,
+      "notification_burden": 0.34,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.24,
+      "utility": 0.32
+    },
+    "MI": {
+      "access_rights": 0.95,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "Mich. Comp. Laws \u00a7 380.1561"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.92,
+      "notification_burden": 0.97,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.87,
+      "utility": 0.95
+    },
+    "MN": {
+      "access_rights": 0.52,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "Minn. Stat. \u00a7 120A.22"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.49,
+      "notification_burden": 0.54,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.44,
+      "utility": 0.52
+    },
+    "MO": {
+      "access_rights": 0.95,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "Mo. Rev. Stat. \u00a7 167.031"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.92,
+      "notification_burden": 0.97,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.87,
+      "utility": 0.95
+    },
+    "MS": {
+      "access_rights": 0.82,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "Miss. Code Ann. \u00a7 37-13-91"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.79,
+      "notification_burden": 0.84,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.74,
+      "utility": 0.82
+    },
+    "MT": {
+      "access_rights": 0.68,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "Mont. Code Ann. \u00a7 20-5-102"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.65,
+      "notification_burden": 0.7,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.6,
+      "utility": 0.68
+    },
+    "NC": {
+      "access_rights": 0.52,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "N.C. Gen. Stat. \u00a7 115C-564"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.49,
+      "notification_burden": 0.54,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.44,
+      "utility": 0.52
+    },
+    "ND": {
+      "access_rights": 0.32,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "N.D. Cent. Code \u00a7 15.1-23"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.29,
+      "notification_burden": 0.34,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.24,
+      "utility": 0.32
+    },
+    "NE": {
+      "access_rights": 0.82,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "Neb. Rev. Stat. \u00a7 79-201"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.79,
+      "notification_burden": 0.84,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.74,
+      "utility": 0.82
+    },
+    "NH": {
+      "access_rights": 0.68,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "N.H. Rev. Stat. Ann. \u00a7 193-A"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.65,
+      "notification_burden": 0.7,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.6,
+      "utility": 0.68
+    },
+    "NJ": {
+      "access_rights": 0.95,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "N.J. Stat. Ann. \u00a7 18A:38-25"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.92,
+      "notification_burden": 0.97,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.87,
+      "utility": 0.95
+    },
+    "NM": {
+      "access_rights": 0.82,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "N.M. Stat. Ann. \u00a7 22-1-2.1"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.79,
+      "notification_burden": 0.84,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.74,
+      "utility": 0.82
+    },
+    "NV": {
+      "access_rights": 0.68,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "Nev. Rev. Stat. \u00a7 388D.010"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.65,
+      "notification_burden": 0.7,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.6,
+      "utility": 0.68
+    },
+    "NY": {
+      "access_rights": 0.32,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "N.Y. Educ. Law \u00a7 3204; 8 NYCRR 100.10"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.29,
+      "notification_burden": 0.34,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.24,
+      "utility": 0.32
+    },
+    "OH": {
+      "access_rights": 0.68,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "Ohio Rev. Code \u00a7 3321.04"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.65,
+      "notification_burden": 0.7,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.6,
+      "utility": 0.68
+    },
+    "OK": {
+      "access_rights": 0.95,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "Okla. Stat. tit. 70, \u00a7 10-105"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.92,
+      "notification_burden": 0.97,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.87,
+      "utility": 0.95
+    },
+    "OR": {
+      "access_rights": 0.52,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "Or. Rev. Stat. \u00a7 339.030"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.49,
+      "notification_burden": 0.54,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.44,
+      "utility": 0.52
+    },
+    "PA": {
+      "access_rights": 0.32,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "24 Pa. Cons. Stat. \u00a7 13-1327.1"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.29,
+      "notification_burden": 0.34,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.24,
+      "utility": 0.32
+    },
+    "RI": {
+      "access_rights": 0.32,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "16 R.I. Gen. Laws \u00a7 16-19-2"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.29,
+      "notification_burden": 0.34,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.24,
+      "utility": 0.32
+    },
+    "SC": {
+      "access_rights": 0.52,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "S.C. Code Ann. \u00a7 59-65-40"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.49,
+      "notification_burden": 0.54,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.44,
+      "utility": 0.52
+    },
+    "SD": {
+      "access_rights": 0.68,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "S.D. Codified Laws \u00a7 13-27-3"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.65,
+      "notification_burden": 0.7,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.6,
+      "utility": 0.68
+    },
+    "TN": {
+      "access_rights": 0.52,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "Tenn. Code Ann. \u00a7 49-6-3050"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.49,
+      "notification_burden": 0.54,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.44,
+      "utility": 0.52
+    },
+    "TX": {
+      "access_rights": 0.95,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "Tex. Educ. Code \u00a7 25.086"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.92,
+      "notification_burden": 0.97,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.87,
+      "utility": 0.95
+    },
+    "UT": {
+      "access_rights": 0.68,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "Utah Code \u00a7 53G-6-204"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.65,
+      "notification_burden": 0.7,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.6,
+      "utility": 0.68
+    },
+    "VA": {
+      "access_rights": 0.32,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "Va. Code Ann. \u00a7 22.1-254.1"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.29,
+      "notification_burden": 0.34,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.24,
+      "utility": 0.32
+    },
+    "VT": {
+      "access_rights": 0.32,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "Vt. Stat. Ann. tit. 16, \u00a7 1121"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.29,
+      "notification_burden": 0.34,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.24,
+      "utility": 0.32
+    },
+    "WA": {
+      "access_rights": 0.52,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "Wash. Rev. Code \u00a7 28A.200.010"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.49,
+      "notification_burden": 0.54,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.44,
+      "utility": 0.52
+    },
+    "WI": {
+      "access_rights": 0.82,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "Wis. Stat. \u00a7 118.15"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.79,
+      "notification_burden": 0.84,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.74,
+      "utility": 0.82
+    },
+    "WV": {
+      "access_rights": 0.68,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "W. Va. Code \u00a7 18-8-1"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.65,
+      "notification_burden": 0.7,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.6,
+      "utility": 0.68
+    },
+    "WY": {
+      "access_rights": 0.82,
+      "citations": [
+        {
+          "effective_date": "2024-01-01",
+          "statute": "Wyo. Stat. Ann. \u00a7 21-4-102"
+        }
+      ],
+      "effective_date": "2024-01-01",
+      "instruction_testing_records": 0.79,
+      "notification_burden": 0.84,
+      "review_cadence": "annual",
+      "reviewed_on": "2026-09-15",
+      "tax_benefit_policy": 0.74,
+      "utility": 0.82
+    }
+  },
+  "methodology_id": "homeschool-policy-v1",
+  "notice": "Homeschool-policy fit is a HouseHunter state-policy rubric, not legal advice, not a school-quality score, and not a recommendation to homeschool.",
+  "reviewed_on": "2026-09-15",
+  "schema": 1,
+  "weights": {
+    "access_rights": 0.2,
+    "instruction_testing_records": 0.35,
+    "notification_burden": 0.3,
+    "tax_benefit_policy": 0.15
+  }
+}

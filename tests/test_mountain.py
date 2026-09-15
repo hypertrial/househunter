@@ -2083,6 +2083,61 @@ def test_generated_promotion_retains_current_and_one_rollback(tmp_path) -> None:
     assert releases[1].is_dir() and releases[2].is_dir()
 
 
+def test_promote_preserves_non_v1_current_release_errors(tmp_path) -> None:
+    from househunter.config import RuntimePaths
+
+    paths = RuntimePaths.from_root(tmp_path)
+    blocks = _national_blocks()
+    write_and_promote_release(
+        paths,
+        blocks,
+        data_release="current",
+        sources=_source_provenance(),
+        national_expectations=_national_expectations(blocks),
+    )
+    current_id = json.loads((paths.data / "mountain" / "current.json").read_text())["release_id"]
+    parquet = next((paths.data / "mountain" / "releases" / current_id).glob("*.parquet"))
+    parquet.write_bytes(parquet.read_bytes() + b"\x00")
+
+    with pytest.raises(HouseHunterError, match="Cannot read Mountain") as caught:
+        write_and_promote_release(
+            paths,
+            blocks,
+            data_release="next",
+            sources=_source_provenance(),
+            national_expectations=_national_expectations(blocks),
+        )
+    assert "Current Mountain release is v1" not in str(caught.value)
+
+
+def test_promote_still_instructs_rescore_for_schema_one_current(tmp_path) -> None:
+    from househunter.config import RuntimePaths
+
+    paths = RuntimePaths.from_root(tmp_path)
+    blocks = _national_blocks()
+    write_and_promote_release(
+        paths,
+        blocks,
+        data_release="current",
+        sources=_source_provenance(),
+        national_expectations=_national_expectations(blocks),
+    )
+    current_id = json.loads((paths.data / "mountain" / "current.json").read_text())["release_id"]
+    manifest_path = paths.data / "mountain" / "releases" / current_id / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["schema_version"] = 1
+    manifest_path.write_text(json.dumps(manifest) + "\n")
+
+    with pytest.raises(HouseHunterError, match=r"Current Mountain release is v1"):
+        write_and_promote_release(
+            paths,
+            blocks,
+            data_release="next",
+            sources=_source_provenance(),
+            national_expectations=_national_expectations(blocks),
+        )
+
+
 def test_generated_release_is_rejected_before_exceeding_storage_ceiling(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -147,6 +147,15 @@ def load_release_lock(path: Path | None = None) -> dict[str, Any]:
             raise SourceContractError("Home-market release lock contains duplicate releases")
         seen_months.add(month)
         seen_hashes.add(digest)
+    history = payload.get("history")
+    if history is not None:
+        if not isinstance(history, dict):
+            raise SourceContractError("Home-market history lock is malformed")
+        months = history.get("months")
+        if not isinstance(months, list) or sorted(str(month) for month in months) != sorted(
+            seen_months
+        ):
+            raise SourceContractError("Home-market history months differ from release months")
     return payload
 
 
@@ -804,3 +813,286 @@ def source_status(
             "usage_notice": lock["usage_notice"],
             "error": str(exc),
         }
+
+
+def list_imported_releases(
+    paths: RuntimePaths,
+    *,
+    release_lock_path: Path | None = None,
+) -> list[tuple[str, pl.DataFrame, dict[str, Any]]]:
+    root = _release_root(paths)
+    if not root.exists() and not root.is_symlink():
+        return []
+    _require_real_directory(root, "root")
+    releases = root / RELEASES_NAME
+    if not releases.exists() and not releases.is_symlink():
+        return []
+    _require_real_directory(releases, "releases directory")
+    lock = load_release_lock(release_lock_path)
+    imported: list[tuple[str, pl.DataFrame, dict[str, Any]]] = []
+    seen_months: dict[str, str] = {}
+    for directory in sorted(releases.iterdir()):
+        if directory.name.startswith(".") or not directory.is_dir():
+            continue
+        try:
+            frame, manifest = validate_release_directory(directory, lock)
+        except (HouseHunterError, SourceContractError, OSError, KeyError, TypeError, ValueError):
+            continue
+        month = str(manifest["month"])
+        digest = str(manifest["logical_sha256"])
+        previous = seen_months.get(month)
+        if previous is not None and previous != digest:
+            raise HouseHunterError(f"Duplicate home-market month {month} has conflicting content")
+        if previous is not None:
+            continue
+        seen_months[month] = digest
+        imported.append((month, frame, manifest))
+    imported.sort(key=lambda item: item[0])
+    return imported
+
+
+def _empty_trailing_metrics() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "county_fips": [],
+            "housing_valid_months": [],
+            "median_active_listings": [],
+            "median_ppsf": [],
+            "sqft_for_1m_t12": [],
+        },
+        schema={
+            "county_fips": pl.String,
+            "housing_valid_months": pl.Int64,
+            "median_active_listings": pl.Float64,
+            "median_ppsf": pl.Float64,
+            "sqft_for_1m_t12": pl.Float64,
+        },
+    )
+
+
+def _shift_month(month: str, delta: int) -> str:
+    year, mon = (int(part) for part in month.split("-"))
+    index = year * 12 + (mon - 1) + delta
+    year, mon = divmod(index, 12)
+    return f"{year:04d}-{mon + 1:02d}"
+
+
+def _calendar_window(latest: str, window: int) -> set[str]:
+    return {_shift_month(latest, -offset) for offset in range(window)}
+
+
+def _trailing_releases(
+    paths: RuntimePaths,
+    *,
+    release_lock_path: Path | None = None,
+    window: int = 12,
+    as_of_month: str | None = None,
+) -> tuple[str | None, list[tuple[str, pl.DataFrame, dict[str, Any]]]]:
+    imported = list_imported_releases(paths, release_lock_path=release_lock_path)
+    if not imported:
+        return as_of_month, []
+    months = [month for month, _, _ in imported]
+    latest = as_of_month or months[-1]
+    allowed = _calendar_window(latest, window)
+    selected = [item for item in imported if item[0] in allowed]
+    return latest, selected
+
+
+def trailing_twelve_month_identity(
+    paths: RuntimePaths,
+    *,
+    release_lock_path: Path | None = None,
+    window: int = 12,
+    as_of_month: str | None = None,
+) -> dict[str, Any]:
+    latest, selected = _trailing_releases(
+        paths,
+        release_lock_path=release_lock_path,
+        window=window,
+        as_of_month=as_of_month,
+    )
+    return {
+        "as_of_month": latest,
+        "window": window,
+        "months": [
+            {
+                "month": month,
+                "source_sha256": manifest.get("source_sha256"),
+                "logical_sha256": manifest.get("logical_sha256"),
+            }
+            for month, _, manifest in selected
+        ],
+    }
+
+
+def trailing_twelve_month_metrics(
+    paths: RuntimePaths,
+    *,
+    release_lock_path: Path | None = None,
+    window: int = 12,
+    as_of_month: str | None = None,
+) -> pl.DataFrame:
+    _, selected = _trailing_releases(
+        paths,
+        release_lock_path=release_lock_path,
+        window=window,
+        as_of_month=as_of_month,
+    )
+    if not selected:
+        return _empty_trailing_metrics()
+    rows: list[dict[str, Any]] = []
+    for month, frame, _manifest in selected:
+        eligible = frame.filter(
+            (pl.col("source_quality_flag") == 0)
+            & pl.col("home_median_listing_price_per_square_foot").is_not_null()
+            & pl.col("home_median_listing_price_per_square_foot").is_finite()
+            & (pl.col("home_median_listing_price_per_square_foot") > 0)
+            & pl.col("home_active_listing_count").is_not_null()
+            & pl.col("home_active_listing_count").is_finite()
+            & (pl.col("home_active_listing_count") >= 0)
+        )
+        for record in eligible.select(
+            "county_fips",
+            "home_median_listing_price_per_square_foot",
+            "home_active_listing_count",
+        ).iter_rows(named=True):
+            rows.append(
+                {
+                    "county_fips": record["county_fips"],
+                    "month": month,
+                    "ppsf": float(record["home_median_listing_price_per_square_foot"]),
+                    "listings": float(record["home_active_listing_count"]),
+                }
+            )
+    if not rows:
+        return _empty_trailing_metrics()
+    history = pl.DataFrame(rows)
+    grouped = history.group_by("county_fips").agg(
+        pl.col("month").n_unique().alias("housing_valid_months"),
+        pl.col("listings").median().alias("median_active_listings"),
+        pl.col("ppsf").median().alias("median_ppsf"),
+    )
+    if grouped["county_fips"].n_unique() != grouped.height:
+        raise HouseHunterError("Trailing home-market metrics duplicated a county FIPS")
+    return grouped.with_columns(
+        (1_000_000.0 / pl.col("median_ppsf")).alias("sqft_for_1m_t12")
+    ).sort("county_fips")
+
+
+def import_home_market_history(
+    paths: RuntimePaths,
+    source_file: Path,
+    *,
+    acknowledge_personal_use: bool,
+    release_lock_path: Path | None = None,
+    progress: Progress | None = None,
+    cancelled: Cancelled | None = None,
+) -> list[Path]:
+    if not acknowledge_personal_use:
+        raise HouseHunterError("Home-market import requires --acknowledge-personal-use")
+    lock = load_release_lock(release_lock_path)
+    history = lock.get("history")
+    if not isinstance(history, dict):
+        raise SourceContractError("Home-market release lock has no approved history file")
+    if source_file.is_symlink() or not source_file.is_file():
+        raise SourceContractError("Home-market history path must be a regular file")
+    if source_file.name != history.get("expected_filename"):
+        raise SourceContractError("Home-market history file does not match the approved filename")
+    content = _read_import_file(source_file, {int(history["byte_size"])})
+    if sha256_bytes(content) != history.get("sha256"):
+        raise SourceContractError("Home-market history checksum does not match the lock")
+    if sha256_bytes(_header_with_line_ending(content)) != history.get("header_sha256"):
+        raise SourceContractError("Home-market history header does not match the lock")
+    root = _release_root(paths)
+    previous_pointer = None
+    pointer = root / CURRENT_NAME
+    if pointer.is_file():
+        previous_pointer = pointer.read_bytes()
+    required = lock["required_fields"]
+    schema = {
+        "month_date_yyyymm": pl.Int64,
+        "county_fips": pl.String,
+        "county_name": pl.String,
+        "median_listing_price": pl.Float64,
+        "active_listing_count": pl.Float64,
+        "median_listing_price_per_square_foot": pl.Float64,
+        "median_square_feet": pl.Float64,
+        "total_listing_count": pl.Float64,
+        "quality_flag": pl.Int64,
+    }
+    try:
+        raw = pl.read_csv(
+            io.BytesIO(content),
+            columns=required,
+            schema_overrides=schema,
+            null_values=["", "NA", "N/A"],
+        )
+    except pl.exceptions.PolarsError as exc:
+        raise SourceContractError(f"Cannot parse home-market history: {exc}") from exc
+    expected_months = history.get("months")
+    coded = []
+    for value in raw["month_date_yyyymm"].unique().to_list():
+        parsed = datetime.strptime(str(int(value)), "%Y%m")
+        coded.append(parsed.strftime("%Y-%m"))
+    if sorted(coded) != sorted(str(month) for month in expected_months):
+        raise SourceContractError("Home-market history months differ from the lock")
+    destinations: list[Path] = []
+    releases_root = root / RELEASES_NAME
+    preexisting: set[Path] = set()
+    if releases_root.exists():
+        preexisting = {
+            path.resolve()
+            for path in releases_root.iterdir()
+            if path.is_dir() and not path.name.startswith(".")
+        }
+    try:
+        for release in lock["releases"]:
+            if cancelled and cancelled():
+                raise InterruptedError("Home-market history import cancelled")
+            month_code = release["month_date_yyyymm"]
+            month_rows = raw.filter(pl.col("month_date_yyyymm") == month_code)
+            if month_rows.height == 0:
+                continue
+            buffer = io.BytesIO()
+            month_rows.select(required).write_csv(buffer)
+            reconstructed = buffer.getvalue()
+            frame = normalize(reconstructed, lock, release)
+            if logical_checksum(frame) != release["normalized_logical_sha256"]:
+                raise SourceContractError(
+                    f"Home-market history month {release['month']} checksum differs from the lock"
+                )
+            destinations.append(_write_release(paths, lock, release, frame, cancelled))
+        if cancelled and cancelled():
+            raise InterruptedError("Home-market history import cancelled")
+        if not destinations:
+            raise SourceContractError("Home-market history import wrote no month releases")
+        latest = max(
+            (json.loads((destination / MANIFEST_NAME).read_text()) for destination in destinations),
+            key=lambda item: str(item["month"]),
+        )
+        atomic_write_json(
+            root / CURRENT_NAME,
+            {"schema_version": POINTER_SCHEMA, "release_sha256": latest["source_sha256"]},
+        )
+        (root / CURRENT_NAME).chmod(0o600)
+    except BaseException:
+        for destination in destinations:
+            resolved = destination.resolve()
+            if resolved in preexisting or not destination.exists():
+                continue
+            shutil.rmtree(destination)
+        if previous_pointer is None:
+            pointer.unlink(missing_ok=True)
+        else:
+            temporary = pointer.with_name(f".{pointer.name}.{uuid4().hex}.tmp")
+            handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                os.write(handle, previous_pointer)
+            finally:
+                os.close(handle)
+            os.replace(temporary, pointer)
+            pointer.chmod(0o600)
+        raise
+    if progress:
+        progress(100, "Home-market history imported for personal local use")
+    return destinations

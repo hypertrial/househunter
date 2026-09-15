@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+from ranking_fixtures import install_ranking_fixture
 from test_build_store import _install_dimension_fixture, _promote_mountain_fixture
 from typer.testing import CliRunner
 
@@ -427,6 +428,7 @@ def _complete_national_snapshot(
     paths, root = fixture_environment
     _install_dimension_fixture(monkeypatch)
     _promote_mountain_fixture(paths, root)
+    install_ranking_fixture(monkeypatch, root)
     runner = CliRunner()
     built = runner.invoke(app, ["build"])
     assert built.exit_code == 0, built.output
@@ -450,10 +452,7 @@ def test_top_counties_requires_available_optional_layers(
     assert built.exit_code == 0, built.output
     missing = runner.invoke(app, ["top-counties"])
     assert missing.exit_code == 1, missing.output
-    assert "all five layers available" in missing.output
-    assert "mountain" in missing.output
-    assert "cost-of-living" in missing.output
-    assert "home-costs" in missing.output
+    assert "ranking_v2 sidecar" in missing.output
     assert "RANK" not in missing.output
 
     ranked = runner.invoke(app, ["rank", "--level", "county", "--limit", "2"])
@@ -480,6 +479,27 @@ def test_top_counties_rejects_state_scoped_snapshots(
     assert ranked.exit_code == 0, ranked.output
     assert "01001" in ranked.output
     assert "preference_fit" not in ranked.output
+
+
+def test_top_counties_refuses_schema_11_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeStore:
+        metadata = {"scope": {"kind": "national", "state": None}, "schema_version": 11}
+
+        def __init__(self, paths: RuntimePaths) -> None:
+            pass
+
+        def __enter__(self) -> FakeStore:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            pass
+
+    monkeypatch.setattr(cli_module, "Store", FakeStore)
+    result = CliRunner().invoke(app, ["top-counties"])
+    assert result.exit_code == 1, result.output
+    assert "schema 12" in result.output
+    assert "RANK" not in result.output
+    assert "01001" not in result.output
 
 
 def test_top_counties_rejects_unknown_preset(
@@ -515,13 +535,21 @@ def test_top_counties_ranks_complete_counties_for_each_preset(
     assert PREFERENCE_NOTICE in default.output
     assert "02001" in default.output
     assert default.output.index("02001") < default.output.index("01001")
-    assert "HAZARD" in default.output
-    assert "HOME%" in default.output
+    assert "SAFETY" in default.output
+    assert "FAMILY" in default.output
+    assert "METHODOLOGY  top-counties-v2" in default.output
 
     cased = runner.invoke(app, ["top-counties", "--preset", "BALANCED", "--limit", "1"])
     assert cased.exit_code == 0, cased.output
     assert "PRESET  balanced" in cased.output
     assert "01001" not in cased.output
+
+    excluded = runner.invoke(app, ["top-counties", "--exclude-state", "AK", "--json"])
+    assert excluded.exit_code == 0, excluded.output
+    excluded_payload = json.loads(excluded.output)
+    assert [item["place_id"] for item in excluded_payload["items"]] == ["01001"]
+    assert excluded_payload["items"][0]["national_rank"] == 2
+    assert excluded_payload["exclusions"]["state_exclusion"] == 1
 
     for preset in PRESETS:
         ranked = runner.invoke(app, ["top-counties", "--preset", preset, "--limit", "1"])
@@ -541,28 +569,77 @@ def test_top_counties_json_includes_utilities_and_weights(
     assert payload["preset"] == "balanced"
     assert isinstance(payload["build_id"], str) and payload["build_id"]
     assert payload["weights"] == {
-        "hazard": 0.2,
-        "community": 0.2,
-        "mountain": 0.2,
-        "cost": 0.2,
-        "home": 0.2,
+        "safety": 0.2,
+        "health": 0.15,
+        "affordability": 0.25,
+        "opportunity": 0.15,
+        "lifestyle": 0.15,
+        "family": 0.1,
     }
+    assert payload["methodology_id"] == "top-counties-v2"
     assert payload["eligible_count"] == 2
     assert payload["notice"] == PREFERENCE_NOTICE
     assert payload["scope"]["kind"] == "national"
     assert [item["place_id"] for item in payload["items"]] == ["02001", "01001"]
     first = payload["items"][0]
     assert first["rank"] == 1
+    assert first["national_rank"] == 1
+    assert first["filtered_rank"] == 1
     assert first["pareto_optimal"] is True
     assert first["preference_fit"] > payload["items"][1]["preference_fit"]
-    assert set(first["values"]) == {
-        "res_hazard_npctl",
-        "community_conditions_group",
-        "mountain_magnitude",
-        "cost_of_living_index",
-        "home_buying_power_percentile",
+    assert "u_safety" not in (payload.get("map") or {})
+    assert set(first["pillars"]) == {
+        "safety",
+        "health",
+        "affordability",
+        "opportunity",
+        "lifestyle",
+        "family",
     }
-    assert "housing_built_2000_plus_pct" not in first["values"]
-    assert "home_sqft_for_1m" not in first["values"]
-    assert set(first["utilities"]) == {"hazard", "community", "mountain", "cost", "home"}
-    assert all(value is not None for value in first["values"].values())
+    assert "preference_fit" not in first["values"]
+
+
+def test_top_counties_tiny_cohort_is_warned_not_silent_top_ten(
+    fixture_environment: tuple[RuntimePaths, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, runner = _complete_national_snapshot(fixture_environment, monkeypatch)
+    result = runner.invoke(app, ["top-counties"])
+    assert result.exit_code == 0, result.output
+    assert "Only 2 counties remain after eligibility gates" in result.output
+    assert "not a silent top ten" in result.output
+    assert "ELIGIBLE  2" in result.output
+    assert "LIMIT  10" in result.output
+    assert "01001" in result.output
+    assert "02001" in result.output
+
+    payload = json.loads(runner.invoke(app, ["top-counties", "--json"]).output)
+    assert payload["eligible_count"] == 2
+    assert payload["limit"] == 10
+    assert payload["cohort_warning"] is not None
+    assert "silent top ten" in payload["cohort_warning"]
+    assert [item["place_id"] for item in payload["items"]] == ["02001", "01001"]
+
+
+def test_top_counties_exclude_region_appalachia_keeps_autauga(
+    fixture_environment: tuple[RuntimePaths, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, runner = _complete_national_snapshot(fixture_environment, monkeypatch)
+    result = runner.invoke(app, ["top-counties", "--exclude-region", "appalachia", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["gates"]["exclude_region"] == "appalachia"
+    assert payload["exclusions"].get("region_exclusion", 0) == 0
+    assert [item["place_id"] for item in payload["items"]] == ["02001", "01001"]
+
+
+def test_top_counties_rejects_overlapping_include_and_exclude_states(
+    fixture_environment: tuple[RuntimePaths, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, runner = _complete_national_snapshot(fixture_environment, monkeypatch)
+    result = runner.invoke(
+        app, ["top-counties", "--state", "AL", "--exclude-state", "AL"]
+    )
+    assert result.exit_code == 1, result.output
+    assert "include and exclude" in result.output
+    assert "AL" in result.output
+    assert "RANK" not in result.output

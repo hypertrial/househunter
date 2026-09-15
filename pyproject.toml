@@ -52,6 +52,9 @@ packages = ["src/househunter"]
 [tool.hatch.build.targets.wheel.force-include]
 "config/sources.yml" = "househunter/assets/sources.yml"
 "config/home-market/release-lock.json" = "househunter/assets/home_market_release_lock.json"
+"config/ranking/source-lock-v2.json" = "househunter/assets/ranking_source_lock_v2.json"
+"config/ranking/homeschool-policy-v1.json" = "househunter/assets/homeschool_policy_v1.json"
+"config/ranking/appalachia-counties.json" = "househunter/assets/appalachia_counties.json"
 "web/dist" = "househunter/static"
 
 [tool.pytest.ini_options]

@@ -1,0 +1,167 @@
+{
+  "allowed_hosts": [
+    "www2.census.gov",
+    "www.census.gov",
+    "www.bea.gov",
+    "apps.bea.gov",
+    "www.epa.gov",
+    "data.cdc.gov",
+    "data-nri-geoplatform.opendata.arcgis.com",
+    "www.fcc.gov",
+    "broadbandmap.fcc.gov",
+    "download.bls.gov",
+    "data.hrsa.gov",
+    "www.ncei.noaa.gov",
+    "www.fbi.gov",
+    "cde.ucr.cjis.gov",
+    "www.countyhealthrankings.org"
+  ],
+  "denied_data_classes": [
+    "fcc_location_fabric",
+    "nibrs_incident",
+    "nibrs_person",
+    "cms_identifiable",
+    "student_record",
+    "tax_identifiable"
+  ],
+  "methodology_id": "top-counties-v2",
+  "reviewed_on": "2026-09-15",
+  "runtime_fetch": false,
+  "schema": 1,
+  "sources": [
+    {
+      "agency": "Census",
+      "data_class": "population_estimates",
+      "grain": "county",
+      "license": "U.S. Government Work",
+      "name": "census_pep_county",
+      "package_raw": false,
+      "pii_class": "none",
+      "runtime_fetch": false,
+      "url": "https://www2.census.gov/programs-surveys/popest/datasets/",
+      "vintage": "2024"
+    },
+    {
+      "agency": "FBI",
+      "coverage_floor": 0.9,
+      "data_class": "crime_aggregate",
+      "grain": "agency-attributed county",
+      "license": "U.S. Government Work",
+      "name": "fbi_crime_agency",
+      "package_raw": false,
+      "pii_class": "none",
+      "runtime_fetch": false,
+      "vintage": "2022-2024"
+    },
+    {
+      "agency": "EPA",
+      "data_class": "drinking_water",
+      "grain": "county",
+      "license": "U.S. Government Work",
+      "name": "epa_sdwis",
+      "package_raw": false,
+      "pii_class": "none",
+      "runtime_fetch": false,
+      "vintage": "2024"
+    },
+    {
+      "agency": "HRSA",
+      "data_class": "provider_supply",
+      "grain": "county",
+      "license": "U.S. Government Work",
+      "name": "hrsa_ahrf",
+      "package_raw": false,
+      "pii_class": "none",
+      "runtime_fetch": false,
+      "vintage": "2024"
+    },
+    {
+      "agency": "CHR&R",
+      "data_class": "community_context",
+      "grain": "county",
+      "license": "terms of use",
+      "name": "chrr_community_context",
+      "package_raw": false,
+      "pii_class": "none",
+      "runtime_fetch": false,
+      "vintage": "2025"
+    },
+    {
+      "agency": "BEA",
+      "data_class": "rpp",
+      "grain": "MSA",
+      "license": "U.S. Government Work",
+      "name": "bea_rpp_msa",
+      "package_raw": false,
+      "pii_class": "none",
+      "runtime_fetch": false,
+      "vintage": "2024"
+    },
+    {
+      "agency": "BEA",
+      "data_class": "rpp",
+      "grain": "state",
+      "license": "U.S. Government Work",
+      "name": "bea_rpp_state",
+      "package_raw": false,
+      "pii_class": "none",
+      "runtime_fetch": false,
+      "vintage": "2024"
+    },
+    {
+      "agency": "Census ACS",
+      "data_class": "acs_b25103_b25077",
+      "grain": "county",
+      "license": "U.S. Government Work",
+      "name": "acs_property_tax",
+      "package_raw": false,
+      "pii_class": "none",
+      "runtime_fetch": false,
+      "vintage": "2024"
+    },
+    {
+      "agency": "BLS/Census",
+      "data_class": "employment_commute",
+      "grain": "county",
+      "license": "U.S. Government Work",
+      "name": "bls_qcew_acs_commute",
+      "package_raw": false,
+      "pii_class": "none",
+      "runtime_fetch": false,
+      "vintage": "2024"
+    },
+    {
+      "agency": "FCC",
+      "data_class": "broadband_aggregate",
+      "grain": "county aggregate",
+      "license": "U.S. Government Work",
+      "name": "fcc_broadband_100_20",
+      "package_raw": false,
+      "pii_class": "none",
+      "runtime_fetch": false,
+      "vintage": "2024"
+    },
+    {
+      "agency": "NOAA",
+      "data_class": "climate_normals",
+      "grain": "county",
+      "license": "U.S. Government Work",
+      "name": "noaa_climate_normals",
+      "package_raw": false,
+      "pii_class": "none",
+      "runtime_fetch": false,
+      "vintage": "1991-2020"
+    },
+    {
+      "agency": "HouseHunter rubric",
+      "data_class": "policy_rubric",
+      "grain": "state",
+      "license": "project",
+      "name": "homeschool_policy",
+      "package_raw": false,
+      "pii_class": "none",
+      "runtime_fetch": false,
+      "vintage": "2026"
+    }
+  ]
+}

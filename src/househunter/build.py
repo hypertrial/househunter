@@ -56,13 +56,27 @@ from .hazards import (
     score_residential_hazards,
     with_hazard_columns,
 )
-from .home_market import load_current_release, load_release_lock
+from .home_market import (
+    load_current_release,
+    load_release_lock,
+    trailing_twelve_month_identity,
+    trailing_twelve_month_metrics,
+)
 from .housing_stock import HousingStockBundle, validate_housing_stock_assets
+from .ranking_reference import (
+    CALIBRATION_ID,
+    METHODOLOGY_ID,
+    RANKING_SIDECAR_COLUMNS,
+    assemble_ranking_sidecar,
+    empty_ranking_sidecar,
+    ranking_bundle_identity,
+    validate_ranking_assets,
+)
 
 Progress = Callable[[int, str], None]
 Cancelled = Callable[[], bool]
 
-BUILD_SCHEMA_VERSION = 11
+BUILD_SCHEMA_VERSION = 12
 MOUNTAIN_RUNTIME_GEOGRAPHY_VERSION = "mountain_runtime_geography_v1"
 _CONNECTICUT_UNMATCHED_ZERO_POPULATION_TRACTS = frozenset(
     {"09001990000", "09007990100", "09009990000", "09011990100"}
@@ -82,6 +96,7 @@ _SNAPSHOT_TABLES = {
         "housing_stock_county_msa.parquet",
         ("county_fips",),
     ),
+    "ranking_counties": ("ranking_counties.parquet", ("place_id",)),
 }
 _SNAPSHOT_FILES = (
     "build.json",
@@ -213,16 +228,27 @@ def _load_optional_dimension_inputs(
                 ),
             }
         )
-    home_digest = sha256_bytes(b"home-market:source-unavailable")
+    try:
+        t12_identity = trailing_twelve_month_identity(paths)
+    except (HouseHunterError, OSError, KeyError, TypeError, ValueError):
+        t12_identity = {
+            "as_of_month": None,
+            "window": 12,
+            "months": [],
+            "error": "unavailable",
+        }
+    current_home_identity = None
     if home_manifest is not None:
+        current_home_identity = {
+            "source_sha256": home_manifest["source_sha256"],
+            "logical_sha256": home_manifest["logical_sha256"],
+            "month": home_manifest["month"],
+        }
+    if current_home_identity is None and not t12_identity.get("months"):
+        home_digest = sha256_bytes(b"home-market:source-unavailable")
+    else:
         home_digest = sha256_bytes(
-            canonical_json(
-                {
-                    "source_sha256": home_manifest["source_sha256"],
-                    "logical_sha256": home_manifest["logical_sha256"],
-                    "month": home_manifest["month"],
-                }
-            )
+            canonical_json({"current": current_home_identity, "trailing_twelve": t12_identity})
         )
 
     if housing is None:
@@ -253,6 +279,53 @@ def _load_optional_dimension_inputs(
             "housing_stock_county": housing_counties,
             "housing_stock_county_msa": housing_county_msa,
         },
+    }
+
+
+def _build_ranking_sidecar(
+    paths: RuntimePaths, county_scored: pl.DataFrame
+) -> tuple[pl.DataFrame, dict[str, object]]:
+    try:
+        bundle = validate_ranking_assets()
+    except (HouseHunterError, OSError, KeyError, TypeError, ValueError) as exc:
+        return empty_ranking_sidecar(), {
+            "available": False,
+            "methodology_id": METHODOLOGY_ID,
+            "calibration_id": CALIBRATION_ID,
+            "error": str(exc),
+            "row_count": 0,
+        }
+    try:
+        housing = trailing_twelve_month_metrics(paths)
+    except (HouseHunterError, OSError, KeyError, TypeError, ValueError):
+        housing = pl.DataFrame(
+            {
+                "county_fips": [],
+                "housing_valid_months": [],
+                "median_active_listings": [],
+                "median_ppsf": [],
+                "sqft_for_1m_t12": [],
+            },
+            schema={
+                "county_fips": pl.String,
+                "housing_valid_months": pl.Int64,
+                "median_active_listings": pl.Float64,
+                "median_ppsf": pl.Float64,
+                "sqft_for_1m_t12": pl.Float64,
+            },
+        )
+    sidecar = assemble_ranking_sidecar(bundle, county_scored, housing)
+    if "preference_fit" in sidecar.columns or sidecar.columns != RANKING_SIDECAR_COLUMNS:
+        raise HouseHunterError("Ranking sidecar must not persist a blended score")
+    return sidecar, {
+        "available": sidecar.height > 0,
+        "methodology_id": METHODOLOGY_ID,
+        "calibration_id": bundle.manifest["calibration_id"],
+        "calibration_hash": bundle.manifest["calibration_hash"],
+        "scope": bundle.manifest["scope"],
+        "vintages": bundle.manifest.get("vintages") or {},
+        "row_count": sidecar.height,
+        "error": None,
     }
 
 
@@ -674,6 +747,10 @@ def _write_duckdb(
         connection.execute(
             "CREATE INDEX housing_stock_county_id_idx ON housing_stock_county(county_fips)"
         )
+        if "ranking_counties" in tables:
+            connection.execute(
+                "CREATE INDEX ranking_counties_id_idx ON ranking_counties(place_id)"
+            )
         connection.execute(
             "CREATE TABLE build_metadata AS SELECT ? AS metadata_json",
             [json.dumps(metadata, sort_keys=True)],
@@ -872,6 +949,9 @@ def _validate_snapshot_artifacts(target: Path) -> bool:
         )
     }:
         return False
+    ranking = frames["ranking_counties"]
+    if ranking.columns != list(RANKING_SIDECAR_COLUMNS) or "preference_fit" in ranking.columns:
+        return False
     home_market = frames["home_market"]
     if home_market.height:
         eligible = home_market.filter(pl.col("home_costs_coverage_status") == "complete")
@@ -1032,6 +1112,11 @@ def build_snapshot(
     input_hashes["housing_stock"] = str(housing_stock_identity["checksum"])
     input_hashes["bea_rpp"] = str(optional["bea_digest"])
     input_hashes["home_market"] = str(optional["home_digest"])
+    try:
+        ranking_identity = ranking_bundle_identity(validate_ranking_assets().manifest)
+    except (HouseHunterError, OSError, KeyError, TypeError, ValueError):
+        ranking_identity = sha256_bytes(b"ranking-unavailable")
+    input_hashes["ranking_v2"] = str(ranking_identity)
     bea_source_value = optional["bea_source"]
     bea_release = (
         bea_source_value["release_year"] if isinstance(bea_source_value, dict) else "unavailable"
@@ -1138,11 +1223,13 @@ def build_snapshot(
     complete = scored.filter(pl.col("res_hazard_npctl").is_not_null())
     county_complete = county_scored.filter(pl.col("res_hazard_npctl").is_not_null())
     source_tables = optional["source_tables"]
+    ranking_counties, ranking_meta = _build_ranking_sidecar(paths, county_scored)
     snapshot_frames = {
         "places": scored,
         "counties": county_scored,
         "chrr_county": chrr_counties,
         **source_tables,
+        "ranking_counties": ranking_counties,
     }
     checksums = {
         table: logical_checksum(
@@ -1284,6 +1371,7 @@ def build_snapshot(
         "layers": _layer_descriptors(
             config=config, mountain_identity=mountain_identity, optional=optional
         ),
+        "ranking": ranking_meta,
         "sources": source_descriptors,
         "detail_notices": [
             HOME_MARKET_METHODOLOGY_NOTICE,

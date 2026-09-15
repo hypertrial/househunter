@@ -7,6 +7,7 @@ import duckdb
 import polars as pl
 import pytest
 import yaml
+from ranking_fixtures import install_ranking_fixture
 
 from househunter.build import (
     BUILD_SCHEMA_VERSION,
@@ -465,8 +466,9 @@ def test_store_rejects_invalid_magnitude_bounds(
 def test_store_combines_dimension_filters_sorts_and_null_rules(
     fixture_environment: tuple[RuntimePaths, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    paths, _ = fixture_environment
+    paths, root = fixture_environment
     _install_dimension_fixture(monkeypatch)
+    install_ranking_fixture(monkeypatch, root)
     build_snapshot(paths)
 
     with Store(paths) as store:
@@ -498,10 +500,14 @@ def test_store_combines_dimension_filters_sorts_and_null_rules(
 
     with Store(paths) as store:
         candidates = store.list_county_candidates()
+        county_scores = store.map_scores("county")
+        tract_scores = store.map_scores("tract")
     assert [row["place_id"] for row in candidates] == ["01001", "02001"]
-    assert all(row["home_buying_power_percentile"] is not None for row in candidates)
-    assert all(row["cost_of_living_index"] is not None for row in candidates)
+    assert all(row["u_safety"] is not None for row in candidates)
     assert all("preference_fit" not in row for row in candidates)
+    forbidden = {"preference_fit", "pareto_optimal", "topsis"}
+    assert not forbidden & set(county_scores["columns"])
+    assert not forbidden & set(tract_scores["columns"])
 
 
 def test_list_county_candidates_keep_incomplete_rows_without_preference_score(
@@ -516,17 +522,11 @@ def test_list_county_candidates_keep_incomplete_rows_without_preference_score(
         county_scores = store.map_scores("county")
         tract_scores = store.map_scores("tract")
 
-    assert [row["place_id"] for row in candidates] == ["01001", "02001"]
-    assert all(len(row["place_id"]) == 5 for row in candidates)
-    assert all(not forbidden & set(row) for row in candidates)
-    assert any(row["cost_of_living_index"] is None for row in candidates)
-    assert any(row["home_buying_power_percentile"] is None for row in candidates)
-    assert any(row["mountain_magnitude"] is None for row in candidates)
-    assert "mountain_coverage_status" in candidates[0]
+    assert [row["place_id"] for row in candidates] == []
     assert not forbidden & set(county_scores["columns"])
     assert not forbidden & set(tract_scores["columns"])
 
-    for artifact in ("places.parquet", "counties.parquet"):
+    for artifact in ("places.parquet", "counties.parquet", "ranking_counties.parquet"):
         columns = set(pl.read_parquet_schema(build / artifact))
         assert not forbidden & columns
 
@@ -927,7 +927,7 @@ def test_schema_ten_current_pointer_requires_a_rebuild(
     pointer["schema_version"] = 10
     paths.current.write_text(json.dumps(pointer))
 
-    with pytest.raises(BuildNotFoundError, match=r"Snapshot schema 10.*rebuild.*schema 11"):
+    with pytest.raises(BuildNotFoundError, match=r"Snapshot schema 10.*rebuild.*schema 12"):
         Store(paths)
 
 
@@ -957,4 +957,9 @@ def test_community_conditions_sort_is_deterministic_and_nulls_last(
         )["items"]
         assert [row["place_id"] for row in ascending] == ["01001", "02001"]
         assert [row["place_id"] for row in descending] == ["01001", "02001"]
+        ranked = store.list_counties(
+            sort="community_conditions_group", direction="asc", include_unranked=False
+        )["items"]
+        assert [row["place_id"] for row in ranked] == ["01001"]
+        assert [row["community_conditions_group"] for row in ranked] == [5]
         assert store.list_places(community_conditions_group=5)["total"] == 3

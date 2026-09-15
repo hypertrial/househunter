@@ -36,6 +36,48 @@ publishable. There is no state fallback.
    documentation, run both verification scripts, and ship the lock change only with a
    new HouseHunter release. Never select an annual release automatically.
 
+## Ranking v2 — pinned public county bundle
+
+`househunter top-counties` does not fetch Census, NOAA, FCC, FBI, HRSA, EPA, or
+Realtor.com during prepare, download, or build. Maintainers generate a compact
+`ranking_v2` bundle with `scripts/generate_ranking_reference.py` from
+`config/ranking/source-lock-v2.json`. The packaged artifacts are county rows,
+calibration knots/bounds and their hash, source vintages, citations, coverage
+statuses, and checksums. Raw agency dumps are never packaged.
+
+Population is Census PEP at one reviewed vintage and current FIPS geography. It is an
+eligibility/confidence input, never a higher-is-better utility. Connecticut and other
+current-FIPS mismatches fail instead of using an invented crosswalk.
+
+FBI crime rates use attributed agencies only when reporting-population coverage is at
+least 90%. Suppression stays null, never zero. FCC input is public aggregate terrestrial
+fixed 100/20 availability; location fabric is denied. Homeschool-policy fit is a
+reviewed state rubric with statute citations and is not legal advice. NOAA climate
+normals are optional CLI gates, not a universal climate score.
+
+Ranking Cost of Living uses MSA MARPP or official state all-items RPP labeled `state`.
+Map Cost of Living remains MSA or U.S. Nonmetropolitan Portion `00999`. Do not advertise
+`00999` as state-specific.
+
+Private Realtor.com history is explicit `import-home-market` / `--history` with
+`--acknowledge-personal-use`. Trailing-12-month medians feed ranking only; the map Home
+Costs layer stays the latest single approved month. Historical artifacts remain local
+and unexported in bulk.
+
+### Updating ranking sources
+
+1. Review each lock entry: URL, vintage, grain, license/terms, PII class, byte/hash/
+   schema/row/FIPS contracts, and staleness.
+2. Download into a maintainer staging directory with the shared HTTPS host allowlist,
+   `trust_env=False`, redirect, size, archive, and checksum controls.
+3. Recompute national utilities on the full 50-state/DC source-valid universe, persist
+   calibration identity, and publish a new compact bundle. Changing gates must not
+   recompute calibration. Snapshot identity hashes the full bundle manifest (file
+   checksums, scope, source lock) plus trailing-12 home-market month digests, not
+   only `calibration_hash` or the latest-month pointer.
+4. Rebuild a schema-12 snapshot and re-run ranking golden fixtures plus both
+   verification scripts.
+
 ## Housing stock — ACS 2024 five-year estimates
 
 The maintainer-only reference generator uses the raw B25034 and B25035 table

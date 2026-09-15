@@ -137,6 +137,12 @@ def static_directory() -> Path:
     return checkout
 
 
+def _public_build_metadata(metadata: dict[str, object]) -> dict[str, object]:
+    public = dict(metadata)
+    public.pop("ranking", None)
+    return public
+
+
 def _with_live_home_market_staleness(metadata: dict[str, object]) -> dict[str, object]:
     """Refresh the time-varying stale flag without changing immutable build metadata."""
     sources = metadata.get("sources")
@@ -208,7 +214,7 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
         }
         try:
             _, metadata = current_build(runtime)
-            metadata = _with_live_home_market_staleness(metadata)
+            metadata = _public_build_metadata(_with_live_home_market_staleness(metadata))
             result["build"] = metadata
             result["layers"] = metadata.get("layers", [])
         except BuildNotFoundError:
