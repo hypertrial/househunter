@@ -652,6 +652,12 @@ def test_county_fit_api_preserves_partial_readiness_boundaries(
             ).status_code
             == 503
         )
+        invalid_weights = client.get(
+            "/api/v3/county-fit",
+            params={"build_id": build_id, "view": "custom", "weight_safety": 1.0},
+        )
+        assert invalid_weights.status_code == 422
+        assert "all six pillars" in invalid_weights.json()["detail"]
 
 
 def test_missing_ranking_bundle_leaves_map_available(

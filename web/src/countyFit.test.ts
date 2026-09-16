@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  COUNTY_FIT_PRESETS, countyFitParams, decodeCountyFitSummary, readCountyFitHash,
+  COUNTY_FIT_PRESETS, countyFitFiltersValid, countyFitParams, countyFitWeightsValid,
+  decodeCountyFitSummary, EMPTY_COUNTY_FIT_FILTERS, readCountyFitHash,
 } from "./countyFit";
 
 const summary = {
@@ -65,6 +66,12 @@ describe("County Fit public contract", () => {
     expect(custom.get("weight_safety")).toBe("0.20");
     expect(custom.get("min_safety")).toBe("0.75");
     expect(custom.get("exclude_appalachia")).toBe("true");
+    expect(countyFitWeightsValid({
+      ...COUNTY_FIT_PRESETS.balanced, safety: 20.5, health: 14.5,
+    })).toBe(false);
+    expect(() => countyFitParams("build-1", "custom", "custom", {
+      ...COUNTY_FIT_PRESETS.balanced, safety: 20.5, health: 14.5,
+    }, {})).toThrow("integer percentages");
   });
 
   it("round-trips valid custom hash state and rejects malformed state", () => {
@@ -81,8 +88,17 @@ describe("County Fit public contract", () => {
   it("rejects invalid filter state instead of issuing a bad API request", () => {
     expect(readCountyFitHash("#workspace=county-fit&fit_state=ZZ")).toBeNull();
     expect(readCountyFitHash("#workspace=county-fit&fit_min_population=-1")).toBeNull();
+    expect(readCountyFitHash("#workspace=county-fit&fit_min_population=25000.5")).toBeNull();
+    expect(readCountyFitHash("#workspace=county-fit&fit_min_active_listings=100.5")).toBeNull();
     expect(readCountyFitHash("#workspace=county-fit&fit_min_valid_months=13")).toBeNull();
     expect(readCountyFitHash("#workspace=county-fit&fit_min_safety=101")).toBeNull();
+    expect(readCountyFitHash("#workspace=county-fit&fit_min_safety=20.5")).toBeNull();
     expect(readCountyFitHash("#workspace=county-fit&fit_min_jan_temp_f=50&fit_max_jan_temp_f=40")).toBeNull();
+    expect(countyFitFiltersValid({
+      ...EMPTY_COUNTY_FIT_FILTERS, min_population: "25000.5",
+    })).toBe(false);
+    expect(countyFitFiltersValid({
+      ...EMPTY_COUNTY_FIT_FILTERS, min_population: "25000", min_safety: "20",
+    })).toBe(true);
   });
 });

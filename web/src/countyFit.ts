@@ -52,6 +52,50 @@ export const EMPTY_COUNTY_FIT_FILTERS = {
 
 export type CountyFitFilters = typeof EMPTY_COUNTY_FIT_FILTERS;
 
+export function countyFitWeightsValid(weights: Record<CountyFitPillar, number>): boolean {
+  return COUNTY_FIT_PILLARS.every((pillar) => Number.isInteger(weights[pillar])
+    && weights[pillar] >= 0 && weights[pillar] <= 100)
+    && Object.values(weights).reduce((total, value) => total + value, 0) === 100;
+}
+
+export function countyFitFiltersValid(filters: CountyFitFilters): boolean {
+  if (filters.state && !COUNTY_FIT_STATES.has(filters.state)) return false;
+  const value = (key: keyof CountyFitFilters) => {
+    const raw = filters[key];
+    return typeof raw === "string" && raw !== "" ? Number(raw) : null;
+  };
+  const integerRanges = [
+    ["min_population", 0, Number.MAX_SAFE_INTEGER],
+    ["min_active_listings", 0, Number.MAX_SAFE_INTEGER],
+    ["min_valid_months", 1, 12],
+  ] as const;
+  if (integerRanges.some(([key, minimum, maximum]) => {
+    const number = value(key);
+    return number !== null && (!Number.isInteger(number) || number < minimum || number > maximum);
+  })) return false;
+  for (const pillar of COUNTY_FIT_PILLARS) {
+    const number = value(`min_${pillar}` as keyof CountyFitFilters);
+    if (number !== null && (!Number.isInteger(number) || number < 0 || number > 100)) return false;
+  }
+  for (const key of [
+    "min_jan_temp_f", "max_jan_temp_f", "min_jul_temp_f", "max_jul_temp_f",
+    "max_extreme_heat_days", "max_extreme_cold_days",
+  ] as const) {
+    const number = value(key);
+    if (number !== null && (!Number.isFinite(number)
+      || (key.startsWith("max_extreme") && number < 0))) return false;
+  }
+  for (const [minimum, maximum] of [
+    ["min_jan_temp_f", "max_jan_temp_f"],
+    ["min_jul_temp_f", "max_jul_temp_f"],
+  ] as const) {
+    const low = value(minimum);
+    const high = value(maximum);
+    if (low !== null && high !== null && low > high) return false;
+  }
+  return true;
+}
+
 export interface CountyFitHashState {
   view: CountyFitView;
   preset: string;
@@ -77,7 +121,7 @@ export function readCountyFitHash(hash: string): CountyFitHashState | null {
       if (!Number.isInteger(value) || value < 0 || value > 100) return null;
       weights[pillar] = value;
     }
-    if (Object.values(weights).reduce((total, value) => total + value, 0) !== 100) return null;
+    if (!countyFitWeightsValid(weights)) return null;
   }
   const filters = { ...EMPTY_COUNTY_FIT_FILTERS };
   filters.state = params.get("fit_state") || "";
@@ -89,31 +133,7 @@ export function readCountyFitHash(hash: string): CountyFitHashState | null {
     if (raw && !Number.isFinite(Number(raw))) return null;
     (filters[key] as string) = raw;
   }
-  const filterNumber = (key: keyof CountyFitFilters) => {
-    const raw = filters[key];
-    return typeof raw === "string" && raw !== "" ? Number(raw) : null;
-  };
-  const nonnegative = [
-    "min_population", "min_active_listings", "max_extreme_heat_days", "max_extreme_cold_days",
-  ] as const;
-  if (nonnegative.some((key) => {
-    const value = filterNumber(key);
-    return value !== null && value < 0;
-  })) return null;
-  const validMonths = filterNumber("min_valid_months");
-  if (validMonths !== null && (!Number.isInteger(validMonths) || validMonths < 1 || validMonths > 12)) return null;
-  for (const pillar of COUNTY_FIT_PILLARS) {
-    const value = filterNumber(`min_${pillar}` as keyof CountyFitFilters);
-    if (value !== null && (value < 0 || value > 100)) return null;
-  }
-  for (const [minimum, maximum] of [
-    ["min_jan_temp_f", "max_jan_temp_f"],
-    ["min_jul_temp_f", "max_jul_temp_f"],
-  ] as const) {
-    const minValue = filterNumber(minimum);
-    const maxValue = filterNumber(maximum);
-    if (minValue !== null && maxValue !== null && minValue > maxValue) return null;
-  }
+  if (!countyFitFiltersValid(filters)) return null;
   const selected = params.get("fit_place") || "";
   if (selected && !/^\d{5}$/.test(selected)) return null;
   const bounded = (key: string, fallback: number, min: number, max: number) => {
@@ -201,6 +221,9 @@ export function countyFitParams(
 ): URLSearchParams {
   const params = new URLSearchParams({ build_id: buildId, view, preset });
   if (view === "custom" && preset === "custom") {
+    if (!countyFitWeightsValid(weights)) {
+      throw new Error("Custom Fit weights must be integer percentages totaling 100");
+    }
     for (const pillar of COUNTY_FIT_PILLARS) {
       params.set(`weight_${pillar}`, (weights[pillar] * 0.01).toFixed(2));
     }

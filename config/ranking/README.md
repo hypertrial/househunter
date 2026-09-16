@@ -2,7 +2,7 @@
 
 Ranking v2 is built from a coordinated, immutable public-source contract at
 `source-lock-v2.json`. The qualification cutoff for this release is September 16,
-2026. Ordinary `househunter prepare`, `download`, `build`, and browser requests do
+2026. Ordinary `scripts/dev`, `househunter download`, `househunter build`, and browser requests do
 not acquire any of these agency files.
 
 The source lock is fail-closed. Every download has an exact identity, byte count,

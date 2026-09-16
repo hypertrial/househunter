@@ -322,6 +322,12 @@ export default function RiskMap({
       callbackRef.current.onPreview(null);
       callbackRef.current.onStatus("Map worker failed");
     };
+    const suspendInteraction = () => {
+      presentedRef.current = null;
+      hoverPendingRef.current = null;
+      activatePendingRef.current = null;
+      callbackRef.current.onPreview(null);
+    };
     renderer.onerror = (event) => failed(event.message || "Map renderer stopped unexpectedly");
     loader.onerror = (event) => failed(event.message || "Map loader stopped unexpectedly");
     renderer.onmessage = (event: MessageEvent<RendererEvent>) => {
@@ -335,12 +341,14 @@ export default function RiskMap({
       } else if (value.type === "STATUS") {
         callbackRef.current.onStatus(value.message);
       } else if (value.type === "SCORES_READY") {
+        suspendInteraction();
         callbackRef.current.onScoresReady?.(value.count);
       } else if (value.type === "COUNTY_FIT_READY") {
         callbackRef.current.onCountyFitReady?.(value.summary);
       } else if (value.type === "ADDON_ERROR") {
         callbackRef.current.onAddonError?.(value.kind, value.message);
       } else if (value.type === "ADDON_READY") {
+        suspendInteraction();
         callbackRef.current.onAddonReady?.(value.kind);
       } else if (value.type === "ERROR") {
         if (value.kind === "score") callbackRef.current.onScoreError?.(value.message);

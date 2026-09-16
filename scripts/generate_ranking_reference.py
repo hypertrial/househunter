@@ -109,10 +109,6 @@ def _acquire_artifacts(
         for artifact in artifacts:
             filename = str(artifact["filename"])
             destination = data_root / "raw" / name / filename
-            if _artifact_is_current(destination, artifact, lock_sha):
-                continue
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            url = artifact.get("url")
             stage_key = f"{name}/{filename}"
             staged = manual_stages.get(stage_key)
             selected_stage_key = stage_key
@@ -127,6 +123,13 @@ def _acquire_artifacts(
                     or sha256_file(staged) != artifact["sha256"]
                 ):
                     raise HouseHunterError(f"Manual ranking source {name} differs from its lock")
+            if _artifact_is_current(destination, artifact, lock_sha):
+                if staged is not None:
+                    used_stages.add(selected_stage_key)
+                continue
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            url = artifact.get("url")
+            if staged is not None:
                 temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.part")
                 try:
                     shutil.copyfile(staged, temporary)

@@ -76,6 +76,16 @@ def test_source_lock_is_runtime_fetch_free() -> None:
         deny_restricted_data_class("nibrs_incident")
 
 
+def test_ranking_maintainer_docs_name_real_ordinary_commands() -> None:
+    documentation = (
+        Path(__file__).parents[1] / "config" / "ranking" / "README.md"
+    ).read_text()
+    assert "`househunter prepare`" not in documentation
+    assert "`scripts/dev`" in documentation
+    assert "`househunter download`" in documentation
+    assert "`househunter build`" in documentation
+
+
 def test_source_lock_binds_project_authored_inputs() -> None:
     root = Path(__file__).parents[1]
     lock = load_source_lock()
@@ -131,6 +141,57 @@ def test_etl_revalidates_staged_bytes_before_normalized_checkpoint_reuse(
     staged.write_bytes(b"drift!\n")
     with pytest.raises(HouseHunterError, match="byte count|checksum"):
         ranking_pipeline._validate_locked_raw_artifacts(tmp_path, lock)
+
+
+@pytest.mark.parametrize(
+    ("stage", "old_contract", "new_contract"),
+    [
+        (
+            "crime",
+            {"stage": "crime", "schema": 2, "sources_sha256": "locked"},
+            {
+                "stage": "crime",
+                "schema": ranking_pipeline.CRIME_STAGE_SCHEMA,
+                "sources_sha256": "locked",
+            },
+        ),
+        (
+            "employment",
+            {"stage": "employment", "sources_sha256": "locked"},
+            {
+                "stage": "employment",
+                "schema": ranking_pipeline.EMPLOYMENT_STAGE_SCHEMA,
+                "sources_sha256": "locked",
+            },
+        ),
+    ],
+)
+def test_changed_transform_contract_invalidates_normalized_checkpoint(
+    tmp_path: Path,
+    stage: str,
+    old_contract: dict[str, object],
+    new_contract: dict[str, object],
+) -> None:
+    checkpoint = tmp_path / "normalized" / f"{stage}.parquet"
+    ranking_pipeline._write_frame_checkpoint(
+        checkpoint,
+        pl.DataFrame({"county_fips": ["01001"], "marker": ["stale"]}),
+        contract=old_contract,
+    )
+    builds = 0
+
+    def rebuild() -> pl.DataFrame:
+        nonlocal builds
+        builds += 1
+        return pl.DataFrame({"county_fips": ["01001"], "marker": ["rebuilt"]})
+
+    frame = ranking_pipeline._normalized_stage(
+        tmp_path, stage, contract=new_contract, build=rebuild
+    )
+    assert builds == 1
+    assert frame["marker"].to_list() == ["rebuilt"]
+    metadata = json.loads(checkpoint.with_suffix(".parquet.checkpoint.json").read_text())
+    assert metadata["contract"] == new_contract
 
 
 def test_etl_requires_immutable_snapshot_validation(
@@ -315,6 +376,90 @@ def test_fbi_response_manifest_matches_lock() -> None:
     assert all(
         agency["county_fips"] in manifest["county_universe"] for agency in manifest["agencies"]
     )
+
+
+def test_crime_requires_every_offense_month_but_accepts_explicit_zero(tmp_path: Path) -> None:
+    months = [f"{month:02d}-{year}" for year in (2023, 2024, 2025) for month in range(1, 13)]
+    contract = "a" * 64
+    agencies = [
+        {"ori": "AL0010001", "county_fips": "01001"},
+        {"ori": "AL0030001", "county_fips": "01003"},
+    ]
+    for agency in agencies:
+        for family in ("violent-crime", "property-crime"):
+            actuals = {month: 0 for month in months}
+            if agency["county_fips"] == "01001" and family == "violent-crime":
+                actuals.pop("12-2025")
+            payload = {
+                "offenses": {"actuals": {"Fixture Offenses": actuals}},
+                "populations": {
+                    "population": {"Fixture": {month: 100 for month in months}},
+                    "participated_population": {
+                        "Fixture": {month: 100 for month in months}
+                    },
+                },
+            }
+            path = tmp_path / "raw" / "fbi" / contract / "summaries" / family / (
+                agency["ori"] + ".json"
+            )
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload))
+
+    result = ranking_pipeline._crime(
+        tmp_path, {"contract_sha256": contract, "agencies": agencies}
+    ).sort("county_fips")
+    missing, explicit_zero = result.iter_rows(named=True)
+    assert missing["crime_status"] == "below_coverage_or_missing"
+    assert missing["crime_coverage"] is None
+    assert missing["crime_violent_rate"] is None
+    assert missing["crime_property_rate"] is None
+    assert explicit_zero["crime_status"] == "complete"
+    assert explicit_zero["crime_coverage"] == pytest.approx(1.0)
+    assert explicit_zero["crime_violent_rate"] == pytest.approx(0.0)
+    assert explicit_zero["crime_property_rate"] == pytest.approx(0.0)
+
+
+def test_employment_keeps_suppressed_commute_components_null(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    commute = pl.DataFrame(
+        {
+            "GEO_ID": ["0500000US01001", "0500000US01003"],
+            "B08303_E001": [100, 100],
+            "B08303_E002": [10, 10],
+            "B08303_E003": [10, 10],
+            "B08303_E004": [None, 10],
+            "B08303_E005": [10, 10],
+            "B08303_E006": [10, 10],
+            "B08303_E007": [10, 10],
+        }
+    )
+    commute_path = tmp_path / "acsdt5y2024-b08303.dat"
+    commute.write_csv(commute_path, separator="|")
+    monkeypatch.setattr(
+        ranking_pipeline,
+        "_artifact",
+        lambda _root, _source, filename: commute_path
+        if filename.endswith(".dat")
+        else Path(filename),
+    )
+
+    def qcew(path: Path, _member: str) -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                "county_fips": ["01001", "01003"],
+                "employment": [100 if "24" in path.name else 110] * 2,
+                "average_weekly_wage": [900.0, 1000.0],
+            }
+        )
+
+    monkeypatch.setattr(ranking_pipeline, "_qcew", qcew)
+    result = ranking_pipeline._employment(tmp_path).sort("county_fips")
+    suppressed, complete = result.iter_rows(named=True)
+    assert suppressed["commute_under_30_share"] is None
+    assert suppressed["employment_status"] == "missing_component"
+    assert complete["commute_under_30_share"] == pytest.approx(0.6)
+    assert complete["employment_status"] == "complete"
 
 
 def test_fbi_catalog_resolves_current_counties_and_records_unassignable_rows() -> None:
@@ -762,6 +907,62 @@ def test_bundle_publication_is_byte_deterministic(tmp_path: Path) -> None:
     ]
     for path in first.iterdir():
         assert path.read_bytes() == (second / path.name).read_bytes(), path.name
+
+
+def test_bundle_publication_uses_explicit_source_lock(tmp_path: Path) -> None:
+    lock = load_source_lock()
+    lock["compiled_on"] = "2026-09-17"
+    lock_path = tmp_path / "source-lock-v2.json"
+    lock_path.write_text(json.dumps(lock, indent=2, sort_keys=True) + "\n")
+    rows = synthetic_fixture_rows()
+    for row in rows:
+        row["citation_ids_json"] = '["notice"]'
+    bundle = write_ranking_bundle(
+        tmp_path / "ranking-v2",
+        pl.DataFrame(rows).select(COUNTY_COLUMNS).sort("county_fips"),
+        calibration={"id": CALIBRATION_ID},
+        homeschool=load_homeschool_policy(),
+        citations={"notice": HOMESCHOOL_NOTICE},
+        source_lock_path=lock_path,
+        scope="fixture",
+    )
+    assert bundle.manifest["source_lock_sha256"] == sha256_file(lock_path)
+
+
+def test_manual_acquisition_resume_accepts_the_same_stage(tmp_path: Path) -> None:
+    namespace = runpy.run_path(
+        str(Path(__file__).parents[1] / "scripts" / "generate_ranking_reference.py")
+    )
+    acquire = namespace["_acquire_artifacts"]
+    staged = tmp_path / "staged.csv"
+    staged.write_bytes(b"locked\n")
+    lock_path = tmp_path / "source-lock-v2.json"
+    lock_path.write_text("{}\n")
+    lock = {
+        "allowed_hosts": [],
+        "sources": [
+            {
+                "name": "manual",
+                "artifacts": [
+                    {
+                        "filename": "fixture.csv",
+                        "bytes": staged.stat().st_size,
+                        "sha256": sha256_file(staged),
+                    }
+                ],
+            }
+        ],
+    }
+    arguments = {
+        "lock": lock,
+        "lock_path": lock_path,
+        "data_root": tmp_path / "data",
+        "manual_stages": {"manual": staged},
+    }
+    acquire(**arguments)
+    acquire(**arguments)
+    with pytest.raises(HouseHunterError, match="Unused manual ranking stages: unknown"):
+        acquire(**{**arguments, "manual_stages": {"unknown": staged}})
 
 
 def test_checksum_and_schema_drift_are_rejected(tmp_path: Path) -> None:

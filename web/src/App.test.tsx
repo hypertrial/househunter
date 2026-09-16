@@ -570,6 +570,37 @@ it("pans with pointer-only Chrome input without activating a geography", async (
   expect(onCamera).not.toHaveBeenCalled();
 });
 
+it.each(["SCORES_READY", "ADDON_READY"] as const)(
+  "suspends picking after %s until the replacement frame commits",
+  async (eventType) => {
+    vi.stubGlobal("fetch", mockFetch());
+    render(<RiskMap
+      manifestUrl="/map-assets/manifest.json" scoreUrl="/api/v3/map/scores?level=tract"
+      expectedBuildId="fixture" level="tract" selected="" filters={mapFilters}
+      focusTarget={null} initialCamera={{ cx: 0.5, cy: 0.5, z: 1 }}
+      onSelect={() => undefined} onPreview={() => undefined} onCamera={() => undefined}
+      onStatus={() => undefined}
+    />);
+    const viewport = screen.getByRole("img", { name: /Focusable USA tract/ });
+    await waitFor(() => expect(viewport).toHaveAttribute("aria-busy", "false"));
+    const init = workerMessages.find(({ value }) => value.type === "INIT")!.value;
+    workerMessages.length = 0;
+    act(() => mockWorkers[0].deliver({
+      type: eventType, datasetGeneration: init.datasetGeneration, count: 1,
+      kind: "cost-of-living",
+    }));
+    fireEvent.pointerDown(viewport, {
+      pointerId: 1, pointerType: "mouse", isPrimary: true,
+      button: 0, buttons: 1, clientX: 500, clientY: 350,
+    });
+    fireEvent.pointerUp(viewport, {
+      pointerId: 1, pointerType: "mouse", isPrimary: true,
+      button: 0, buttons: 0, clientX: 500, clientY: 350,
+    });
+    expect(workerMessages.filter(({ value }) => value.type === "PICK")).toEqual([]);
+  },
+);
+
 it("ignores a stale score response after changing geography level", async () => {
   let resolveTract!: (value: Response) => void;
   let resolveCounty!: (value: Response) => void;

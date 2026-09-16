@@ -605,6 +605,30 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
         normalized_view = (
             str(query["view"]).replace("family-autonomy", "family").replace("custom-fit", "custom")
         )
+        evaluation_options = {
+            "view": normalized_view,
+            "preset": str(query["preset"]),
+            "custom_weights": query["custom_weights"],
+            "min_population": query["min_population"],
+            "min_active_listings": query["min_active_listings"],
+            "min_valid_months": query["min_valid_months"],
+            "states": query["states"],
+            "exclude_states": query["exclude_states"],
+            "exclude_region": query["exclude_region"],
+            "min_jan_temp_f": query["min_jan_temp_f"],
+            "max_jan_temp_f": query["max_jan_temp_f"],
+            "min_jul_temp_f": query["min_jul_temp_f"],
+            "max_jul_temp_f": query["max_jul_temp_f"],
+            "max_extreme_heat_days": query["max_extreme_heat_days"],
+            "max_extreme_cold_days": query["max_extreme_cold_days"],
+            "min_pillars": query["min_pillars"],
+            "vintages": ranking.get("vintages") or {},
+            "calibration_id": str(ranking.get("calibration_id") or ""),
+        }
+        try:
+            evaluate_counties([], **evaluation_options)
+        except HouseHunterError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         available = set(ranking.get("available_pillars") or [])
         if normalized_view == "custom" and ranking.get("readiness") != "ready":
             raise HTTPException(
@@ -619,27 +643,7 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
         try:
             with Store(runtime, build_id=str(query["build_id"])) as store:
                 candidates = store.list_county_candidates()
-            evaluation = evaluate_counties(
-                candidates,
-                view=normalized_view,
-                preset=str(query["preset"]),
-                custom_weights=query["custom_weights"],
-                min_population=query["min_population"],
-                min_active_listings=query["min_active_listings"],
-                min_valid_months=query["min_valid_months"],
-                states=query["states"],
-                exclude_states=query["exclude_states"],
-                exclude_region=query["exclude_region"],
-                min_jan_temp_f=query["min_jan_temp_f"],
-                max_jan_temp_f=query["max_jan_temp_f"],
-                min_jul_temp_f=query["min_jul_temp_f"],
-                max_jul_temp_f=query["max_jul_temp_f"],
-                max_extreme_heat_days=query["max_extreme_heat_days"],
-                max_extreme_cold_days=query["max_extreme_cold_days"],
-                min_pillars=query["min_pillars"],
-                vintages=ranking.get("vintages") or {},
-                calibration_id=str(ranking.get("calibration_id") or ""),
-            )
+            evaluation = evaluate_counties(candidates, **evaluation_options)
         except HouseHunterError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return current_metadata, ranking, candidates, evaluation

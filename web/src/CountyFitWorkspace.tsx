@@ -5,8 +5,10 @@ import {
   COUNTY_FIT_PRESETS,
   COUNTY_FIT_VIEWS,
   EMPTY_COUNTY_FIT_FILTERS,
+  countyFitFiltersValid,
   countyFitParams,
   countyFitRows,
+  countyFitWeightsValid,
   readCountyFitHash,
   type CountyFitFilters,
 } from "./countyFit";
@@ -173,6 +175,8 @@ export default function CountyFit({ meta, active, onMap }: {
   const firstHash = useRef(true);
   const wasActive = useRef(active);
   const totalWeight = Object.values(draftWeights).reduce((total, value) => total + value, 0);
+  const weightsValid = countyFitWeightsValid(draftWeights);
+  const filtersValid = countyFitFiltersValid(draftFilters);
   const buildId = meta.build?.build_id || "";
   const params = useMemo(() => countyFitParams(
     buildId, view, preset, weights, apiFilters(filters),
@@ -263,11 +267,14 @@ export default function CountyFit({ meta, active, onMap }: {
   };
 
   const applyWeights = () => {
-    if (totalWeight !== 100) return;
+    if (!weightsValid) return;
     setPreset("custom"); setWeights({ ...draftWeights }); setPanel(null);
   };
 
-  const applyFilters = () => { setFilters({ ...draftFilters }); setSelected(""); setPanel(null); };
+  const applyFilters = () => {
+    if (!filtersValid) return;
+    setFilters({ ...draftFilters }); setSelected(""); setPanel(null);
+  };
   const clearFilters = () => {
     const cleared = { ...EMPTY_COUNTY_FIT_FILTERS };
     setDraftFilters(cleared); setFilters(cleared); setSelected(""); setPanel(null);
@@ -323,9 +330,9 @@ export default function CountyFit({ meta, active, onMap }: {
         ["min_jan_temp_f", "Minimum January mean °F", "0.1"], ["max_jan_temp_f", "Maximum January mean °F", "0.1"], ["min_jul_temp_f", "Minimum July mean °F", "0.1"], ["max_jul_temp_f", "Maximum July mean °F", "0.1"],
         ["max_extreme_heat_days", "Maximum ≥90°F days", "0.1"], ["max_extreme_cold_days", "Maximum ≤32°F days", "0.1"],
       ] as const).map(([key, label, step]) => <label key={key}>{label}<input type="number" step={step} value={draftFilters[key]} onChange={(event) => setDraftFilters((current) => ({ ...current, [key]: event.target.value }))} placeholder="Any" /></label>)}
-    </div><h3>Minimum pillar utility (%)</h3><div className="fit-filter-grid">{COUNTY_FIT_PILLARS.map((pillar) => <label key={pillar}>{PILLAR_LABELS[pillar]}<input type="number" min="0" max="100" step="1" value={draftFilters[`min_${pillar}`]} onChange={(event) => setDraftFilters((current) => ({ ...current, [`min_${pillar}`]: event.target.value }))} placeholder="Any" /></label>)}</div><label className="check"><input type="checkbox" checked={draftFilters.exclude_appalachia} onChange={(event) => setDraftFilters((current) => ({ ...current, exclude_appalachia: event.target.checked }))} />Exclude Appalachian Regional Commission counties</label><div className="panel-buttons"><button className="primary" onClick={applyFilters}>Apply</button><button className="secondary" onClick={clearFilters}>Clear</button></div></section>}
+    </div><h3>Minimum pillar utility (%)</h3><div className="fit-filter-grid">{COUNTY_FIT_PILLARS.map((pillar) => <label key={pillar}>{PILLAR_LABELS[pillar]}<input type="number" min="0" max="100" step="1" value={draftFilters[`min_${pillar}`]} onChange={(event) => setDraftFilters((current) => ({ ...current, [`min_${pillar}`]: event.target.value }))} placeholder="Any" /></label>)}</div><label className="check"><input type="checkbox" checked={draftFilters.exclude_appalachia} onChange={(event) => setDraftFilters((current) => ({ ...current, exclude_appalachia: event.target.checked }))} />Exclude Appalachian Regional Commission counties</label>{!filtersValid && <p className="weight-total invalid" role="status">Enter valid whole-number population, listing, month, and percentage filters.</p>}<div className="panel-buttons"><button className="primary" disabled={!filtersValid} onClick={applyFilters}>Apply</button><button className="secondary" onClick={clearFilters}>Clear</button></div></section>}
 
-    {panel === "weights" && <section className="floating-panel fit-weights-panel" aria-label="Custom Fit weights"><h2>Custom Fit weights</h2><div className="fit-presets">{Object.entries(PRESET_LABELS).map(([key, label]) => <button className="secondary" key={key} onClick={() => choosePreset(key)}>{label}</button>)}</div>{COUNTY_FIT_PILLARS.map((pillar) => <label className="weight-control" key={pillar}><span>{PILLAR_LABELS[pillar]}</span><input type="range" min="0" max="100" step="1" value={draftWeights[pillar]} onChange={(event) => { const value = Number(event.target.value); setDraftWeights((current) => ({ ...current, [pillar]: value })); }} /><input aria-label={`${PILLAR_LABELS[pillar]} weight percent`} type="number" min="0" max="100" step="1" value={draftWeights[pillar]} onChange={(event) => { const value = Math.max(0, Math.min(100, Number(event.target.value) || 0)); setDraftWeights((current) => ({ ...current, [pillar]: value })); }} /></label>)}<p className={`weight-total ${totalWeight === 100 ? "valid" : "invalid"}`} role="status">Total: {totalWeight}%</p><div className="panel-buttons"><button className="primary" disabled={totalWeight !== 100} onClick={applyWeights}>Apply weights</button><button className="secondary" onClick={() => { setDraftWeights({ ...COUNTY_FIT_PRESETS.balanced }); }}>Reset balanced</button></div></section>}
+    {panel === "weights" && <section className="floating-panel fit-weights-panel" aria-label="Custom Fit weights"><h2>Custom Fit weights</h2><div className="fit-presets">{Object.entries(PRESET_LABELS).map(([key, label]) => <button className="secondary" key={key} onClick={() => choosePreset(key)}>{label}</button>)}</div>{COUNTY_FIT_PILLARS.map((pillar) => <label className="weight-control" key={pillar}><span>{PILLAR_LABELS[pillar]}</span><input type="range" min="0" max="100" step="1" value={draftWeights[pillar]} onChange={(event) => { const value = Number(event.target.value); setDraftWeights((current) => ({ ...current, [pillar]: value })); }} /><input aria-label={`${PILLAR_LABELS[pillar]} weight percent`} type="number" min="0" max="100" step="1" value={draftWeights[pillar]} onChange={(event) => { const value = Math.max(0, Math.min(100, Number(event.target.value) || 0)); setDraftWeights((current) => ({ ...current, [pillar]: value })); }} /></label>)}<p className={`weight-total ${weightsValid ? "valid" : "invalid"}`} role="status">Total: {totalWeight}%</p>{!weightsValid && <p className="muted">{Object.values(draftWeights).every(Number.isInteger) ? "Weights must total 100%." : "Use whole percentages totaling 100%."}</p>}<div className="panel-buttons"><button className="primary" disabled={!weightsValid} onClick={applyWeights}>Apply weights</button><button className="secondary" onClick={() => { setDraftWeights({ ...COUNTY_FIT_PRESETS.balanced }); }}>Reset balanced</button></div></section>}
 
     {panel === "readiness" && <section className="floating-panel info-panel" aria-label="About County Fit"><h2>About County Fit</h2><p><strong>{readiness.readiness === "ready" ? "All seven views are ready." : "Five public-data views are ready."}</strong> County Fit is loaded only when this workspace opens and never requests agency data at runtime.</p>{readiness.readiness === "partial" && <div className="notice"><strong>Affordability and Custom Fit need approved history.</strong>{historyCommands.map((command) => <code key={command}>{command}</code>)}</div>}<p>Utilities are fixed national calibrations. Custom Fit requires complete six-pillar data, ≥90% crime coverage, population ≥25,000, ≥9 valid housing months, and median active listings ≥100.</p><p>Provider and water values are availability proxies. FCC broadband is the share of broadband-serviceable locations, not population. Water boundaries may be supplied or EPA-modeled. Climate is missing without a qualifying in-county station.</p><p className="notice">{FIT_DISCLAIMER}</p><p>Ranking state RPP is an official state all-items value for non-MSA counties. It is distinct from the existing map’s nonmetropolitan <code>00999</code> assignment.</p></section>}
 

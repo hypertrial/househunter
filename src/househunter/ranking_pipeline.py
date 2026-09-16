@@ -34,6 +34,8 @@ from .ranking_reference import (
 )
 
 PIPELINE_VERSION = "ranking-maintainer-etl-v2"
+CRIME_STAGE_SCHEMA = 3
+EMPLOYMENT_STAGE_SCHEMA = 2
 IN_SCOPE_STATE_FIPS = frozenset(
     code for code, state in STATE_BY_FIPS.items() if state not in {"AS", "GU", "MP", "PR", "VI"}
 )
@@ -457,13 +459,20 @@ def _crime(data_root: Path, manifest: Mapping[str, Any]) -> pl.DataFrame:
             name, actuals = _agency_series(payload["offenses"]["actuals"], " Offenses")
             populations = payload["populations"]["population"][name]
             participated = payload["populations"]["participated_population"][name]
+            for year in (2023, 2024, 2025):
+                expected = {f"{month:02d}-{year}" for month in range(1, 13)}
+                if any(
+                    {month for month in series if month.endswith(str(year))} != expected
+                    for series in (actuals, populations, participated)
+                ):
+                    aggregate[(county_fips, family, year)]["valid"] = False
             for month in sorted(actuals):
                 year = int(month[-4:])
                 target = aggregate[(county_fips, family, year)]
                 values = (
                     _number(actuals[month]),
-                    _number(populations[month]),
-                    _number(participated[month]),
+                    _number(populations.get(month)),
+                    _number(participated.get(month)),
                 )
                 if any(value is None for value in values):
                     target["valid"] = False
@@ -772,7 +781,8 @@ def _employment(data_root: Path) -> pl.DataFrame:
                 *[
                     pl.col(f"B08303_E00{index}").cast(pl.Float64, strict=False)
                     for index in range(2, 8)
-                ]
+                ],
+                ignore_nulls=False,
             ).alias("under_30"),
             pl.col("B08303_E001").cast(pl.Float64, strict=False).alias("commute_total"),
         )
@@ -1677,7 +1687,7 @@ def build_ranking_counties(
             "FBI crime",
             {
                 "stage": "crime",
-                "schema": 2,
+                "schema": CRIME_STAGE_SCHEMA,
                 "sources_sha256": _sources_contract(lock, "fbi_ucr_agency_2023_2025"),
                 "fbi_responses_sha256": fbi_manifest["responses_sha256"],
             },
@@ -1723,6 +1733,7 @@ def build_ranking_counties(
             "employment opportunity",
             {
                 "stage": "employment",
+                "schema": EMPLOYMENT_STAGE_SCHEMA,
                 "sources_sha256": _sources_contract(
                     lock, "bls_qcew_2024", "bls_qcew_2025", "acs_commute_2024"
                 ),

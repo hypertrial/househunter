@@ -1811,7 +1811,7 @@ def write_ranking_bundle(
         (staging / "manifest.json").write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n"
         )
-        validate_ranking_assets(staging)
+        validate_ranking_assets(staging, source_lock_path=lock_path)
         if output.exists():
             os.replace(output, backup)
         try:
@@ -1822,7 +1822,7 @@ def write_ranking_bundle(
             raise
         if backup.exists():
             shutil.rmtree(backup)
-        return validate_ranking_assets(output)
+        return validate_ranking_assets(output, source_lock_path=lock_path)
     finally:
         if staging.exists():
             shutil.rmtree(staging)
