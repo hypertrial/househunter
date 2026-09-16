@@ -118,19 +118,16 @@ export function readCountyFitHash(hash: string): CountyFitHashState | null {
     for (const pillar of COUNTY_FIT_PILLARS) {
       const raw = params.get(`fit_weight_${pillar}`);
       const value = raw === null ? Number.NaN : Number(raw);
-      if (!Number.isInteger(value) || value < 0 || value > 100) return null;
       weights[pillar] = value;
     }
     if (!countyFitWeightsValid(weights)) return null;
   }
   const filters = { ...EMPTY_COUNTY_FIT_FILTERS };
   filters.state = params.get("fit_state") || "";
-  if (filters.state && !COUNTY_FIT_STATES.has(filters.state)) return null;
   filters.exclude_appalachia = params.get("fit_exclude_appalachia") === "1";
   for (const key of Object.keys(filters) as Array<keyof CountyFitFilters>) {
     if (key === "state" || key === "exclude_appalachia") continue;
     const raw = params.get(`fit_${key}`) || "";
-    if (raw && !Number.isFinite(Number(raw))) return null;
     (filters[key] as string) = raw;
   }
   if (!countyFitFiltersValid(filters)) return null;
