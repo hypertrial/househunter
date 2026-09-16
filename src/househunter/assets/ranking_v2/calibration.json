@@ -1,0 +1,161 @@
+{
+  "broadband_denominator": "broadband-serviceable locations",
+  "climate_aggregation": "equal-weight complete stations strictly within current county",
+  "community_context_formula": "(10 - published_group) / 9",
+  "crime_component_weights": {
+    "property": 0.4,
+    "violent": 0.6
+  },
+  "crime_coverage_floor": 0.9,
+  "ecdf_components": {
+    "u_average_weekly_wage": {
+      "county_fips_sha256": "f0a543e4bfbc2919eabd541d20c5aa4f2135ca3eb308deab4b98b99d91b5f250",
+      "direction": "higher_is_better",
+      "raw_column": "average_weekly_wage",
+      "raw_utility_sha256": "8ba8748ae091786caad2cc6828ca29d2d78b8d3f68138f64afa68b1e6f9b6320",
+      "tie_policy": "average_tie_national_ecdf",
+      "valid_count": 3143
+    },
+    "u_commute_under_30": {
+      "county_fips_sha256": "f0a543e4bfbc2919eabd541d20c5aa4f2135ca3eb308deab4b98b99d91b5f250",
+      "direction": "higher_is_better",
+      "raw_column": "commute_under_30_share",
+      "raw_utility_sha256": "c8884c65cc9979c9c9f4ef974e6f41de002a62e94d427fb5fb4d646bb1577eb3",
+      "tie_policy": "average_tie_national_ecdf",
+      "valid_count": 3143
+    },
+    "u_crime_property": {
+      "county_fips_sha256": "d034e400c2fb99e3aaccf6495c728c56e2761d6bc4f7ef07459f154c2d266ae8",
+      "direction": "lower_is_better",
+      "raw_column": "crime_property_rate",
+      "raw_utility_sha256": "3140ab62651b3e18343b276b5a4414a14a8741e25ed57cca092b03e7aa71a4ae",
+      "tie_policy": "average_tie_national_ecdf",
+      "valid_count": 1378
+    },
+    "u_crime_violent": {
+      "county_fips_sha256": "d034e400c2fb99e3aaccf6495c728c56e2761d6bc4f7ef07459f154c2d266ae8",
+      "direction": "lower_is_better",
+      "raw_column": "crime_violent_rate",
+      "raw_utility_sha256": "16ab369a2947ab7d4e92abc5d3cc1b8a3c76c4e115be5c5dad6788e17bd6e0c0",
+      "tie_policy": "average_tie_national_ecdf",
+      "valid_count": 1378
+    },
+    "u_dental": {
+      "county_fips_sha256": "e637d99538d4e253df2320f0a660e6bfca6d674d50c215f907fa1a67e287e333",
+      "direction": "higher_is_better",
+      "raw_column": "provider_dental",
+      "raw_utility_sha256": "5997e9af69126cec2b23a5aef3b4d805d98aa8cd57e3caa27952b8ff9021bb11",
+      "tie_policy": "average_tie_national_ecdf",
+      "valid_count": 3144
+    },
+    "u_employment_growth": {
+      "county_fips_sha256": "f0a543e4bfbc2919eabd541d20c5aa4f2135ca3eb308deab4b98b99d91b5f250",
+      "direction": "higher_is_better",
+      "raw_column": "employment_growth",
+      "raw_utility_sha256": "8f869b6ebbaa6617aa6a98d2db5e4ac0829be36c93d45c39e7ee5fa807674367",
+      "tie_policy": "average_tie_national_ecdf",
+      "valid_count": 3143
+    },
+    "u_mental_health": {
+      "county_fips_sha256": "01666895b549ba647bc9d3f119fcc4cc9f9c6564563437902df269aa307ef049",
+      "direction": "higher_is_better",
+      "raw_column": "provider_mental_health",
+      "raw_utility_sha256": "498457fa50d10f80124dc9bf8bb10182f8de0cba5d1a38e018bb5c26c0e7f2a9",
+      "tie_policy": "average_tie_national_ecdf",
+      "valid_count": 3135
+    },
+    "u_mountain": {
+      "county_fips_sha256": "01666895b549ba647bc9d3f119fcc4cc9f9c6564563437902df269aa307ef049",
+      "direction": "higher_is_better",
+      "raw_column": "mountain_magnitude",
+      "raw_utility_sha256": "7ecb12021ac43d0449427e3695e5cdd57ba5c5f4f0c14383452e81e82ea4c316",
+      "tie_policy": "average_tie_national_ecdf",
+      "valid_count": 3135
+    },
+    "u_primary_care": {
+      "county_fips_sha256": "01666895b549ba647bc9d3f119fcc4cc9f9c6564563437902df269aa307ef049",
+      "direction": "higher_is_better",
+      "raw_column": "provider_primary_care",
+      "raw_utility_sha256": "153e2cfed9695554d0e2d0a69d4d15d704a935c89ddd6357776d2e29209289f3",
+      "tie_policy": "average_tie_national_ecdf",
+      "valid_count": 3135
+    },
+    "u_property_tax": {
+      "county_fips_sha256": "bc3ef1c0f245cbb184576dbfda0224844a6ffa0198bb1c180dc1e1e39d10d4b8",
+      "direction": "lower_is_better",
+      "raw_column": "property_tax_rate",
+      "raw_utility_sha256": "1067f9ccde7d033b5af35cd937f6d12a81491daf1f1b3214a5c37a5818e7414e",
+      "tie_policy": "average_tie_national_ecdf",
+      "valid_count": 3135
+    },
+    "u_rpp": {
+      "county_fips_sha256": "e637d99538d4e253df2320f0a660e6bfca6d674d50c215f907fa1a67e287e333",
+      "direction": "lower_is_better",
+      "raw_column": "rpp_index",
+      "raw_utility_sha256": "63ae0abc2dedebeb5d3f3a282c8e3b404576032a2164d56733806a14e12fe63f",
+      "tie_policy": "average_tie_national_ecdf",
+      "valid_count": 3144
+    }
+  },
+  "employment_component_weights": {
+    "commute_under_30": 0.25,
+    "growth": 0.5,
+    "weekly_wage": 0.25
+  },
+  "hash": "e03601f68ec16189bb505e9c443ad82be34334692e240f23c87164b2ac7805b8",
+  "housing_sqft_bounds": {
+    "high": 2500.0,
+    "low": 500.0
+  },
+  "housing_sqft_knots": [
+    {
+      "cdf": 0.0,
+      "value": 500.0
+    },
+    {
+      "cdf": 0.4,
+      "value": 1000.0
+    },
+    {
+      "cdf": 0.9,
+      "value": 2000.0
+    },
+    {
+      "cdf": 1.0,
+      "value": 2500.0
+    }
+  ],
+  "id": "ranking-calibration-v2",
+  "pillar_internals": {
+    "affordability": {
+      "housing": 0.45,
+      "property_tax": 0.2,
+      "rpp": 0.35
+    },
+    "family": {
+      "homeschool": 1.0
+    },
+    "health": {
+      "community_context": 0.4,
+      "healthcare": 0.6
+    },
+    "lifestyle": {
+      "mountain": 1.0
+    },
+    "opportunity": {
+      "broadband": 0.4,
+      "employment": 0.6
+    },
+    "safety": {
+      "crime": 0.35,
+      "hazard": 0.5,
+      "water": 0.15
+    }
+  },
+  "provider_component_weights": {
+    "dental": 0.3333333333333333,
+    "mental_health": 0.3333333333333333,
+    "primary_care": 0.3333333333333333
+  },
+  "water_allocation_coverage_floor": 0.9
+}

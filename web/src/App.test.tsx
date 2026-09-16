@@ -94,7 +94,7 @@ function mockFetch(
 ) {
   return vi.fn(async (input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://127.0.0.1");
-    if (url.pathname === "/api/v3/meta") return response({ app_version: "3.0.0", mutation_token: "token", reference_assets_ready: true, reference_assets_error: null, map_assets: { ready: true, error: null, schema_version: 1, release: "v1.20", manifest_url: "/map-assets/manifest.json" }, layers: homeAvailable ? layers : layers.map((layer) => layer.key === "home-costs" ? { ...layer, availability: "unavailable", vintage: "unavailable", notice: "Import an approved Realtor.com county file." } : layer), build: build ? { build_id: "fixture", place_count: 1, ranked_place_count: 1, county_count: 1, ranked_county_count: 1, source_vintages: { fema: "December 2025" }, sources: sources.map((source) => ({ ...source, stale: homeStale })), scope: buildScope } : null });
+    if (url.pathname === "/api/v3/meta") return response({ app_version: "3.1.0", mutation_token: "token", reference_assets_ready: true, reference_assets_error: null, map_assets: { ready: true, error: null, schema_version: 1, release: "v1.20", manifest_url: "/map-assets/manifest.json" }, layers: homeAvailable ? layers : layers.map((layer) => layer.key === "home-costs" ? { ...layer, availability: "unavailable", vintage: "unavailable", notice: "Import an approved Realtor.com county file." } : layer), build: build ? { build_id: "fixture", place_count: 1, ranked_place_count: 1, county_count: 1, ranked_county_count: 1, source_vintages: { fema: "December 2025" }, sources: sources.map((source) => ({ ...source, stale: homeStale })), scope: buildScope } : null });
     if (url.pathname === "/map-assets/manifest.json") return response(manifest);
     if (url.pathname.includes("states.hash")) {
       const state = buildScope.state || "CO";
@@ -655,6 +655,30 @@ it("loads the replacement level after a score failure and marks it busy until in
   }));
   await waitFor(() => expect(map).toHaveAttribute("aria-busy", "false"));
   expect(screen.getByTitle("fixture")).toHaveTextContent("counties");
+});
+
+it("restarts the map score workers when retrying a failed schema-5 request", async () => {
+  let attempts = 0;
+  const baseFetch = mockFetch();
+  vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+    const url = new URL(String(input), "http://127.0.0.1");
+    if (url.pathname !== "/api/v3/map/scores/core") return baseFetch(input);
+    attempts += 1;
+    if (attempts === 1) {
+      return Promise.resolve(new Response(JSON.stringify({ detail: "temporary score failure" }), {
+        status: 503,
+        headers: { "Content-Type": "application/json" },
+      }));
+    }
+    return baseFetch(input);
+  }));
+
+  render(<App />);
+  const recovery = await screen.findByText("Scores could not be loaded");
+  fireEvent.click(recovery.closest("section")!.querySelector("button")!);
+
+  await waitFor(() => expect(attempts).toBe(2));
+  await waitFor(() => expect(screen.queryByText("Scores could not be loaded")).not.toBeInTheDocument());
 });
 
 it("ignores county options loaded for a previous draft state", async () => {

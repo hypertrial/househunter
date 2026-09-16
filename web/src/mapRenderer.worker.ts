@@ -18,7 +18,7 @@ import {
   type Projectors,
   type SpatialGrid,
 } from "./mapGeometry";
-import { metricValueColor } from "./map";
+import { countyFitColor, metricValueColor } from "./map";
 import type {
   LoaderCommand,
   LoaderEvent,
@@ -29,7 +29,7 @@ import type {
   RendererCommand,
   RendererEvent,
 } from "./mapWorkerProtocol";
-import type { Geography, MapScoreAddonKind, MapScores, Metric } from "./types";
+import type { Geography, MapMetric, MapScoreAddonKind, MapValueDataset } from "./types";
 import { requestedMapAddons } from "./mapScores";
 
 declare const self: DedicatedWorkerGlobalScope;
@@ -158,7 +158,7 @@ let semantics: MapSemantics = {
   housingBuilt2000PlusPctMin: null, neutralOnly: false,
 };
 let selected = "";
-let scores: MapScores | null = null;
+let scores: MapValueDataset | null = null;
 let scoreIndexes = new Map<string, number>();
 let scoreRevision = 0;
 let loadedAddOns = new Set<MapScoreAddonKind>();
@@ -240,7 +240,9 @@ function scoreValues(index: number | null): [
   number | null,
   number | null,
 ] {
-  if (index === null || !scores) return [null, null, null, null, null, null, null];
+  if (index === null || !scores || scores.schema_version !== 5) {
+    return [null, null, null, null, null, null, null];
+  }
   return [
     scores.columns.res_hazard_npctl[index],
     scores.columns.community_conditions_group[index],
@@ -252,8 +254,13 @@ function scoreValues(index: number | null): [
   ];
 }
 
-function activeMetricValue(index: number, metric: Metric): number | null {
+function activeMetricValue(index: number, metric: MapMetric): number | null {
   if (!scores) return null;
+  if (scores.schema_version === 1) {
+    return metric === "county-fit" && scores.counties.eligible[index]
+      ? scores.counties.active_value[index]
+      : null;
+  }
   if (metric === "residential-hazard") return scores.columns.res_hazard_npctl[index];
   if (metric === "community-conditions") return scores.columns.community_conditions_group[index];
   if (metric === "mountain") return scores.columns.mountain_magnitude[index];
@@ -263,6 +270,7 @@ function activeMetricValue(index: number, metric: Metric): number | null {
 
 function scoreIncluded(index: number | null, value: MapSemantics): boolean {
   if (index === null || !scores || value.neutralOnly) return false;
+  if (scores.schema_version === 1) return true;
   const community = scores.columns.community_conditions_group[index];
   const mountain = scores.columns.mountain_magnitude[index];
   return (value.mountainMagnitudeMin === null
@@ -282,6 +290,7 @@ function scoreIncluded(index: number | null, value: MapSemantics): boolean {
 }
 
 function requestSemanticAddOns(value: MapSemantics): boolean {
+  if (!scores || scores.schema_version !== 5 || value.metric === "county-fit") return false;
   let waiting = false;
   for (const kind of requestedMapAddons(value.metric, value)) {
     if (loadedAddOns.has(kind)) continue;
@@ -304,7 +313,9 @@ function featureStyle(
   const index = scoreIndexes.get(id) ?? null;
   const included = scoreIncluded(index, value);
   const active = included && index !== null ? activeMetricValue(index, value.metric) : null;
-  const color = included ? metricValueColor(active, value.metric, level) : null;
+  const color = included
+    ? value.metric === "county-fit" ? countyFitColor(active) : metricValueColor(active, value.metric, level)
+    : null;
   const filtered = Boolean(
     (value.state && featureState !== value.state)
     || (value.county && countyFips !== value.county),
@@ -1033,6 +1044,25 @@ function receiveLoader(event: LoaderEvent) {
     }
     return;
   }
+  if (event.type === "SCORES") {
+    scores = event.scores;
+    scoreRevision += 1;
+    const scoreIds = scores.schema_version === 1
+      ? scores.counties.county_fips : scores.columns.place_id;
+    scoreIndexes = new Map(scoreIds.map((id, index) => [id, index]));
+    for (const partition of [...nationalPartitions.values(), ...detailPartitions.values()]) {
+      for (const record of partition.records) record.scoreIndex = scoreIndexes.get(record.id) ?? null;
+      partition.stylePlans.clear();
+    }
+    viewportPlans.clear();
+    post({ type: "SCORES_READY", datasetGeneration, count: scoreIds.length });
+    if (scores.schema_version === 1) {
+      post({ type: "COUNTY_FIT_READY", datasetGeneration, summary: scores });
+    }
+    post({ type: "STATUS", datasetGeneration, message: `Rendering ${semantics.metric} map` });
+    scheduleRender();
+    return;
+  }
   if (event.type === "STATES") {
     rawStates = event.states;
     rawFeatures = [];
@@ -1046,7 +1076,9 @@ function receiveLoader(event: LoaderEvent) {
   loadedAddOns = new Set(event.loadedAddOns);
   requestedAddOns.clear();
   failedAddOns.clear();
-  scoreIndexes = new Map(scores?.columns.place_id.map((id, index) => [id, index]) || []);
+  const scoreIds = !scores ? []
+    : scores.schema_version === 1 ? scores.counties.county_fips : scores.columns.place_id;
+  scoreIndexes = new Map(scoreIds.map((id, index) => [id, index]));
   rawStates = event.states;
   rawFeatures = event.features;
   dataReady = true;
@@ -1059,7 +1091,12 @@ function receiveLoader(event: LoaderEvent) {
   requestedDetails.clear();
   failedDetails.clear();
   evictedDetails.clear();
-  if (scores) post({ type: "SCORES_READY", datasetGeneration, count: scores.columns.place_id.length });
+  if (scores) {
+    post({ type: "SCORES_READY", datasetGeneration, count: scoreIds.length });
+    if (scores.schema_version === 1) {
+      post({ type: "COUNTY_FIT_READY", datasetGeneration, summary: scores });
+    }
+  }
   requestSemanticAddOns(semantics);
   void rebuildGeometry();
 }
@@ -1108,6 +1145,16 @@ function pick(command: Extract<RendererCommand, { type: "PICK" }>) {
         home_sqft_for_1m: squareFeet,
         housing_built_2000_plus_pct: built2000,
       },
+      ...(match.scoreIndex !== null && scores?.schema_version === 1 ? {
+        countyFit: {
+          activeValue: scores.counties.active_value[match.scoreIndex],
+          eligible: scores.counties.eligible[match.scoreIndex],
+          exclusionReason: scores.counties.exclusion_reason[match.scoreIndex],
+          nationalRank: scores.counties.national_rank[match.scoreIndex],
+          filteredRank: scores.counties.filtered_rank[match.scoreIndex],
+          paretoOptimal: scores.counties.pareto_optimal[match.scoreIndex],
+        },
+      } : {}),
     };
   }
   post({
@@ -1184,6 +1231,7 @@ function initialize(command: Extract<RendererCommand, { type: "INIT" }>) {
     scoreUrl: command.scoreUrl,
     expectedBuildId: command.expectedBuildId,
     level,
+    datasetKind: command.datasetKind,
     neutralOnly: semantics.neutralOnly,
   };
   loaderPort.postMessage(loaderCommand);
@@ -1205,7 +1253,17 @@ function command(event: MessageEvent<RendererCommand>) {
     return;
   }
   if (value.datasetGeneration !== datasetGeneration) return;
-  if (value.type === "RESIZE") {
+  if (value.type === "RELOAD_SCORES") {
+    loaderPort?.postMessage({
+      type: "SCORES",
+      datasetGeneration,
+      scoreUrl: value.scoreUrl,
+      expectedBuildId: value.expectedBuildId,
+      level,
+      datasetKind: value.datasetKind,
+    } satisfies LoaderCommand);
+    post({ type: "STATUS", datasetGeneration, message: "Loading map scores" });
+  } else if (value.type === "RESIZE") {
     viewportGeneration = value.viewportGeneration;
     cameraGeneration = value.cameraGeneration;
     width = value.width;

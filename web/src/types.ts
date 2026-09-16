@@ -134,6 +134,9 @@ export interface JobStatus {
 
 export type Geography = "tract" | "county";
 export type Metric = "residential-hazard" | "community-conditions" | "mountain" | "cost-of-living" | "home-costs";
+export type MapMetric = Metric | "county-fit";
+export type CountyFitView = "safety" | "health" | "affordability" | "opportunity" | "lifestyle" | "family" | "custom";
+export type CountyFitPillar = Exclude<CountyFitView, "custom">;
 export type MapScope = { kind: "national"; state: null } | { kind: "state"; state: string };
 
 export interface MapFilters {
@@ -200,6 +203,89 @@ export interface Meta {
   map_assets: MapAssetStatus;
   build: BuildMeta | null;
   layers: LayerDescriptor[];
+  county_fit: CountyFitReadiness;
+}
+
+export interface CountyFitReadiness {
+  readiness: "unavailable" | "partial" | "ready";
+  reason_code: string | null;
+  methodology_id: string;
+  calibration_id?: string | null;
+  bundle_schema_version?: number | null;
+  bundle_release?: string | null;
+  vintages?: Record<string, string | number>;
+  row_count?: number;
+  available_pillars: CountyFitPillar[];
+  local_history?: {
+    status?: string;
+    valid_months?: number;
+    required_months?: number;
+    commands?: string[];
+  };
+  notices?: string[];
+}
+
+export interface CountyFitColumns {
+  county_fips: string[];
+  name: string[];
+  state: string[];
+  active_value: Array<number | null>;
+  eligible: boolean[];
+  exclusion_reason: Array<string | null>;
+  national_rank: Array<number | null>;
+  filtered_rank: Array<number | null>;
+  pareto_optimal: Array<boolean | null>;
+  u_safety: Array<number | null>;
+  u_health: Array<number | null>;
+  u_affordability: Array<number | null>;
+  u_opportunity: Array<number | null>;
+  u_lifestyle: Array<number | null>;
+  u_family: Array<number | null>;
+}
+
+export interface CountyFitSummary {
+  schema_version: 1;
+  build_id: string;
+  methodology_id: string;
+  calibration_id: string;
+  view: CountyFitView;
+  preset: string | null;
+  weights: Record<CountyFitPillar, number>;
+  gates: Record<string, unknown>;
+  reference_count: number;
+  national_count: number;
+  cohort_count: number;
+  exclusions: Record<string, number>;
+  notices: string[];
+  counties: CountyFitColumns;
+}
+
+export interface CountyFitDetail {
+  schema_version: 1;
+  build_id: string;
+  county: { fips: string; name: string; state: string };
+  view: CountyFitView;
+  active_value: number | null;
+  eligible: boolean;
+  exclusion_reason: string | null;
+  national_rank: number | null;
+  filtered_rank: number | null;
+  pareto_optimal: boolean | null;
+  weights: Record<CountyFitPillar, number>;
+  gates: Record<string, unknown>;
+  pillars: Record<CountyFitPillar, {
+    utility: number | null;
+    weight: number;
+    contribution: number | null;
+    measures: Record<string, string | number | null>;
+  }>;
+  subutilities: Record<string, number | null>;
+  coverage: Record<string, string | number | null>;
+  vintages: Record<string, unknown>;
+  sources: Record<string, string | null>;
+  citations: Record<string, unknown>;
+  rubric_components: Record<string, unknown> | null;
+  limitations: string[];
 }
 
 export interface MapScore {
@@ -237,6 +323,8 @@ export interface MapScores {
     home_costs: string;
   };
 }
+
+export type MapValueDataset = MapScores | CountyFitSummary;
 
 export interface MapScoreAddon {
   schema_version: 1;

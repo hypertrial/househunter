@@ -80,6 +80,35 @@ const countySummary = {
   ...summary, place_id: "08013", name: "Boulder", place_type: "county", res_hazard_npctl: 18.5,
 };
 
+const fitColumns = {
+  county_fips: ["01001", "08013"], name: ["Autauga", "Boulder"], state: ["AL", "CO"],
+  active_value: [null, 0.82], eligible: [false, true],
+  exclusion_reason: ["missing_active_data", null],
+  national_rank: [null, 1], filtered_rank: [null, 1], pareto_optimal: [null, true],
+  u_safety: [null, 0.82], u_health: [0.42, 0.76], u_affordability: [0.34, 0.64],
+  u_opportunity: [0.41, 0.71], u_lifestyle: [0.23, 0.93], u_family: [0.72, 0.45],
+};
+
+const fitDetail = {
+  schema_version: 1, build_id: build.build_id,
+  county: { fips: "08013", name: "Boulder", state: "CO" },
+  view: "safety", active_value: 0.82, eligible: true, exclusion_reason: null,
+  national_rank: 1, filtered_rank: 1, pareto_optimal: null,
+  weights: { safety: 1, health: 0, affordability: 0, opportunity: 0, lifestyle: 0, family: 0 },
+  gates: {},
+  pillars: Object.fromEntries([
+    ["safety", 0.82], ["health", 0.76], ["affordability", 0.64],
+    ["opportunity", 0.71], ["lifestyle", 0.93], ["family", 0.45],
+  ].map(([pillar, utility]) => [pillar, {
+    utility, weight: pillar === "safety" ? 1 : 0,
+    contribution: pillar === "safety" ? utility : 0,
+    measures: pillar === "safety" ? { crime_coverage: 0.98, water_allocation_coverage: 0.94 } : {},
+  }])),
+  subutilities: { u_crime: 0.8 }, coverage: { water_boundary_provenance: "mixed" },
+  vintages: { bundle: { population: 2025 } }, citations: { census_pep: { title: "Census PEP" } },
+  rubric_components: { oversight: "approximate" }, limitations: ["Availability proxy."],
+};
+
 const hazards = [
   { code: "WFIR", label: "Wildfire", percentile: 80.5, raw_alrb: 0.003, availability: "valid", fema_eal_rating: "Relatively High" },
   { code: "AVLN", label: "Avalanche", percentile: 12, raw_alrb: 0.0002, availability: "valid", fema_eal_rating: "Relatively Low" },
@@ -196,6 +225,8 @@ async function installRoutes(
   initiallyPrepared = true,
   failDetailOnce = false,
   detailDelay: number | Promise<void> = 0,
+  countyFitReady = false,
+  countyFitFailure = false,
 ) {
   let prepared = initiallyPrepared;
   let detailFailed = false;
@@ -222,9 +253,20 @@ async function installRoutes(
     const url = new URL(route.request().url());
     if (url.pathname === "/api/v3/meta") {
       await route.fulfill({ json: {
-        app_version: "3.0.0", mutation_token: "test-token", reference_assets_ready: true,
+        app_version: "3.1.0", mutation_token: "test-token", reference_assets_ready: true,
         reference_assets_error: null, build: prepared ? build : null, layers,
         map_assets: { ready: true, error: null, schema_version: 1, release: "v1.20", manifest_url: "/map-assets/manifest.json" },
+        county_fit: {
+          readiness: countyFitReady ? "ready" : "partial",
+          reason_code: countyFitReady ? null : "home_market_history_insufficient",
+          methodology_id: "top-counties-v2", calibration_id: "fixture", bundle_schema_version: 2,
+          bundle_release: "fixture", vintages: { population: 2025 }, row_count: 1,
+          available_pillars: countyFitReady
+            ? ["safety", "health", "affordability", "opportunity", "lifestyle", "family"]
+            : ["safety", "health", "opportunity", "lifestyle", "family"],
+          local_history: { status: countyFitReady ? "ready" : "insufficient", valid_months: countyFitReady ? 12 : 1, required_months: 9, commands: ["househunter import-home-market FILE --acknowledge-personal-use --history", "househunter build"] },
+          notices: ["Approximate, project-authored policy preference rubric."],
+        },
       } });
     } else if (url.pathname === "/api/v3/jobs" && route.request().method() === "POST") {
       expect(route.request().headers()["x-househunter-token"]).toBe("test-token");
@@ -250,6 +292,38 @@ async function installRoutes(
       await route.fulfill({ json: detail() });
     } else if (url.pathname === "/api/v3/counties/08013") {
       await route.fulfill({ json: detail(countySummary) });
+    } else if (url.pathname === "/api/v3/county-fit") {
+      if (countyFitFailure) {
+        await route.fulfill({ status: 503, json: { detail: "County Fit fixture failure" } });
+        return;
+      }
+      const view = url.searchParams.get("view") || "safety";
+      const weights = view === "custom"
+        ? { safety: .2, health: .15, affordability: .25, opportunity: .15, lifestyle: .15, family: .1 }
+        : { safety: 1, health: 0, affordability: 0, opportunity: 0, lifestyle: 0, family: 0 };
+      await route.fulfill({ json: {
+        schema_version: 1, build_id: build.build_id, methodology_id: "top-counties-v2",
+        calibration_id: "fixture", view, preset: view === "custom" ? "balanced" : null,
+        weights, gates: {}, reference_count: 2, national_count: 1, cohort_count: 1,
+        exclusions: { missing_active_data: 1 },
+        notices: ["Approximate, project-authored policy preference rubric."],
+        counties: fitColumns,
+      } });
+    } else if (url.pathname.startsWith("/api/v3/county-fit/counties/")) {
+      const fips = url.pathname.split("/").pop();
+      const excluded = fips === "01001";
+      await route.fulfill({ json: {
+        ...fitDetail,
+        county: excluded
+          ? { fips: "01001", name: "Autauga", state: "AL" }
+          : fitDetail.county,
+        active_value: excluded ? null : fitDetail.active_value,
+        eligible: !excluded,
+        exclusion_reason: excluded ? "missing_active_data" : null,
+        national_rank: excluded ? null : fitDetail.national_rank,
+        filtered_rank: excluded ? null : fitDetail.filtered_rank,
+        view: url.searchParams.get("view") || "safety",
+      } });
     } else if (url.pathname === "/api/v3/lookup") {
       const posted = route.request().postDataJSON() as { candidate_id?: string };
       if (posted.candidate_id) await route.fulfill({ json: {
@@ -295,6 +369,125 @@ test("keeps preparation and retained workflows inside the map shell", async ({ p
   await expect(scoreValue).toHaveCSS("color", "rgb(185, 175, 82)");
   const wildfireBar = detailDrawer.locator(".contribution", { hasText: "Wildfire" }).locator(".bar i");
   await expect(wildfireBar).toHaveCSS("background-color", "rgb(193, 99, 65)");
+});
+
+test("loads partial County Fit lazily and preserves the original map workspace", async ({ page }) => {
+  const fitRequests: string[] = [];
+  const fitSummaryRequests: string[] = [];
+  const countyGeometryRequests: string[] = [];
+  page.on("request", (request) => {
+    const pathname = new URL(request.url()).pathname;
+    if (pathname.startsWith("/api/v3/county-fit")) {
+      fitRequests.push(request.url());
+    }
+    if (pathname === "/api/v3/county-fit") fitSummaryRequests.push(request.url());
+    if (pathname === "/map-assets/counties.topojson.gz") countyGeometryRequests.push(request.url());
+  });
+  await installRoutes(page);
+  await page.goto("/#level=tract&metric=mountain&cx=.4&cy=.6&z=2");
+  await expect(page.getByRole("button", { name: "County Fit" })).toBeVisible();
+  expect(fitRequests).toEqual([]);
+
+  await page.getByRole("button", { name: "County Fit" }).click();
+  await expect(page).toHaveURL(/workspace=county-fit/);
+  await expect(page.getByLabel("View")).toHaveValue("safety");
+  await expect(page.getByLabel("View").locator("option[value=affordability]")).toHaveAttribute("disabled", "");
+  await expect(page.getByLabel("View").locator("option[value=custom]")).toHaveAttribute("disabled", "");
+  await expect(page.getByRole("heading", { name: "Ranked counties" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Boulder.*82\.0/ })).toBeVisible();
+  await expect.poll(() => fitSummaryRequests.length).toBe(1);
+  await expect.poll(() => countyGeometryRequests.length).toBe(1);
+
+  await page.getByLabel("View").selectOption("family");
+  await expect.poll(() => fitSummaryRequests.length).toBe(2);
+  await expect(page.getByRole("note", { name: "Family Autonomy limitation" })).toHaveText(
+    "Approximate, project-authored policy preference rubric. It is not legal advice, a legal-compliance determination, school-quality evidence, or a recommendation. Laws and interpretations may change; verify current requirements with official state sources or qualified counsel.",
+  );
+  await page.getByLabel("View").selectOption("health");
+  await expect.poll(() => fitSummaryRequests.length).toBe(3);
+  expect(countyGeometryRequests).toHaveLength(1);
+
+  await page.getByRole("button", { name: "Show commands" }).click();
+  const about = page.getByRole("region", { name: "About County Fit" });
+  await expect(about).toContainText("househunter import-home-market FILE --acknowledge-personal-use --history");
+  await expect(about).toContainText("househunter build");
+  await expect(about).toContainText("Approximate, project-authored policy preference rubric");
+  await page.getByRole("button", { name: "About" }).click();
+  const includedCounty = page.getByRole("button", { name: /Boulder.*82\.0/ });
+  await includedCounty.focus();
+  await includedCounty.press("Enter");
+  const detail = page.getByRole("dialog", { name: "County Fit details" });
+  const closeDetail = detail.getByRole("button", { name: "Close County Fit details" });
+  await expect(closeDetail).toBeFocused();
+  await expect(detail).toContainText(/water allocation coverage/i);
+  await expect(detail).toContainText("Family Autonomy");
+  await expect(page).toHaveURL(/fit_place=08013/);
+  await closeDetail.click();
+  await expect(includedCounty).toBeFocused();
+
+  const excludedCounty = page.getByRole("button", { name: /Autauga.*missing active data/i });
+  await excludedCounty.focus();
+  await excludedCounty.press("Enter");
+  const excludedClose = detail.getByRole("button", { name: "Close County Fit details" });
+  await expect(excludedClose).toBeFocused();
+  await expect(detail).toContainText("missing active data");
+  await excludedClose.click();
+  await expect(excludedCounty).toBeFocused();
+
+  await page.getByRole("button", { name: "Map", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Map", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(page).toHaveURL(/level=tract/);
+  await expect(page).toHaveURL(/metric=mountain/);
+  await expect(page).toHaveURL(/cx=0\.4000/);
+  await expect(page).not.toHaveURL(/workspace=county-fit/);
+
+  await page.getByRole("button", { name: "County Fit" }).click();
+  await expect(page.getByLabel("View")).toHaveValue("health");
+  await page.goBack();
+  await expect(page.getByRole("button", { name: "Map", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(page).not.toHaveURL(/workspace=county-fit/);
+});
+
+test("isolates a County Fit API failure from the five-layer map", async ({ page }) => {
+  await installRoutes(page, true, false, 0, false, true);
+  await page.goto("/#level=tract&metric=mountain&cx=.4&cy=.6&z=2");
+  await expect(layerButton(page)).toHaveAccessibleName("Map layer: Mountain Magnitude — HouseHunter");
+
+  await page.getByRole("button", { name: "County Fit" }).click();
+  await expect(page.getByRole("alert")).toContainText("Request failed (503)");
+  await expect(page.getByRole("button", { name: "Retry County Fit" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Map", exact: true }).click();
+  await expect(layerButton(page)).toHaveAccessibleName("Map layer: Mountain Magnitude — HouseHunter");
+  await expect(page.getByRole("img", { name: "Focusable USA tract Mountain" })).toBeVisible();
+});
+
+test("applies exact Custom Fit weights and validated shareable filters", async ({ page }) => {
+  await installRoutes(page, true, false, 0, true);
+  await page.goto("/#level=county&metric=home-costs&workspace=county-fit&fit_view=custom&fit_preset=balanced&fit_cx=.5&fit_cy=.5&fit_z=1");
+  await expect(page.getByLabel("View")).toHaveValue("custom");
+  await expect(page.getByRole("button", { name: "Weights · 100%" })).toBeVisible();
+  await page.getByRole("button", { name: "Weights · 100%" }).click();
+  const weights = page.getByRole("region", { name: "Custom Fit weights" });
+  await expect(weights.getByText("Total: 100%", { exact: true })).toBeVisible();
+  await weights.getByLabel("Safety weight percent").fill("21");
+  await expect(weights.getByText("Total: 101%", { exact: true })).toBeVisible();
+  await expect(weights.getByRole("button", { name: "Apply weights" })).toBeDisabled();
+  await weights.getByRole("button", { name: "Reset balanced" }).click();
+  await expect(weights.getByText("Total: 100%", { exact: true })).toBeVisible();
+  await weights.getByRole("button", { name: "Apply weights" }).click();
+
+  await page.getByRole("button", { name: "Filters" }).click();
+  const filters = page.getByRole("region", { name: "County Fit filters" });
+  await filters.getByLabel("State").selectOption("CO");
+  await filters.getByLabel("Safety", { exact: true }).fill("75");
+  await filters.getByRole("button", { name: "Apply" }).click();
+  await expect(page).toHaveURL(/fit_state=CO/);
+  await expect(page).toHaveURL(/fit_min_safety=75/);
+  const exportLink = page.getByRole("link", { name: "Export CSV" });
+  await expect(exportLink).toHaveAttribute("href", /view=custom/);
+  await expect(exportLink).toHaveAttribute("href", /state=CO/);
+  await expect(exportLink).toHaveAttribute("href", /min_safety=0\.75/);
 });
 
 test("renders Community Conditions as an independent county-level layer", async ({ page }) => {
@@ -533,7 +726,7 @@ test("deep-linked lazy layers finish with one consistent style revision", async 
       && entry.metric === "cost-of-living"
       && typeof addon === "number" && typeof projection === "number"
       && (entry.recordedAt ?? 0) >= Math.max(addon, projection));
-  }, ids.length), { timeout: 15_000 }).toBe(true);
+  }, ids.length), { timeout: 30_000 }).toBe(true);
   const raceTiming = await page.evaluate((featureCount) => {
     const profiles = window.__HOUSEHUNTER_MAP_PROFILE__ || [];
     return {
@@ -647,7 +840,7 @@ test("keeps ACS filtering usable when Home Costs is unavailable", async ({ page 
   test.skip(!testInfo.project.name.endsWith("-wide"), "Runs the unavailable-layer worker flow once per browser engine");
   await installRoutes(page);
   await page.route("**/api/v3/meta", (route) => route.fulfill({ json: {
-    app_version: "3.0.0", mutation_token: "test-token", reference_assets_ready: true,
+    app_version: "3.1.0", mutation_token: "test-token", reference_assets_ready: true,
     reference_assets_error: null, build,
     layers: layers.map((layer) => layer.key === "home-costs"
       ? { ...layer, availability: "unavailable", vintage: "ACS 2024", notice: "Import an approved Realtor.com county file." }

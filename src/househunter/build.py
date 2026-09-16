@@ -65,6 +65,7 @@ from .home_market import (
 from .housing_stock import HousingStockBundle, validate_housing_stock_assets
 from .ranking_reference import (
     CALIBRATION_ID,
+    HOMESCHOOL_NOTICE,
     METHODOLOGY_ID,
     RANKING_SIDECAR_COLUMNS,
     assemble_ranking_sidecar,
@@ -76,7 +77,8 @@ from .ranking_reference import (
 Progress = Callable[[int, str], None]
 Cancelled = Callable[[], bool]
 
-BUILD_SCHEMA_VERSION = 12
+BUILD_SCHEMA_VERSION = 13
+RANKING_SNAPSHOT_PIPELINE_VERSION = "county-fit-sidecar-v3"
 MOUNTAIN_RUNTIME_GEOGRAPHY_VERSION = "mountain_runtime_geography_v1"
 _CONNECTICUT_UNMATCHED_ZERO_POPULATION_TRACTS = frozenset(
     {"09001990000", "09007990100", "09009990000", "09011990100"}
@@ -290,10 +292,22 @@ def _build_ranking_sidecar(
     except (HouseHunterError, OSError, KeyError, TypeError, ValueError) as exc:
         return empty_ranking_sidecar(), {
             "available": False,
+            "readiness": "unavailable",
+            "reason_code": "bundle_missing_or_invalid",
             "methodology_id": METHODOLOGY_ID,
             "calibration_id": CALIBRATION_ID,
             "error": str(exc),
             "row_count": 0,
+            "available_pillars": [],
+            "local_history": {
+                "status": "missing",
+                "valid_months": 0,
+                "required_months": 9,
+                "commands": [
+                    "househunter import-home-market FILE --acknowledge-personal-use --history",
+                    "househunter build",
+                ],
+            },
         }
     try:
         housing = trailing_twelve_month_metrics(paths)
@@ -314,17 +328,77 @@ def _build_ranking_sidecar(
                 "sqft_for_1m_t12": pl.Float64,
             },
         )
-    sidecar = assemble_ranking_sidecar(bundle, county_scored, housing)
+    try:
+        sidecar = assemble_ranking_sidecar(bundle, county_scored, housing)
+    except (HouseHunterError, OSError, KeyError, TypeError, ValueError) as exc:
+        return empty_ranking_sidecar(), {
+            "available": False,
+            "readiness": "unavailable",
+            "reason_code": "snapshot_geography_incompatible",
+            "methodology_id": METHODOLOGY_ID,
+            "calibration_id": bundle.manifest["calibration_id"],
+            "bundle_schema_version": bundle.manifest["schema_version"],
+            "bundle_release": bundle.manifest["release_id"],
+            "vintages": bundle.manifest.get("vintages") or {},
+            "error": str(exc),
+            "row_count": 0,
+            "available_pillars": [],
+            "local_history": {
+                "status": "missing",
+                "valid_months": 0,
+                "required_months": 9,
+                "commands": [
+                    "househunter import-home-market FILE --acknowledge-personal-use --history",
+                    "househunter build",
+                ],
+            },
+        }
     if "preference_fit" in sidecar.columns or sidecar.columns != RANKING_SIDECAR_COLUMNS:
         raise HouseHunterError("Ranking sidecar must not persist a blended score")
+    valid_months = (
+        int(housing["housing_valid_months"].max() or 0)
+        if housing.height and "housing_valid_months" in housing.columns
+        else 0
+    )
+    history_ready = valid_months >= 9
+    public_pillars = [
+        pillar
+        for pillar, column in (
+            ("safety", "u_safety"),
+            ("health", "u_health"),
+            ("opportunity", "u_opportunity"),
+            ("lifestyle", "u_lifestyle"),
+            ("family", "u_family"),
+        )
+        if sidecar.height and sidecar[column].is_not_null().any()
+    ]
+    available_pillars = [*public_pillars, *(["affordability"] if history_ready else [])]
     return sidecar, {
         "available": sidecar.height > 0,
+        "readiness": "ready" if sidecar.height and history_ready else "partial",
+        "reason_code": None if history_ready else "home_market_history_insufficient",
         "methodology_id": METHODOLOGY_ID,
         "calibration_id": bundle.manifest["calibration_id"],
         "calibration_hash": bundle.manifest["calibration_hash"],
+        "bundle_schema_version": bundle.manifest["schema_version"],
+        "bundle_release": bundle.manifest["release_id"],
+        "source_lock_sha256": bundle.manifest["source_lock_sha256"],
         "scope": bundle.manifest["scope"],
         "vintages": bundle.manifest.get("vintages") or {},
         "row_count": sidecar.height,
+        "available_pillars": available_pillars,
+        "citations": bundle.citations,
+        "homeschool": bundle.homeschool,
+        "notices": [HOMESCHOOL_NOTICE],
+        "local_history": {
+            "status": "ready" if history_ready else "insufficient",
+            "valid_months": valid_months,
+            "required_months": 9,
+            "commands": [
+                "househunter import-home-market FILE --acknowledge-personal-use --history",
+                "househunter build",
+            ],
+        },
         "error": None,
     }
 
@@ -748,9 +822,7 @@ def _write_duckdb(
             "CREATE INDEX housing_stock_county_id_idx ON housing_stock_county(county_fips)"
         )
         if "ranking_counties" in tables:
-            connection.execute(
-                "CREATE INDEX ranking_counties_id_idx ON ranking_counties(place_id)"
-            )
+            connection.execute("CREATE INDEX ranking_counties_id_idx ON ranking_counties(place_id)")
         connection.execute(
             "CREATE TABLE build_metadata AS SELECT ? AS metadata_json",
             [json.dumps(metadata, sort_keys=True)],
@@ -800,17 +872,13 @@ def _hazard_values_are_valid(frame: pl.DataFrame) -> bool:
     invalid_bounded = pl.any_horizontal(
         [
             pl.col(column).is_not_null()
-            & (
-                ~pl.col(column).is_finite()
-                | ~pl.col(column).is_between(0, 100, closed="both")
-            )
+            & (~pl.col(column).is_finite() | ~pl.col(column).is_between(0, 100, closed="both"))
             for column in bounded_columns
         ]
     )
     invalid_nonnegative = pl.any_horizontal(
         [
-            pl.col(column).is_not_null()
-            & (~pl.col(column).is_finite() | (pl.col(column) < 0))
+            pl.col(column).is_not_null() & (~pl.col(column).is_finite() | (pl.col(column) < 0))
             for column in nonnegative_columns
         ]
     )
@@ -849,12 +917,9 @@ def _hazard_values_are_valid(frame: pl.DataFrame) -> bool:
         | invalid_aggregate_nulls
         | invalid_zero_percentile
     )
-    return (
-        invalid_rows.is_empty()
-        and all(
-            set(frame[column].drop_nulls().unique()).issubset(KNOWN_EAL_RATINGS)
-            for column in HAZARD_RATING_COLUMNS
-        )
+    return invalid_rows.is_empty() and all(
+        set(frame[column].drop_nulls().unique()).issubset(KNOWN_EAL_RATINGS)
+        for column in HAZARD_RATING_COLUMNS
     )
 
 
@@ -1116,7 +1181,14 @@ def build_snapshot(
         ranking_identity = ranking_bundle_identity(validate_ranking_assets().manifest)
     except (HouseHunterError, OSError, KeyError, TypeError, ValueError):
         ranking_identity = sha256_bytes(b"ranking-unavailable")
-    input_hashes["ranking_v2"] = str(ranking_identity)
+    input_hashes["ranking_v2"] = sha256_bytes(
+        canonical_json(
+            {
+                "bundle_release": str(ranking_identity),
+                "pipeline": RANKING_SNAPSHOT_PIPELINE_VERSION,
+            }
+        )
+    )
     bea_source_value = optional["bea_source"]
     bea_release = (
         bea_source_value["release_year"] if isinstance(bea_source_value, dict) else "unavailable"

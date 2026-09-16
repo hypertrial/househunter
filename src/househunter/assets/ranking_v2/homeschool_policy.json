@@ -1,4 +1,6 @@
 {
+  "approximate": true,
+  "compiled_on": "2026-09-16",
   "jurisdictions": {
     "AK": {
       "access_rights": 0.95,
@@ -817,11 +819,8 @@
       "utility": 0.82
     }
   },
-  "approximate": true,
-  "compiled_on": "2026-09-16",
   "methodology_id": "homeschool-policy-v1",
   "notice": "Approximate, project-authored policy preference rubric. It is not legal advice, a legal-compliance determination, school-quality evidence, or a recommendation. Laws and interpretations may change; verify current requirements with official state sources or qualified counsel.",
-  "source_check_scope": "Official-source link identity and cited-date presence only; no legal review, statutory interpretation, or currency determination was performed.",
   "official_sources": {
     "AK": "https://www.akleg.gov/basis/statutes.asp",
     "AL": "https://alison.legislature.state.al.us/code-of-alabama",
@@ -876,6 +875,7 @@
     "WY": "https://wyoleg.gov/statutes/compress/title21.pdf"
   },
   "schema": 1,
+  "source_check_scope": "Official-source link identity and cited-date presence only; no legal review, statutory interpretation, or currency determination was performed.",
   "weights": {
     "access_rights": 0.2,
     "instruction_testing_records": 0.35,

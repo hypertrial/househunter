@@ -7,7 +7,7 @@ import os
 import secrets
 import tempfile
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import urlencode, urlsplit
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
@@ -47,6 +47,7 @@ from .map_assets import (
     map_asset_status,
 )
 from .store import Store, _export_select_sql, current_build
+from .top_counties import PILLARS, PREFERENCE_NOTICE, evaluate_counties
 
 
 class JobRequest(BaseModel):
@@ -143,6 +144,123 @@ def _public_build_metadata(metadata: dict[str, object]) -> dict[str, object]:
     return public
 
 
+def _county_fit_readiness(metadata: dict[str, object]) -> dict[str, object]:
+    scope = metadata.get("scope")
+    if not isinstance(scope, dict) or scope.get("kind") != "national":
+        return {
+            "readiness": "unavailable",
+            "reason_code": "national_snapshot_required",
+            "methodology_id": "top-counties-v2",
+            "available_pillars": [],
+        }
+    ranking = metadata.get("ranking")
+    if not isinstance(ranking, dict):
+        return {
+            "readiness": "unavailable",
+            "reason_code": "ranking_metadata_missing",
+            "methodology_id": "top-counties-v2",
+            "available_pillars": [],
+        }
+    return {
+        key: ranking.get(key)
+        for key in (
+            "readiness",
+            "reason_code",
+            "methodology_id",
+            "calibration_id",
+            "bundle_schema_version",
+            "bundle_release",
+            "vintages",
+            "row_count",
+            "available_pillars",
+            "local_history",
+            "notices",
+        )
+    }
+
+
+def _county_fit_query(
+    build_id: Annotated[str, Query(min_length=1, max_length=128)],
+    view: Literal[
+        "safety",
+        "health",
+        "affordability",
+        "opportunity",
+        "lifestyle",
+        "family",
+        "family-autonomy",
+        "custom",
+        "custom-fit",
+    ] = "custom",
+    preset: str = "balanced",
+    weight_safety: float | None = Query(None, ge=0),
+    weight_health: float | None = Query(None, ge=0),
+    weight_affordability: float | None = Query(None, ge=0),
+    weight_opportunity: float | None = Query(None, ge=0),
+    weight_lifestyle: float | None = Query(None, ge=0),
+    weight_family: float | None = Query(None, ge=0),
+    state: Annotated[list[str] | None, Query()] = None,
+    exclude_state: Annotated[list[str] | None, Query()] = None,
+    exclude_appalachia: bool = False,
+    min_population: int | None = Query(None, ge=0),
+    min_active_listings: int | None = Query(None, ge=0),
+    min_valid_months: int | None = Query(None, ge=1, le=12),
+    min_jan_temp_f: float | None = None,
+    max_jan_temp_f: float | None = None,
+    min_jul_temp_f: float | None = None,
+    max_jul_temp_f: float | None = None,
+    max_extreme_heat_days: float | None = Query(None, ge=0),
+    max_extreme_cold_days: float | None = Query(None, ge=0),
+    min_safety: float | None = Query(None, ge=0, le=1),
+    min_health: float | None = Query(None, ge=0, le=1),
+    min_affordability: float | None = Query(None, ge=0, le=1),
+    min_opportunity: float | None = Query(None, ge=0, le=1),
+    min_lifestyle: float | None = Query(None, ge=0, le=1),
+    min_family: float | None = Query(None, ge=0, le=1),
+) -> dict[str, Any]:
+    supplied_weights = {
+        "safety": weight_safety,
+        "health": weight_health,
+        "affordability": weight_affordability,
+        "opportunity": weight_opportunity,
+        "lifestyle": weight_lifestyle,
+        "family": weight_family,
+    }
+    custom_weights = (
+        None if all(value is None for value in supplied_weights.values()) else supplied_weights
+    )
+    return {
+        "build_id": build_id,
+        "view": view,
+        "preset": preset,
+        "custom_weights": custom_weights,
+        "states": state or (),
+        "exclude_states": exclude_state or (),
+        "exclude_region": "appalachia" if exclude_appalachia else None,
+        "min_population": min_population,
+        "min_active_listings": min_active_listings,
+        "min_valid_months": min_valid_months,
+        "min_jan_temp_f": min_jan_temp_f,
+        "max_jan_temp_f": max_jan_temp_f,
+        "min_jul_temp_f": min_jul_temp_f,
+        "max_jul_temp_f": max_jul_temp_f,
+        "max_extreme_heat_days": max_extreme_heat_days,
+        "max_extreme_cold_days": max_extreme_cold_days,
+        "min_pillars": {
+            pillar: value
+            for pillar, value in {
+                "safety": min_safety,
+                "health": min_health,
+                "affordability": min_affordability,
+                "opportunity": min_opportunity,
+                "lifestyle": min_lifestyle,
+                "family": min_family,
+            }.items()
+            if value is not None
+        },
+    }
+
+
 def _with_live_home_market_staleness(metadata: dict[str, object]) -> dict[str, object]:
     """Refresh the time-varying stale flag without changing immutable build metadata."""
     sources = metadata.get("sources")
@@ -179,9 +297,11 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
     asset_root = asset_directory()
     assets = map_asset_status(asset_root)
     verified_manifest = load_manifest(asset_root, verify_files=False) if assets.ready else None
-    verified_assets = {
-        entry["filename"]: entry for entry in verified_manifest["files"]
-    } if verified_manifest else {}
+    verified_assets = (
+        {entry["filename"]: entry for entry in verified_manifest["files"]}
+        if verified_manifest
+        else {}
+    )
 
     @app.exception_handler(HouseHunterError)
     async def handle_househunter_error(_: Request, exc: HouseHunterError) -> JSONResponse:
@@ -214,12 +334,20 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
         }
         try:
             _, metadata = current_build(runtime)
-            metadata = _public_build_metadata(_with_live_home_market_staleness(metadata))
-            result["build"] = metadata
-            result["layers"] = metadata.get("layers", [])
+            metadata = _with_live_home_market_staleness(metadata)
+            result["county_fit"] = _county_fit_readiness(metadata)
+            public_metadata = _public_build_metadata(metadata)
+            result["build"] = public_metadata
+            result["layers"] = public_metadata.get("layers", [])
         except BuildNotFoundError:
             result["build"] = None
             result["layers"] = []
+            result["county_fit"] = {
+                "readiness": "unavailable",
+                "reason_code": "snapshot_missing_or_incompatible",
+                "methodology_id": "top-counties-v2",
+                "available_pillars": [],
+            }
         return result
 
     @app.get("/api/v3/map/scores", response_model=MapScores)
@@ -455,6 +583,234 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
         with Store(runtime) as store:
             return store.county_detail(store.resolve_county(stco_fips))
 
+    def county_fit_evaluation(query: dict[str, Any]):  # type: ignore[no-untyped-def]
+        try:
+            _, current_metadata = current_build(runtime)
+        except BuildNotFoundError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="County Fit needs a current schema-13 national snapshot",
+            ) from exc
+        if query["build_id"] != current_metadata.get("build_id"):
+            raise HTTPException(status_code=409, detail="County Fit build_id is stale")
+        scope = current_metadata.get("scope")
+        if not isinstance(scope, dict) or scope.get("kind") != "national":
+            raise HTTPException(status_code=409, detail="County Fit requires a national snapshot")
+        ranking = current_metadata.get("ranking")
+        if not isinstance(ranking, dict) or not ranking.get("available"):
+            raise HTTPException(
+                status_code=503,
+                detail=(ranking or {}).get("reason_code") or "County Fit bundle is unavailable",
+            )
+        normalized_view = (
+            str(query["view"]).replace("family-autonomy", "family").replace("custom-fit", "custom")
+        )
+        available = set(ranking.get("available_pillars") or [])
+        if normalized_view == "custom" and ranking.get("readiness") != "ready":
+            raise HTTPException(
+                status_code=503,
+                detail="Custom Fit requires at least nine approved housing-history months",
+            )
+        if normalized_view != "custom" and normalized_view not in available:
+            raise HTTPException(
+                status_code=503,
+                detail=f"County Fit pillar is unavailable: {normalized_view}",
+            )
+        try:
+            with Store(runtime, build_id=str(query["build_id"])) as store:
+                candidates = store.list_county_candidates()
+            evaluation = evaluate_counties(
+                candidates,
+                view=normalized_view,
+                preset=str(query["preset"]),
+                custom_weights=query["custom_weights"],
+                min_population=query["min_population"],
+                min_active_listings=query["min_active_listings"],
+                min_valid_months=query["min_valid_months"],
+                states=query["states"],
+                exclude_states=query["exclude_states"],
+                exclude_region=query["exclude_region"],
+                min_jan_temp_f=query["min_jan_temp_f"],
+                max_jan_temp_f=query["max_jan_temp_f"],
+                min_jul_temp_f=query["min_jul_temp_f"],
+                max_jul_temp_f=query["max_jul_temp_f"],
+                max_extreme_heat_days=query["max_extreme_heat_days"],
+                max_extreme_cold_days=query["max_extreme_cold_days"],
+                min_pillars=query["min_pillars"],
+                vintages=ranking.get("vintages") or {},
+                calibration_id=str(ranking.get("calibration_id") or ""),
+            )
+        except HouseHunterError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return current_metadata, ranking, candidates, evaluation
+
+    @app.get("/api/v3/county-fit")
+    def county_fit(
+        query: Annotated[dict[str, Any], Depends(_county_fit_query)],
+    ) -> dict[str, object]:
+        metadata, ranking, _, evaluation = county_fit_evaluation(query)
+        columns: dict[str, list[object]] = {
+            "county_fips": [],
+            "name": [],
+            "state": [],
+            "active_value": [],
+            "eligible": [],
+            "exclusion_reason": [],
+            "national_rank": [],
+            "filtered_rank": [],
+            "pareto_optimal": [],
+            **{f"u_{pillar}": [] for pillar in PILLARS},
+        }
+        for row in evaluation.rows:
+            columns["county_fips"].append(row.place_id)
+            columns["name"].append(row.name)
+            columns["state"].append(row.state)
+            columns["active_value"].append(row.active_value)
+            columns["eligible"].append(row.eligible)
+            columns["exclusion_reason"].append(row.exclusion_reason)
+            columns["national_rank"].append(row.national_rank)
+            columns["filtered_rank"].append(row.filtered_rank)
+            columns["pareto_optimal"].append(row.pareto_optimal)
+            for pillar in PILLARS:
+                columns[f"u_{pillar}"].append(row.pillars[pillar])
+        notices = list(dict.fromkeys([PREFERENCE_NOTICE, *(ranking.get("notices") or [])]))
+        return {
+            "schema_version": 1,
+            "build_id": metadata["build_id"],
+            "methodology_id": evaluation.methodology_id,
+            "calibration_id": evaluation.calibration_id,
+            "view": evaluation.view,
+            "preset": evaluation.preset,
+            "weights": evaluation.weights,
+            "gates": evaluation.gates,
+            "reference_count": evaluation.reference_count,
+            "national_count": evaluation.national_count,
+            "cohort_count": evaluation.filtered_count,
+            "exclusions": evaluation.exclusions,
+            "notices": notices,
+            "counties": columns,
+        }
+
+    @app.get("/api/v3/county-fit/counties/{fips}")
+    def county_fit_detail(
+        fips: str,
+        query: Annotated[dict[str, Any], Depends(_county_fit_query)],
+    ) -> dict[str, object]:
+        metadata, ranking, candidates, evaluation = county_fit_evaluation(query)
+        if len(fips) != 5 or not fips.isdigit():
+            raise HTTPException(status_code=404, detail="County Fit county is invalid")
+        source = next((row for row in candidates if row["place_id"] == fips), None)
+        result = next((row for row in evaluation.rows if row.place_id == fips), None)
+        if source is None or result is None:
+            raise HTTPException(status_code=404, detail="County Fit county was not found")
+        groups = {
+            "safety": (
+                "res_hazard_npctl",
+                "crime_violent_rate",
+                "crime_property_rate",
+                "crime_coverage",
+                "water_violation_share",
+                "public_water_coverage",
+                "water_allocation_coverage",
+            ),
+            "health": (
+                "provider_primary_care",
+                "provider_mental_health",
+                "provider_dental",
+                "community_context",
+            ),
+            "affordability": (
+                "sqft_for_1m_t12",
+                "rpp_index",
+                "rpp_geography_type",
+                "property_tax_rate",
+                "housing_valid_months",
+                "median_active_listings",
+            ),
+            "opportunity": (
+                "employment_growth",
+                "average_weekly_wage",
+                "commute_under_30_share",
+                "broadband_100_20",
+                "broadband_denominator_label",
+            ),
+            "lifestyle": (
+                "mountain_magnitude",
+                "jan_avg_temp_f",
+                "jul_avg_temp_f",
+                "extreme_heat_days",
+                "extreme_cold_days",
+                "climate_station_count",
+            ),
+            "family": ("homeschool_utility",),
+        }
+        rubric: object = None
+        limitations: list[object] = []
+        try:
+            rubric = json.loads(source.get("homeschool_rubric_json") or "null")
+            limitations = json.loads(source.get("limitations_json") or "[]")
+        except (TypeError, json.JSONDecodeError):
+            pass
+        statuses = {
+            key: value
+            for key, value in source.items()
+            if key.endswith("_status")
+            or key.endswith("_coverage")
+            or key.startswith("crime_violent_coverage_")
+            or key.startswith("crime_property_coverage_")
+            or key
+            in {
+                "water_boundary_provenance",
+                "water_overlap_duplicate_share_proxy",
+                "water_overlap_quality_status",
+                "broadband_denominator_label",
+                "climate_station_count",
+            }
+        }
+        return {
+            "schema_version": 1,
+            "build_id": metadata["build_id"],
+            "county": {"fips": fips, "name": result.name, "state": result.state},
+            "view": evaluation.view,
+            "active_value": result.active_value,
+            "eligible": result.eligible,
+            "exclusion_reason": result.exclusion_reason,
+            "national_rank": result.national_rank,
+            "filtered_rank": result.filtered_rank,
+            "pareto_optimal": result.pareto_optimal,
+            "weights": evaluation.weights,
+            "gates": evaluation.gates,
+            "pillars": {
+                pillar: {
+                    "utility": result.pillars[pillar],
+                    "weight": evaluation.weights[pillar],
+                    "contribution": (
+                        None
+                        if result.pillars[pillar] is None
+                        else result.pillars[pillar] * evaluation.weights[pillar]
+                    ),
+                    "measures": {key: source.get(key) for key in fields},
+                }
+                for pillar, fields in groups.items()
+            },
+            "subutilities": result.utilities,
+            "coverage": statuses,
+            "vintages": {
+                "bundle": ranking.get("vintages") or {},
+                "primary_care": source.get("provider_primary_care_vintage"),
+                "mental_health": source.get("provider_mental_health_vintage"),
+                "dental": source.get("provider_dental_vintage"),
+            },
+            "sources": {
+                "primary_care": source.get("provider_primary_care_source"),
+                "mental_health": source.get("provider_mental_health_source"),
+                "dental": source.get("provider_dental_source"),
+            },
+            "citations": ranking.get("citations") or {},
+            "rubric_components": rubric,
+            "limitations": list(dict.fromkeys([*limitations, *(ranking.get("notices") or [])])),
+        }
+
     def csv_export_for(table: Literal["places", "counties"], filename: str) -> StreamingResponse:
         def rows():  # type: ignore[no-untyped-def]
             with Store(runtime) as store:
@@ -540,6 +896,77 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
     @app.get("/api/v3/exports/counties.json")
     def counties_json_export() -> StreamingResponse:
         return json_export_for("counties", "househunter-counties.json")
+
+    @app.get("/api/v3/exports/county-fit.csv")
+    def county_fit_csv_export(
+        query: Annotated[dict[str, Any], Depends(_county_fit_query)],
+    ) -> StreamingResponse:
+        _, ranking, candidates, evaluation = county_fit_evaluation(query)
+        by_id = {str(row["place_id"]): row for row in candidates}
+        ordered = sorted(
+            (row for row in evaluation.rows if row.eligible),
+            key=lambda row: (row.filtered_rank or 0, row.place_id),
+        )
+        source_columns = (
+            [column for column in candidates[0] if column not in {"name", "state", "place_id"}]
+            if candidates
+            else []
+        )
+        header = [
+            "county_fips",
+            "name",
+            "state",
+            "view",
+            "active_value",
+            "eligible",
+            "exclusion_reason",
+            "national_rank",
+            "filtered_rank",
+            "pareto_optimal",
+            *source_columns,
+            "weights_json",
+            "vintages_json",
+            "notices_json",
+        ]
+
+        def rows():  # type: ignore[no-untyped-def]
+            buffer = io.StringIO()
+            writer = csv.writer(buffer)
+            writer.writerow(header)
+            yield buffer.getvalue()
+            for result in ordered:
+                source = by_id[result.place_id]
+                buffer.seek(0)
+                buffer.truncate(0)
+                writer.writerow(
+                    [
+                        result.place_id,
+                        result.name,
+                        result.state,
+                        evaluation.view,
+                        result.active_value,
+                        result.eligible,
+                        result.exclusion_reason,
+                        result.national_rank,
+                        result.filtered_rank,
+                        result.pareto_optimal,
+                        *(source.get(column) for column in source_columns),
+                        json.dumps(evaluation.weights, sort_keys=True),
+                        json.dumps(ranking.get("vintages") or {}, sort_keys=True),
+                        json.dumps(
+                            list(
+                                dict.fromkeys([PREFERENCE_NOTICE, *(ranking.get("notices") or [])])
+                            )
+                        ),
+                    ]
+                )
+                yield buffer.getvalue()
+
+        return StreamingResponse(
+            rows(),
+            media_type="text/csv",
+            headers={"Content-Disposition": 'attachment; filename="househunter-county-fit.csv"'},
+        )
 
     static = static_directory()
     if static.is_dir():

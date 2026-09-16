@@ -73,18 +73,78 @@ def validated_https_url(
     return url
 
 
-def validate_public_dns(url: str, *, label: str = "Source") -> None:
+def validate_public_dns(
+    url: str,
+    *,
+    label: str = "Source",
+    expected_addresses: frozenset[str] | None = None,
+) -> frozenset[str]:
     hostname = urlsplit(url).hostname
     if hostname is None:
         raise HouseHunterError(f"{label} hostname cannot be resolved")
     try:
-        addresses = {
+        addresses = frozenset(
             item[4][0] for item in socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)
-        }
+        )
     except OSError as exc:
         raise HouseHunterError(f"{label} hostname cannot be resolved") from exc
     if not addresses or any(not ipaddress.ip_address(value).is_global for value in addresses):
         raise HouseHunterError(f"{label} hostname resolves to a non-public address")
+    if expected_addresses is not None and addresses != expected_addresses:
+        raise HouseHunterError(f"{label} hostname addresses changed during acquisition")
+    return addresses
+
+
+def request_bounded_bytes(
+    client: httpx.Client,
+    url: str,
+    *,
+    allowed_hosts: set[str],
+    max_bytes: int,
+    label: str = "Source",
+    params: dict[str, str] | None = None,
+    expected_dns_addresses: frozenset[str] | None = None,
+    validate_dns: bool = True,
+) -> bytes:
+    """Fetch one bounded identity response with fail-closed host and DNS policy."""
+    if max_bytes <= 0:
+        raise HouseHunterError(f"{label} byte limit is invalid")
+    validated = validated_https_url(url, allowed_hosts, label=label)
+    if validate_dns:
+        validate_public_dns(
+            validated,
+            label=label,
+            expected_addresses=expected_dns_addresses,
+        )
+    with client.stream(
+        "GET",
+        validated,
+        params=params,
+        follow_redirects=False,
+        headers={"Accept-Encoding": "identity"},
+    ) as response:
+        if response.is_redirect:
+            raise HouseHunterError(f"{label} returned an unexpected redirect")
+        response.raise_for_status()
+        content_encoding = response.headers.get("content-encoding", "identity").lower()
+        if content_encoding not in {"", "identity"}:
+            raise HouseHunterError(f"{label} returned an encoded response")
+        content_length = response.headers.get("content-length")
+        if content_length is not None:
+            try:
+                declared_bytes = int(content_length)
+            except ValueError as exc:
+                raise HouseHunterError(f"{label} Content-Length is invalid") from exc
+            if declared_bytes <= 0 or declared_bytes > max_bytes:
+                raise HouseHunterError(f"{label} response size is outside its bound")
+        chunks = bytearray()
+        for chunk in response.iter_raw():
+            chunks.extend(chunk)
+            if len(chunks) > max_bytes:
+                raise HouseHunterError(f"{label} response size is outside its bound")
+    if not chunks:
+        raise HouseHunterError(f"{label} response size is outside its bound")
+    return bytes(chunks)
 
 
 def deny_restricted_data_class(value: object, *, label: str = "Source") -> None:
@@ -147,9 +207,7 @@ def extract_locked_archive(
     archive = source["archive"]
     final = _locked_archive_root(source, destination)
     members = {
-        str(item["path"]).rstrip("/"): item
-        for item in archive["members"]
-        if isinstance(item, dict)
+        str(item["path"]).rstrip("/"): item for item in archive["members"] if isinstance(item, dict)
     }
     expected_total = int(archive["total_uncompressed_size"])
     if expected_total != sum(int(item["size"]) for item in members.values()):
@@ -247,7 +305,12 @@ def download_locked_file(
             validated = validated_https_url(current, allowed_hosts, label=label)
             if validate_dns:
                 validate_public_dns(validated, label=label)
-            with http.stream("GET", validated, follow_redirects=False) as response:
+            with http.stream(
+                "GET",
+                validated,
+                follow_redirects=False,
+                headers={"Accept-Encoding": "identity"},
+            ) as response:
                 if response.is_redirect:
                     location = response.headers.get("location")
                     if not location or redirects >= MAX_REDIRECTS:
@@ -256,13 +319,16 @@ def download_locked_file(
                     redirects += 1
                     continue
                 response.raise_for_status()
+                content_encoding = response.headers.get("content-encoding", "identity").lower()
+                if content_encoding not in {"", "identity"}:
+                    raise HouseHunterError(f"{label} uses unsupported content encoding")
                 content_length = response.headers.get("content-length")
                 if content_length is not None and int(content_length) != expected_size:
                     raise HouseHunterError(f"{label} length differs from its lock")
                 received = 0
                 digest = hashlib.sha256()
                 with temporary.open("wb") as output:
-                    for chunk in response.iter_bytes(CHUNK_SIZE):
+                    for chunk in response.iter_raw(CHUNK_SIZE):
                         received += len(chunk)
                         if received > expected_size:
                             raise HouseHunterError(f"{label} stream is oversized")

@@ -1,8 +1,10 @@
 import { FormEvent, type KeyboardEvent as ReactKeyboardEvent, useCallback, useEffect, useRef, useState } from "react";
 import RiskMap, { type FocusTarget, type MapPreview } from "./RiskMap";
+import CountyFit, { writeCountyFitHash } from "./CountyFitWorkspace";
+import { COUNTY_FIT_PRESETS, EMPTY_COUNTY_FIT_FILTERS, readCountyFitHash } from "./countyFit";
 import { METRIC_UI, metricColorScale, mountainColor, readHash, scoreBand, scoreColor, STATE_ABBREVIATIONS, STATE_FIPS, type CameraState, type ScoreBand } from "./map";
 import { requestedMapAddons } from "./mapScores";
-import type { AddressConfirmation, AddressLookup, Geography, HazardPercentile, JobStatus, LayerDescriptor, LookupResult, MapFilters, MapScoreAddonKind, Meta, Metric, PlaceDetail, PlaceSummary, SourceDescriptor } from "./types";
+import type { AddressConfirmation, AddressLookup, Geography, HazardPercentile, JobStatus, LayerDescriptor, LookupResult, MapFilters, MapMetric, MapScoreAddonKind, Meta, Metric, PlaceDetail, PlaceSummary, SourceDescriptor } from "./types";
 
 export { scoreBand } from "./map";
 export type { ScoreBand } from "./map";
@@ -276,7 +278,7 @@ function ResultGroup({ title, items, metric, onChoose, onBrowse }: { title: stri
     : <p className="empty-copy">No ranked geographies</p>}</section>;
 }
 
-function Workspace({ meta }: { meta: Meta }) {
+function Workspace({ meta, active, onCountyFit }: { meta: Meta; active: boolean; onCountyFit: () => void }) {
   const builtState = meta.build?.scope.kind === "state" ? meta.build.scope.state || "" : "";
   const initialState = builtState || initial.state;
   const initialPlace = !builtState || initial.place.startsWith(STATE_FIPS[builtState as keyof typeof STATE_FIPS] || "-")
@@ -365,10 +367,10 @@ function Workspace({ meta }: { meta: Meta }) {
   const setDraftFilter = <Key extends keyof MapFilters>(key: Key, value: MapFilters[Key]) => {
     setDraftFilters((current) => ({ ...current, [key]: value }));
   };
-  const mapVisibleCommit = useCallback((committedMetric: Metric) => {
+  const mapVisibleCommit = useCallback((committedMetric: MapMetric) => {
     if (committedMetric === selectedMetric.current) setRenderedMetric(committedMetric);
   }, []);
-  const mapInteractiveCommit = useCallback((committedMetric: Metric) => {
+  const mapInteractiveCommit = useCallback((committedMetric: MapMetric) => {
     if (committedMetric === selectedMetric.current) setInteractiveMetric(committedMetric);
   }, []);
   const mapScoresReady = useCallback((count: number) => {
@@ -466,6 +468,7 @@ function Workspace({ meta }: { meta: Meta }) {
   }, []);
 
   const writeHash = useCallback((mode: "push" | "replace") => {
+    if (!active) return;
     const params = new URLSearchParams({ level, metric });
     if (state) params.set("state", state);
     if (level === "tract" && county) params.set("county", county);
@@ -478,7 +481,7 @@ function Workspace({ meta }: { meta: Meta }) {
     if (housingBuilt2000PlusPctMin !== null) params.set("housing_built_2000_plus_pct_min", String(housingBuilt2000PlusPctMin));
     params.set("cx", camera.current.cx.toFixed(4)); params.set("cy", camera.current.cy.toFixed(4)); params.set("z", camera.current.z.toFixed(3));
     window.history[mode === "push" ? "pushState" : "replaceState"](null, "", `#${params}`);
-  }, [communityConditionsGroupMax, costOfLivingIndexMax, county, homeSqftFor1mMin, housingBuilt2000PlusPctMin, level, metric, mountainMagnitudeMin, selected, showUnranked, state]);
+  }, [active, communityConditionsGroupMax, costOfLivingIndexMax, county, homeSqftFor1mMin, housingBuilt2000PlusPctMin, level, metric, mountainMagnitudeMin, selected, showUnranked, state]);
   useEffect(() => {
     if (firstSemantic.current) firstSemantic.current = false;
     else if (restoringHistory.current) restoringHistory.current = false;
@@ -499,6 +502,7 @@ function Workspace({ meta }: { meta: Meta }) {
 
   useEffect(() => {
     const restore = () => {
+      if (!active || new URLSearchParams(window.location.hash.replace(/^#/, "")).get("workspace") === "county-fit") return;
       invalidateAddressLookup();
       const parsed = readHash(window.location.hash);
       const nextState = builtState || parsed.state;
@@ -525,7 +529,7 @@ function Workspace({ meta }: { meta: Meta }) {
     };
     window.addEventListener("popstate", restore);
     return () => window.removeEventListener("popstate", restore);
-  }, [builtState]);
+  }, [active, builtState]);
 
   useEffect(() => {
     setDetail(null); setDetailError("");
@@ -726,9 +730,10 @@ function Workspace({ meta }: { meta: Meta }) {
           : metric === "cost-of-living" ? preview.score.cost_of_living_index === null ? "Cost of Living unavailable" : `${preview.score.cost_of_living_index.toFixed(1)} RPP · County assignment`
             : preview.score.home_sqft_for_1m === null ? "Home Costs unavailable" : `${number.format(preview.score.home_sqft_for_1m)} sq ft / $1M · ${preview.score.home_buying_power_percentile?.toFixed(1) ?? "–"}th pct`;
   return <main className="map-shell">
-    <RiskMap manifestUrl={meta.map_assets.manifest_url} scoreUrl={`/api/v3/map/scores/core?level=${level}`} expectedBuildId={meta.build?.build_id || ""} level={level} metric={metric} displayMetric={renderedMetric} busy={mapUpdating} selected={selected} filters={filters} neutralOnly={Boolean(scoreError)} retryGeneration={scoreReloadNonce} addonRetry={addonRetry} focusTarget={focusTarget} cameraTarget={cameraTarget} initialCamera={initial.camera} onSelect={selectFromMap} onPreview={setPreview} onCamera={cameraChanged} onStatus={setStatus} onScoresReady={mapScoresReady} onScoreError={mapScoreFailed} onAddonError={mapAddonFailed} onAddonReady={mapAddonReady} onVisibleCommit={mapVisibleCommit} onInteractiveCommit={mapInteractiveCommit} />
+    <RiskMap active={active} manifestUrl={meta.map_assets.manifest_url} scoreUrl={`/api/v3/map/scores/core?level=${level}`} expectedBuildId={meta.build?.build_id || ""} level={level} metric={metric} displayMetric={renderedMetric} busy={mapUpdating} selected={selected} filters={filters} neutralOnly={Boolean(scoreError)} retryGeneration={scoreReloadNonce} addonRetry={addonRetry} focusTarget={focusTarget} cameraTarget={cameraTarget} initialCamera={initial.camera} onSelect={selectFromMap} onPreview={setPreview} onCamera={cameraChanged} onStatus={setStatus} onScoresReady={mapScoresReady} onScoreError={mapScoreFailed} onAddonError={mapAddonFailed} onAddonReady={mapAddonReady} onVisibleCommit={mapVisibleCommit} onInteractiveCommit={mapInteractiveCommit} />
     <header className={`top-dock${overlay ? " overlay-open" : ""}`}>
       <div className="brand"><strong>HouseHunter</strong><span>{METRIC_UI[metric].source}</span></div>
+      <div className="workspace-toggle" aria-label="Workspace"><button aria-pressed="true">Map</button><button onClick={onCountyFit}>County Fit</button></div>
       <div className="level-toggle" aria-label="Geography level"><button aria-pressed={level === "tract"} onClick={() => switchLevel("tract")}>Tracts</button><button aria-pressed={level === "county"} onClick={() => switchLevel("county")}>Counties</button></div>
       <div className="layer-menu" ref={layerMenu} onBlur={dismissLayerMenuOnBlur}>
         <span className="layer-label">Layer</span>
@@ -761,14 +766,53 @@ function Workspace({ meta }: { meta: Meta }) {
 
 function App() {
   const [meta, setMeta] = useState<Meta | null>(null); const [error, setError] = useState("");
+  const [workspace, setWorkspace] = useState<"map" | "county-fit">(() => readCountyFitHash(window.location.hash) ? "county-fit" : "map");
+  const [countyFitOpened, setCountyFitOpened] = useState(workspace === "county-fit");
   const load = useCallback(() => { setError(""); void json<Meta>("/api/v3/meta").then(setMeta).catch((caught) => setError((caught as Error).message)); }, []);
   useEffect(load, [load]);
+  useEffect(() => {
+    const restoreWorkspace = () => {
+      const next = readCountyFitHash(window.location.hash) ? "county-fit" : "map";
+      setWorkspace(next);
+      if (next === "county-fit") setCountyFitOpened(true);
+    };
+    window.addEventListener("popstate", restoreWorkspace);
+    return () => window.removeEventListener("popstate", restoreWorkspace);
+  }, []);
   if (!meta) return <main className="map-shell boot"><div className="boot-copy" role={error ? "alert" : "status"}>{error || "Opening HouseHunter map…"}{error && <button onClick={load}>Retry</button>}</div></main>;
   const mapAssets = meta.map_assets || { ready: false, error: "Map asset status is missing", schema_version: null, release: null, manifest_url: "/map-assets/manifest.json" };
   if (!mapAssets.ready) return <main className="map-shell"><RiskMap manifestUrl={mapAssets.manifest_url} scoreUrl="/api/v3/map/scores?level=tract" expectedBuildId="" level="tract" selected="" filters={EMPTY_FILTERS} neutralOnly focusTarget={null} initialCamera={initial.camera} onSelect={() => undefined} onPreview={() => undefined} onCamera={() => undefined} onStatus={() => undefined} /><div className="asset-repair" role="alert"><h1>Map boundaries need repair</h1><p>{mapAssets.error}</p><p>Run <code>uv run python scripts/generate_map_assets.py</code> from the HouseHunter checkout, then restart the app.</p></div></main>;
   const readyMeta = { ...meta, map_assets: mapAssets };
   if (!meta.build) return <main className="map-shell"><RiskMap manifestUrl={mapAssets.manifest_url} scoreUrl="/api/v3/map/scores?level=tract" expectedBuildId="" level="tract" selected="" filters={EMPTY_FILTERS} neutralOnly focusTarget={null} initialCamera={initial.camera} onSelect={() => undefined} onPreview={() => undefined} onCamera={() => undefined} onStatus={() => undefined} /><header className="top-dock"><div className="brand"><strong>HouseHunter</strong><span>Residential Hazard Exposure</span></div><div className="build-pill">Setup required</div></header><Setup token={meta.mutation_token} onReady={load} /><div className="legend"><p><strong>Residential Hazard Exposure</strong> · higher is worse · not property-level risk</p></div></main>;
-  return <Workspace meta={readyMeta} />;
+  const openCountyFit = () => {
+    const params = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+    if (countyFitOpened && params.has("fit_view")) {
+      params.set("workspace", "county-fit");
+      window.history.pushState(null, "", `#${params}`);
+    } else {
+      const mapState = readHash(window.location.hash);
+      writeCountyFitHash("push", {
+        view: meta.county_fit.readiness === "ready" ? "custom" : "safety",
+        preset: "balanced",
+        weights: { ...COUNTY_FIT_PRESETS.balanced },
+        filters: { ...EMPTY_COUNTY_FIT_FILTERS },
+        selected: "",
+        camera: mapState.camera,
+      });
+    }
+    setCountyFitOpened(true);
+    setWorkspace("county-fit");
+  };
+  const openMap = () => {
+    const params = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+    params.delete("workspace");
+    window.history.pushState(null, "", `#${params}`);
+    setWorkspace("map");
+  };
+  return <>
+    <div className={`workspace-surface${workspace === "map" ? " active" : " inactive"}`} aria-hidden={workspace !== "map"}><Workspace meta={readyMeta} active={workspace === "map"} onCountyFit={openCountyFit} /></div>
+    {countyFitOpened && <div className={`workspace-surface${workspace === "county-fit" ? " active" : " inactive"}`} aria-hidden={workspace !== "county-fit"}><CountyFit meta={readyMeta} active={workspace === "county-fit"} onMap={openMap} /></div>}
+  </>;
 }
 
 export default App;

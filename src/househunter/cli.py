@@ -34,9 +34,7 @@ from .top_counties import (
 
 app = typer.Typer(no_args_is_help=True, pretty_exceptions_show_locals=False)
 mountain_app = typer.Typer(no_args_is_help=True, pretty_exceptions_show_locals=False)
-app.add_typer(
-    mountain_app, name="mountain", help="Build and inspect Mountain Magnitude releases."
-)
+app.add_typer(mountain_app, name="mountain", help="Build and inspect Mountain Magnitude releases.")
 
 
 def _paths() -> RuntimePaths:
@@ -922,8 +920,7 @@ def rank(
         typer.Option(
             "--metric",
             help=(
-                "residential-hazard, community-conditions, mountain, cost-of-living, "
-                "or home-costs"
+                "residential-hazard, community-conditions, mountain, cost-of-living, or home-costs"
             ),
         ),
     ] = "residential-hazard",
@@ -1068,6 +1065,14 @@ def top_counties(
             help="balanced, safety-health, affordability, or mountain-lifestyle",
         ),
     ] = "balanced",
+    weight_safety: Annotated[float | None, typer.Option("--weight-safety", min=0)] = None,
+    weight_health: Annotated[float | None, typer.Option("--weight-health", min=0)] = None,
+    weight_affordability: Annotated[
+        float | None, typer.Option("--weight-affordability", min=0)
+    ] = None,
+    weight_opportunity: Annotated[float | None, typer.Option("--weight-opportunity", min=0)] = None,
+    weight_lifestyle: Annotated[float | None, typer.Option("--weight-lifestyle", min=0)] = None,
+    weight_family: Annotated[float | None, typer.Option("--weight-family", min=0)] = None,
     limit: Annotated[int, typer.Option("--limit", min=1, max=500)] = 10,
     as_json: Annotated[bool, typer.Option("--json", help="Print JSON")] = False,
     min_population: Annotated[int, typer.Option("--min-population")] = 25_000,
@@ -1089,12 +1094,8 @@ def top_counties(
     max_jan_temp_f: Annotated[float | None, typer.Option("--max-jan-temp-f")] = None,
     min_jul_temp_f: Annotated[float | None, typer.Option("--min-jul-temp-f")] = None,
     max_jul_temp_f: Annotated[float | None, typer.Option("--max-jul-temp-f")] = None,
-    max_extreme_heat_days: Annotated[
-        float | None, typer.Option("--max-extreme-heat-days")
-    ] = None,
-    max_extreme_cold_days: Annotated[
-        float | None, typer.Option("--max-extreme-cold-days")
-    ] = None,
+    max_extreme_heat_days: Annotated[float | None, typer.Option("--max-extreme-heat-days")] = None,
+    max_extreme_cold_days: Annotated[float | None, typer.Option("--max-extreme-cold-days")] = None,
     min_safety: Annotated[float | None, typer.Option("--min-safety")] = None,
     min_health: Annotated[float | None, typer.Option("--min-health")] = None,
     min_affordability: Annotated[float | None, typer.Option("--min-affordability")] = None,
@@ -1116,6 +1117,17 @@ def top_counties(
             }.items()
             if value is not None
         }
+        supplied_weights = {
+            "safety": weight_safety,
+            "health": weight_health,
+            "affordability": weight_affordability,
+            "opportunity": weight_opportunity,
+            "lifestyle": weight_lifestyle,
+            "family": weight_family,
+        }
+        custom_weights = (
+            None if all(value is None for value in supplied_weights.values()) else supplied_weights
+        )
         with Store(_paths()) as store:
             require_complete_national_snapshot(store.metadata)
             candidates = store.list_county_candidates()
@@ -1124,6 +1136,7 @@ def top_counties(
             ranking = rank_counties(
                 candidates,
                 preset=preset,
+                custom_weights=custom_weights,
                 limit=limit,
                 min_population=min_population,
                 min_active_listings=min_active_listings,
@@ -1299,9 +1312,7 @@ def run_app(
     if not no_open:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     typer.echo(f"HouseHunter is running at {url}")
-    uvicorn.run(
-        create_app(_paths()), host="127.0.0.1", port=port, log_level="info", lifespan="off"
-    )
+    uvicorn.run(create_app(_paths()), host="127.0.0.1", port=port, log_level="info", lifespan="off")
 
 
 if __name__ == "__main__":

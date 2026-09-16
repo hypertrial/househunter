@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import polars as pl
 import pytest
 from ranking_fixtures import install_ranking_fixture
 from test_build_store import _install_dimension_fixture, _promote_mountain_fixture
@@ -462,6 +463,34 @@ def test_top_counties_requires_available_optional_layers(
     assert "PRESET" not in ranked.output
 
 
+def test_top_counties_rejects_partial_housing_readiness_with_recovery_commands(
+    fixture_environment: tuple[RuntimePaths, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, root = fixture_environment
+    _install_dimension_fixture(monkeypatch)
+    _promote_mountain_fixture(paths, root)
+    install_ranking_fixture(
+        monkeypatch,
+        root,
+        housing=pl.DataFrame(
+            {
+                "county_fips": ["01001", "02001"],
+                "housing_valid_months": [1, 1],
+                "median_active_listings": [150.0, 220.0],
+                "median_ppsf": [1000.0, 500.0],
+                "sqft_for_1m_t12": [1000.0, 2000.0],
+            }
+        ),
+    )
+    runner = CliRunner()
+    built = runner.invoke(app, ["build"])
+    assert built.exit_code == 0, built.output
+    result = runner.invoke(app, ["top-counties", "--json"])
+    assert result.exit_code == 1, result.output
+    assert "import-home-market FILE --acknowledge-personal-use --history" in result.output
+    assert "househunter build" in result.output
+
+
 def test_top_counties_rejects_state_scoped_snapshots(
     fixture_environment: tuple[RuntimePaths, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -497,7 +526,7 @@ def test_top_counties_refuses_schema_11_snapshot(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(cli_module, "Store", FakeStore)
     result = CliRunner().invoke(app, ["top-counties"])
     assert result.exit_code == 1, result.output
-    assert "schema 12" in result.output
+    assert "schema 13" in result.output
     assert "RANK" not in result.output
     assert "01001" not in result.output
 
@@ -597,6 +626,43 @@ def test_top_counties_json_includes_utilities_and_weights(
         "family",
     }
     assert "preference_fit" not in first["values"]
+
+
+def test_top_counties_accepts_only_complete_exact_custom_weights(
+    fixture_environment: tuple[RuntimePaths, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, runner = _complete_national_snapshot(fixture_environment, monkeypatch)
+    flags = [
+        "--weight-safety", "0.40",
+        "--weight-health", "0.20",
+        "--weight-affordability", "0.10",
+        "--weight-opportunity", "0.10",
+        "--weight-lifestyle", "0.10",
+        "--weight-family", "0.10",
+    ]
+    result = runner.invoke(app, ["top-counties", "--json", *flags])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["preset"] == "custom"
+    assert payload["weights"] == {
+        "safety": 0.4,
+        "health": 0.2,
+        "affordability": 0.1,
+        "opportunity": 0.1,
+        "lifestyle": 0.1,
+        "family": 0.1,
+    }
+
+    partial = runner.invoke(app, ["top-counties", "--weight-safety", "1"])
+    assert partial.exit_code == 1
+    assert "all six pillars" in partial.output
+
+    wrong_total = runner.invoke(
+        app,
+        ["top-counties", *flags[:-1], "0.11"],
+    )
+    assert wrong_total.exit_code == 1
+    assert "exactly 1" in wrong_total.output
 
 
 def test_top_counties_tiny_cohort_is_warned_not_silent_top_ten(

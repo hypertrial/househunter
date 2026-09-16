@@ -78,6 +78,10 @@ export const MOUNTAIN_COLOR_SCALE = MOUNTAIN_BAND_COLORS;
 export const COUNTY_MOUNTAIN_COLOR_SCALE = MOUNTAIN_BAND_COLORS.slice(0, 9);
 export const COST_OF_LIVING_COLOR_SCALE = colorScale(HAZARD_ANCHORS);
 export const HOME_COSTS_COLOR_SCALE = colorScale([...HAZARD_ANCHORS].reverse());
+export const COUNTY_FIT_COLOR_SCALE = colorScale([
+  "#5f6770", "#4f7180", "#3f8790", "#58a184", "#91b765", "#d2bd55", "#f0d98b",
+]);
+export const COUNTY_FIT_GRADIENT = gradient(COUNTY_FIT_COLOR_SCALE);
 
 export const METRIC_COLOR_SCALES = {
   "residential-hazard": {
@@ -171,6 +175,15 @@ export function costOfLivingColor(value: number | null): string | null {
 
 export function homeBuyingPowerColor(value: number | null): string | null {
   return scaleColor(value, METRIC_COLOR_SCALES["home-costs"]);
+}
+
+export function countyFitColor(value: number | null): string | null {
+  return scaleColor(value, {
+    minimum: 0,
+    maximum: 1,
+    distinguishAt: [],
+    colors: COUNTY_FIT_COLOR_SCALE,
+  });
 }
 
 function scaleColor(

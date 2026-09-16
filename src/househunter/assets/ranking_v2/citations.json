@@ -1,0 +1,15 @@
+{
+  "broadband": "FCC 2025-12 \u2014 https://help.bdc.fcc.gov/hc/en-us/articles/10467446103579-How-to-Use-the-FCC-s-National-Broadband-Map",
+  "climate": "NOAA 1991-2020 v1.0.1 \u2014 https://www.ncei.noaa.gov/products/land-based-station/us-climate-normals; Census 2025 \u2014 https://www.census.gov/programs-surveys/geography/guidance/tiger-data-products-guide.html",
+  "community_context": "County Health Rankings & Roadmaps 2025 \u2014 https://www.countyhealthrankings.org/health-data/methodology-and-sources/data-documentation",
+  "crime": "FBI 2023-2025 \u2014 https://cde.ucr.cjis.gov/LATEST/webapp/",
+  "employment": "BLS 2024 final \u2014 https://www.bls.gov/bls/linksite.htm; BLS 2025 final \u2014 https://www.bls.gov/bls/linksite.htm; Census ACS 2024 ACS 5-year \u2014 https://www.census.gov/about/policies/open-gov/open-data.html",
+  "hazard": "FEMA v1.20 \u2014 https://hazards.fema.gov/nri/data-resources",
+  "healthcare": "HRSA 2024-2025 \u2014 https://data.hrsa.gov/data/download; County Health Rankings & Roadmaps 2025 supplemental 2026-03 \u2014 https://www.countyhealthrankings.org/health-data/methodology-and-sources/data-documentation",
+  "homeschool": "HouseHunter 2026-09-16 \u2014 https://usa.gov/state-governments",
+  "mountain": "HouseHunter 95e0f7fba44f7309 \u2014 https://www.usgs.gov/the-national-map-data-delivery",
+  "population": "Census 2025 \u2014 https://www.census.gov/about/policies/open-gov/open-data.html",
+  "property_tax": "Census ACS 2024 ACS 5-year \u2014 https://www.census.gov/about/policies/open-gov/open-data.html",
+  "rpp": "BEA 2024 \u2014 https://www.bea.gov/open-data; BEA 2024 \u2014 https://www.bea.gov/open-data; OMB/Census OMB Bulletin No. 23-01 \u2014 https://www.whitehouse.gov/omb/information-for-agencies/bulletins/",
+  "water": "EPA 2026Q2 submission data acquired 2026-09-14 \u2014 https://echo.epa.gov/tools/data-downloads/sdwa-download-summary; EPA 2.1 \u2014 https://www.epa.gov/ground-water-and-drinking-water/public-water-system-service-areas"
+}

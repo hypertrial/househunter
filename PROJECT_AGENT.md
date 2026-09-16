@@ -38,9 +38,10 @@ Costs uses a manually imported, approved county asking-market release; square fe
 $1M and its national county percentile are higher-is-better and inherited by tracts.
 ACS 2024 housing-stock estimates are direct at tract/county grain. Never blend these
 dimensions into the map, `househunter rank`, snapshot fields, or HTTP payloads.
-`househunter top-counties` is the only explicit exception: a named, non-persisted
-`top-counties-v2` weighted-utility preference-fit over the schema-12 ranking sidecar.
-Do not imply tract-level
+`househunter top-counties` and the explicit County Fit workspace/API/export are the
+only exceptions: they expose a named, request-scoped `top-counties-v2`
+weighted-utility preference-fit over the schema-13 ranking data. The fit is never
+written back to the snapshot or ordinary map/place/county contracts. Do not imply tract-level
 BEA/market precision, substitute ACS home value, or describe asking-market indicators
 as sales, valuations, or total ownership costs.
 
@@ -74,12 +75,17 @@ approval. Use the local verification commands below.
   also never contacts Realtor.com. FEMA tract/county and CHR&R county layers are
   required; BEA RPP and the local home-market import are optional and fail open with
   explicit statuses.
-- Runtime snapshots are schema 12, map-score payloads are schema 5, and public HTTP
+- Runtime snapshots are schema 13, map-score payloads remain schema 5, and public HTTP
   routes are `/api/v3` only. `/api/v1` and `/api/v2` remain unsupported. Public
   artifacts use `res_hazard_npctl` and `mountain_magnitude`; do not add legacy score
-  aliases or cap stored magnitudes. Ranking sidecar fields, ranking calibration
-  metadata, and preference-fit never appear in map or `/api/v3` payloads,
-  including `/api/v3/meta`.
+  aliases or cap stored magnitudes. Ranking fields, calibration metadata, and
+  preference-fit may appear only in `/api/v3/meta`'s sanitized `county_fit` readiness,
+  `/api/v3/county-fit`, `/api/v3/county-fit/counties/{fips}`, and
+  `/api/v3/exports/county-fit.csv`; they remain absent from ordinary map, place,
+  county, and persisted blended-score payloads. `/api/v3/top-counties` stays absent.
+- Ordinary setup and browser/runtime requests never contact Ranking v2 agencies.
+  Maintainer source dumps, service-area geometry, Census blocks, FBI responses,
+  credentials, and private Realtor.com rows remain under ignored `data/` paths.
 - Keep the compatible full map-score endpoint. The browser uses the build-bound core
   plus lazy Cost and Home/ACS add-ons to preserve the initial payload envelope. Never
   weaken the 5.7 MB decoded, 1.3 MB gzip, or existing interaction thresholds.

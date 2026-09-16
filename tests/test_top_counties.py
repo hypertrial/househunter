@@ -7,11 +7,15 @@ import pytest
 from househunter.errors import HouseHunterError
 from househunter.top_counties import (
     LAYER_PREP,
+    PILLARS,
     PRESETS,
     REQUIRED_LAYERS,
     average_tie_percentile,
+    evaluate_counties,
+    pareto_optimal,
     rank_counties,
     require_complete_national_snapshot,
+    resolve_weights,
 )
 
 
@@ -87,6 +91,23 @@ def test_presets_match_approved_weights() -> None:
         assert abs(sum(weights) - 1.0) < 1e-12
 
 
+def test_custom_weight_total_honors_the_exact_tolerance_boundary() -> None:
+    def weights(total: str) -> dict[str, float]:
+        return {
+            "safety": float(total),
+            "health": 0.0,
+            "affordability": 0.0,
+            "opportunity": 0.0,
+            "lifestyle": 0.0,
+            "family": 0.0,
+        }
+
+    resolve_weights(None, weights("1.0000000000009"))
+    resolve_weights(None, weights("1.000000000001"))
+    with pytest.raises(HouseHunterError, match="exactly 1"):
+        resolve_weights(None, weights("1.0000000000011"))
+
+
 def test_additive_score_prefers_higher_pillar_utilities() -> None:
     safer = _county("08013", u_safety=0.95, u_health=0.9, name="Boulder")
     worse = _county("08031", u_safety=0.1, u_health=0.1, name="Worse")
@@ -139,9 +160,7 @@ def test_national_rank_is_assigned_before_eligibility_gates() -> None:
     assert ranking.items[0].place_id == "02001"
     assert ranking.items[0].national_rank == 2
     assert ranking.items[0].filtered_rank == 1
-    stricter = rank_counties(
-        [small_leader, large_follower], min_population=50_000, limit=10
-    )
+    stricter = rank_counties([small_leader, large_follower], min_population=50_000, limit=10)
     assert stricter.items[0].national_rank == 2
 
 
@@ -169,7 +188,62 @@ def test_threshold_edges() -> None:
     ranking = rank_counties([under_crime, at_crime], limit=10)
     assert ranking.eligible_count == 1
     assert ranking.items[0].place_id == "02001"
-    assert ranking.exclusions["missing_core"] == 1
+    assert ranking.exclusions["crime_coverage"] == 1
+
+
+def test_pillar_views_need_only_the_active_pillar_and_no_implicit_size_gates() -> None:
+    row = _county(
+        "01001",
+        population=1,
+        months=1,
+        listings=1,
+        u_safety=0.8,
+        u_health=None,  # type: ignore[arg-type]
+        u_affordability=None,  # type: ignore[arg-type]
+        u_opportunity=None,  # type: ignore[arg-type]
+        u_lifestyle=None,  # type: ignore[arg-type]
+        u_family=None,  # type: ignore[arg-type]
+    )
+    safety = evaluate_counties([row], view="safety")
+    assert safety.filtered_count == 1
+    assert safety.rows[0].eligible is True
+    assert safety.rows[0].active_value == 0.8
+    assert safety.rows[0].pareto_optimal is None
+    assert safety.gates["min_population"] is None
+    assert safety.gates["min_valid_months"] is None
+    assert safety.gates["min_active_listings"] is None
+
+    gated = evaluate_counties([row], view="safety", min_population=25_000)
+    assert gated.rows[0].exclusion_reason == "population"
+
+
+def test_county_fit_exclusion_precedence_is_stable() -> None:
+    missing = _county("01001", u_health=None)  # type: ignore[arg-type]
+    crime = _county("02001", crime_coverage=0.899, population=1, months=1, listings=1)
+    population = _county("04001", population=24_999, months=1, listings=1)
+    months = _county("05001", months=8, listings=1)
+    listings = _county("06001", listings=99)
+    state = _county("08013", state="CO")
+    climate = _county("09001", state="CT", jan_avg_temp_f=20.0)
+    pillar = _county("10001", state="DE", u_safety=0.4)
+    evaluation = evaluate_counties(
+        [missing, crime, population, months, listings, state, climate, pillar],
+        view="custom",
+        states=["CT", "DE"],
+        min_jan_temp_f=25.0,
+        min_pillars={"safety": 0.5},
+    )
+    reasons = {row.place_id: row.exclusion_reason for row in evaluation.rows}
+    assert reasons == {
+        "01001": "missing_core",
+        "02001": "crime_coverage",
+        "04001": "population",
+        "05001": "valid_months",
+        "06001": "active_listings",
+        "08013": "state_filter",
+        "09001": "climate",
+        "10001": "min_safety",
+    }
 
 
 def test_ties_break_by_county_fips() -> None:
@@ -250,6 +324,30 @@ def test_climate_and_pillar_gates() -> None:
     assert [item.place_id for item in pillar.items] == ["02001"]
 
 
+def test_climate_and_pillar_threshold_equality_is_inclusive() -> None:
+    row = _county(
+        "01001",
+        jan_avg_temp_f=20.0,
+        jul_avg_temp_f=80.0,
+        extreme_heat_days=10.0,
+        extreme_cold_days=40.0,
+        u_safety=0.5,
+    )
+    evaluation = evaluate_counties(
+        [row],
+        view="safety",
+        min_jan_temp_f=20.0,
+        max_jan_temp_f=20.0,
+        min_jul_temp_f=80.0,
+        max_jul_temp_f=80.0,
+        max_extreme_heat_days=10.0,
+        max_extreme_cold_days=40.0,
+        min_pillars={"safety": 0.5},
+    )
+    assert evaluation.rows[0].eligible is True
+    assert evaluation.rows[0].exclusion_reason is None
+
+
 def test_missing_core_is_excluded_not_imputed() -> None:
     complete = _county("01001")
     missing = _county("02001")
@@ -270,17 +368,22 @@ def test_unknown_preset_and_limit_and_incompatible_flags() -> None:
             states=["AL"],
             exclude_states=["AL"],
         )
+    with pytest.raises(HouseHunterError, match="50-state/DC"):
+        evaluate_counties([_county("01001")], view="safety", states=["ZZ"])
+    for invalid in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(HouseHunterError, match="finite"):
+            evaluate_counties([_county("01001")], view="safety", min_jan_temp_f=invalid)
 
 
-def test_snapshot_gate_requires_schema_12_national() -> None:
+def test_snapshot_gate_requires_schema_13_national() -> None:
     require_complete_national_snapshot(
-        {"scope": {"kind": "national", "state": None}, "schema_version": 12}
+        {"scope": {"kind": "national", "state": None}, "schema_version": 13}
     )
     with pytest.raises(HouseHunterError, match="national snapshot"):
         require_complete_national_snapshot(
-            {"scope": {"kind": "state", "state": "CO"}, "schema_version": 12}
+            {"scope": {"kind": "state", "state": "CO"}, "schema_version": 13}
         )
-    with pytest.raises(HouseHunterError, match="schema 12"):
+    with pytest.raises(HouseHunterError, match="schema 13"):
         require_complete_national_snapshot(
             {"scope": {"kind": "national", "state": None}, "schema_version": 11}
         )
@@ -294,6 +397,27 @@ def test_pareto_is_annotation_not_a_ranking_input() -> None:
     assert flags["01001"] is True
     assert flags["02001"] is False
     assert ranking.items[0].place_id == "01001"
+
+
+def test_pareto_handles_a_full_national_anticorrelated_frontier() -> None:
+    points = [
+        {
+            "safety": index / 3_143,
+            "health": 1 - index / 3_143,
+            "affordability": 0.5,
+            "opportunity": 0.5,
+            "lifestyle": 0.5,
+            "family": 0.5,
+        }
+        for index in range(3_144)
+    ]
+    assert all(pareto_optimal(points))
+
+
+def test_pareto_keeps_duplicate_frontier_points_and_rejects_strict_dominance() -> None:
+    best = {pillar: 0.8 for pillar in PILLARS}
+    dominated = {**best, "family": 0.7}
+    assert pareto_optimal([best, dict(best), dominated]) == [True, True, False]
 
 
 def test_non_finite_cores_are_excluded() -> None:

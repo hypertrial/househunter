@@ -17,6 +17,7 @@ from househunter.build import (
     _cached_snapshot_artifacts_valid,
     _hazard_values_are_valid,
     build_snapshot,
+    snapshot_artifacts_are_valid,
 )
 from househunter.config import RuntimePaths
 from househunter.dimensions import attach_dimensions as attach_test_dimensions
@@ -259,9 +260,7 @@ def test_build_is_content_addressed_and_queryable(
         assert counties["items"][0]["res_hazard_npctl"] == 0.0
         assert counties["items"][0]["name"] == "Aleutians East Borough"
         assert counties["items"][1]["res_hazard_npctl"] == 100.0
-        assert counties["items"][1]["res_hazard_npctl"] != pytest.approx(
-            (10.0 + 50.0 + 80.0) / 3
-        )
+        assert counties["items"][1]["res_hazard_npctl"] != pytest.approx((10.0 + 50.0 + 80.0) / 3)
         filtered = store.list_places(county="01001")
         assert [item["place_id"] for item in filtered["items"]] == [
             "01001000100",
@@ -494,7 +493,7 @@ def test_store_combines_dimension_filters_sorts_and_null_rules(
     assert [row["place_id"] for row in best_home] == ["02001", "01001"]
     assert [row["place_id"] for row in lowest_cost] == ["02001", "01001"]
     assert [row["place_id"] for row in combined["items"]] == ["02001"]
-    assert         contradictory_groups["total"] == 0
+    assert contradictory_groups["total"] == 0
     assert explicit_bound["total"] == 4
     assert all(row["home_sqft_for_1m"] is not None for row in explicit_bound["items"])
 
@@ -821,6 +820,22 @@ def test_existing_build_rejects_a_corrupt_database(
         build_snapshot(paths)
 
 
+def test_snapshot_validation_rejects_tampered_county_parquet(
+    fixture_environment: tuple[RuntimePaths, object],
+) -> None:
+    paths, _ = fixture_environment
+    output = build_snapshot(paths)
+    counties_path = output / "counties.parquet"
+    counties = pl.read_parquet(counties_path)
+    counties.with_columns(
+        pl.when(pl.col("place_id") == pl.col("place_id").min())
+        .then(pl.lit(0.0))
+        .otherwise(pl.col("res_hazard_npctl"))
+        .alias("res_hazard_npctl")
+    ).write_parquet(counties_path)
+    assert snapshot_artifacts_are_valid(output) is False
+
+
 def test_build_and_store_reject_same_count_database_mutation(
     fixture_environment: tuple[RuntimePaths, object],
 ) -> None:
@@ -927,7 +942,7 @@ def test_schema_ten_current_pointer_requires_a_rebuild(
     pointer["schema_version"] = 10
     paths.current.write_text(json.dumps(pointer))
 
-    with pytest.raises(BuildNotFoundError, match=r"Snapshot schema 10.*rebuild.*schema 12"):
+    with pytest.raises(BuildNotFoundError, match=r"Snapshot schema 10.*rebuild.*schema 13"):
         Store(paths)
 
 

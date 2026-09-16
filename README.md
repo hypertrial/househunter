@@ -37,11 +37,12 @@ one automatically. ACS 2024 five-year housing-stock context remains available
 independently: built-2000+, built-2010+, built-2020+, and median year built. These are
 not sale prices, valuations, total ownership costs, or promises that a matching home
 is listed. The map and `househunter rank` never combine the five dimensions into one score.
-The optional `househunter top-counties` command is a named, non-persisted
-`top-counties-v2` weighted-utility preference model. It is not a map layer, snapshot
-field, HTTP resource, or universal livability score. Preset names are unchanged from
-earlier releases, but the score formula and results are not comparable to the former
-TOPSIS model.
+The optional county-only **County Fit** workspace and `househunter top-counties`
+command use the named `top-counties-v2` weighted-utility preference model. County Fit
+is separate from the five map layers, loads lazily, and never writes a blended score
+to the snapshot. Preset names are unchanged from earlier releases, but the score
+formula and results are not comparable to the former TOPSIS model or a universal
+livability score.
 
 Residential Hazard Exposure derives national same-grain percentiles from 17 FEMA
 building-specific `*_ALRB` fields, treating not-applicable hazards as zero while
@@ -99,7 +100,9 @@ uv run househunter app
 
 Runtime data is written beneath `data/` by default. Set `HOUSEHUNTER_DATA_DIR` to use a
 different local directory. The server listens only on `127.0.0.1`; it has no telemetry,
-accounts, hosted database, or external browser requests.
+accounts, hosted database, or external browser requests. County Fit needs no new
+credentials: official Ranking v2 inputs are acquired anonymously by maintainers and
+the app reads only the packaged derived bundle.
 
 The map Search panel is a street-address lookup (`Find tract`). It does not
 search tract names or FIPS codes; use `househunter inspect` for those. A lookup
@@ -120,7 +123,7 @@ househunter download [--source fema|fema_counties|chrr|bea_rpp|all]
 househunter import-home-market FILE --acknowledge-personal-use [--history]
 househunter build [--state CO]
 househunter rank [--state CO] [--county STCOFIPS] [--level tract|county] [--metric residential-hazard|community-conditions|mountain|cost-of-living|home-costs] [--res-hazard-min N] [--res-hazard-max N] [--mountain-magnitude-min N] [--max-community-conditions-group 1..10] [--cost-of-living-index-min N] [--cost-of-living-index-max N] [--home-sqft-for-1m-min N] [--home-sqft-for-1m-max N] [--housing-built-2000-plus-pct-min 0..100] [--housing-built-2000-plus-pct-max 0..100] [--order best|worst] [--limit N] [--include-unranked]
-househunter top-counties [--preset balanced|safety-health|affordability|mountain-lifestyle] [--limit N] [--json] [--min-population N] [--min-active-listings N] [--min-valid-months N] [--state ST] [--exclude-state ST] [--exclude-region appalachia]
+househunter top-counties [--preset balanced|safety-health|affordability|mountain-lifestyle] [--weight-safety N --weight-health N --weight-affordability N --weight-opportunity N --weight-lifestyle N --weight-family N] [--limit N] [--json] [--min-population N] [--min-active-listings N] [--min-valid-months N] [--state ST] [--exclude-state ST] [--exclude-region appalachia]
 househunter inspect TRACT_FIPS|COUNTY_FIPS
 househunter lookup "1670 Broadway, Denver, CO" [--allow-approximate]
 househunter export --format parquet|csv|json [--level tract|county] [--output PATH]
@@ -212,19 +215,28 @@ is `(E002 + E003 + E004) / E001`. Counties use county estimates, not averages of
 tract percentages. ACS sentinels and zero denominators become null with an explicit
 status; v1 does not invent a combined percentage margin of error.
 
-`househunter top-counties` is an optional CLI preference model, not a sixth stored
-metric. Methodology `top-counties-v2` scores the full pinned 50-state/DC national
-reference first, then applies eligibility and user gates. Gates drop rows; they never
-recompute utilities or renormalize weights. Rebuild older snapshots to schema 12
-with `househunter build` before ranking. National rank is assigned on the
-complete-core reference before population, market, state, region, climate, or
-pillar gates.
+`househunter top-counties` and County Fit are request-scoped preference views, not a
+sixth stored metric. Methodology `top-counties-v2` scores the full pinned 50-state/DC
+national reference first, then applies eligibility and user gates. Gates drop rows;
+they never recompute utilities or renormalize weights. Rebuild older snapshots to
+schema 13 with `househunter build` before ranking. Custom Fit national rank is assigned
+on the complete-core reference before population, market, state, region, climate, or
+pillar gates; a pillar view ranks all counties that have that pillar and does not add
+population or housing gates unless the user selects them.
 
-Public inputs come from the maintainer `ranking_v2` county bundle. Private trailing
-12-month housing metrics come from approved `import-home-market` month or `--history`
-imports. Defaults are population `>= 25,000`, `>= 9` valid months in the trailing 12,
-and median active listings `>= 100`. Crime scores only when reporting-population
-coverage is `>= 90%`. Missing cores exclude the county; null stays null.
+Public inputs come from the schema-2 maintainer `ranking_v2` county bundle. Private
+trailing-12-month housing metrics come from approved `import-home-market` month or
+`--history` imports. Custom Fit defaults are population `>= 25,000`, `>= 9` valid
+months in the trailing 12, median active listings `>= 100`, crime coverage `>= 90%`,
+and all six pillars present. Missing cores exclude the county; null stays null. With
+the normal one-month import, County Fit is explicitly partial: Safety, Health,
+Opportunity, Lifestyle, and Family Autonomy remain available while Affordability and
+Custom Fit show the history-import and rebuild commands.
+
+Each packaged ranking release records validator-checked source-status distributions,
+non-null bundle-pillar counts, and complete/partial public-core county counts in its
+release-identity-bound manifest. These are release coverage baselines, not estimates
+of household access or service quality.
 
 Pillar internals are Safety 50/35/15 hazard/crime/water, Health 60/40 healthcare/CHR&R
 context, Affordability 45/35/20 housing/RPP/property tax, Opportunity 60/40
@@ -234,13 +246,18 @@ Named presets in safety/health/affordability/opportunity/lifestyle/family order 
 `balanced` 20/15/25/15/15/10 (default), `safety-health` 35/25/15/10/5/10,
 `affordability` 15/10/45/15/5/10, and `mountain-lifestyle` 10/10/15/10/45/10.
 Exact ties break by county FIPS. Pareto flags annotate pillar utilities and are not a
-ranking input. Climate bounds are optional and default off. Homeschool-policy fit is
-not legal advice.
+ranking input. Climate bounds are optional and default off. Healthcare providers are
+availability proxies; water boundaries may be EPA-supplied or modeled; FCC measures
+broadband-serviceable locations, not population; and climate is null without a fully
+qualified in-county NOAA station. Family Autonomy uses an approximate,
+project-authored preference rubric. It is not legal advice, legal-compliance or
+school-quality evidence, or a recommendation; users must verify current requirements.
 
 Map Cost of Living remains MSA or U.S. Nonmetropolitan Portion `00999`. Ranking
 assignment uses MSA MARPP or official state all-items RPP labeled `state`. The map,
-`househunter rank`, map-score schema 5, and `/api/v3` never persist or expose the
-blended preference-fit. `/api/v3/top-counties` remains absent.
+`househunter rank`, and map-score schema 5 never persist or expose the blended
+preference-fit. Only the explicit County Fit routes expose ranking data;
+`/api/v3/top-counties` remains absent.
 
 The score is a user-selected preference model, not a property assessment, loss
 probability, insurance quote, or universal livability truth. Tiny remaining cohorts are
@@ -262,8 +279,8 @@ npm test
 npm run build
 ```
 
-Runtime snapshots use schema 12. Older snapshots are rejected with a rebuild
-instruction. Ranking v2 refuses schema 11 with the same rebuild guidance. The full
+Runtime snapshots use schema 13. Older snapshots are rejected with a rebuild
+instruction and schema 12 is never reinterpreted as schema 13. The full
 `GET /api/v3/map/scores?level=tract|county` contract
 uses map schema 5 and returns aligned `place_id`, `res_hazard_npctl`,
 `community_conditions_group`, `mountain_magnitude`, `cost_of_living_index`,
@@ -276,6 +293,15 @@ array or the Home Costs/housing-stock arrays only when that layer or one of its
 filters is first used. Every add-on independently validates schema, build, scope,
 level, ordered IDs, aligned lengths, nulls, and numeric domains before merging. The
 full endpoint remains available for local clients.
+
+County Fit is a separate lazy contract. `/api/v3/meta` reports sanitized readiness;
+`GET /api/v3/county-fit` returns a build-bound schema-1 columnar county vector;
+`GET /api/v3/county-fit/counties/{fips}` returns measures, utilities, coverage,
+vintages, citations, and limitations; and `GET /api/v3/exports/county-fit.csv` uses the
+same query parser and ranking call. Stale or state-scoped builds return 409, invalid
+weights or gates return 422, and missing or invalid bundles return 503. Missing values
+remain null. The decoded summary must stay below 1 MB and gzip below 300 KB, without
+changing the initial map payload.
 
 Each payload's `build_id`, `level`, and `scope` identify the snapshot.
 Data-quality and coverage fields remain available from place, county, detail, and export
@@ -325,7 +351,7 @@ uv run househunter mountain rescore-v1 --source-lock config/mountain/source-lock
 The single-purpose migration validates the v1 release, source identity, raw blocks,
 components, internal scores, and aggregates, then derives v2 from the validated raw
 block columns. It never trusts persisted aggregate scores or edits v1 artifacts in
-place. Full release, compact release, and schema-11 snapshot candidates are staged and
+place. Full release, compact release, and schema-13 snapshot candidates are staged and
 validated before any pointer changes. A small atomic journal makes an interrupted
 pointer commit forward-recoverable: rerunning the same command completes the same v2
 transaction. A v1, mixed, symlinked, partial, compact-only, foreign, or source-drifted
@@ -393,7 +419,7 @@ does not require those inputs.
 Prepared builds use one bounded pool of one to four worker processes. `--resume` reuses
 only checksum-valid shards for the same pack and pipeline; `--fresh` clears only the
 marked work directory for that pack. A successful promoted prepared build rebuilds the
-schema-11 normal snapshot, removes obsolete owned v2 releases and work shards, publishes
+schema-13 normal snapshot, removes obsolete owned v2 releases and work shards, publishes
 the validated under-50-MiB managed compact fallback, and writes a timing report under
 `data/mountain/reports/`. Release schema 2 binds the unchanged
 `mountain_pipeline_v1`, validation-only internal `mountain_score_v1`, public
@@ -404,7 +430,7 @@ preserves 10 GB of unrelated free filesystem space.
 
 The national laptop acceptance gate runs two clean four-worker builds and checks the
 55-minute runtime, 24 GiB aggregate RSS, swap growth, 45/50 GB storage limits, identical
-release and Parquet identities, schema-2/11 publication identity, and a queryable
+release and Parquet identities, schema-2/13 publication identity, and a queryable
 Mountain-ranked snapshot. It also gates 83,848 scored tracts and 3,143 scored counties;
 maxima near 4.9235 and 3.4973; western tract median/p95 near 0.88/1.94 and county
 median/p95 near 0.96/2.14; at least 0.75 from median to p95 and from p95 to maximum at
@@ -429,7 +455,7 @@ Rollback is explicit and fail-closed. A same-major v2 rollback may validate and 
 a retained v2 full release with the source lock, prepared pack, and prepared lock that
 created it; promotion is refused if provenance or raw metrics differ. A v1 release is
 never advertised as a v2-compatible rollback. Keep the pre-migration v1 full release
-unpruned until the installed 3.0.0 wheel passes offline acceptance. Cross-major rollback
+unpruned until the installed 3.1.0 wheel passes offline acceptance. Cross-major rollback
 restores the v1 application and all of its v1 full, compact, and snapshot pointers as one
 operation; do not point the v2 application at v1 data. Source licenses and public release
 identifiers are recorded per input in `source-lock-v2.json`. When refreshing a lock,

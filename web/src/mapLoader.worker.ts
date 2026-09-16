@@ -5,8 +5,9 @@ import { featuresFrom } from "./mapGeometry";
 import {
   decodeMapScoreAddon, decodeMapScores, loadedMapAddons, mergeMapScoreAddon,
 } from "./mapScores";
+import { decodeCountyFitSummary } from "./countyFit";
 import type { LoaderBootstrap, LoaderCommand, LoaderEvent, ProfileEntry } from "./mapWorkerProtocol";
-import type { MapAssetEntry, MapManifest, MapScoreAddon, MapScoreAddonKind, MapScores } from "./types";
+import type { MapAssetEntry, MapManifest, MapScoreAddon, MapScoreAddonKind, MapScores, MapValueDataset } from "./types";
 
 declare const self: DedicatedWorkerGlobalScope;
 
@@ -17,6 +18,7 @@ let sequence = 0;
 const pending = new Map<string, { state: string; priority: number; order: number; generation: number }>();
 const inFlight = new Set<string>();
 let loadedScores: MapScores | null = null;
+let scoreSequence = 0;
 let loadedAddOns = new Set<MapScoreAddonKind>();
 const addOnTasks = new Map<MapScoreAddonKind, Promise<void>>();
 const pendingAddOns = new Set<MapScoreAddonKind>();
@@ -63,6 +65,32 @@ async function fetchAddOn(scores: MapScores, kind: MapScoreAddonKind): Promise<M
   return addon;
 }
 
+async function fetchScores(command: {
+  datasetGeneration: number;
+  scoreUrl: string;
+  expectedBuildId: string;
+  level: "tract" | "county";
+  datasetKind: "map" | "county-fit";
+}): Promise<MapValueDataset> {
+  const scoreStarted = performance.now();
+  const raw = await json<unknown>(command.scoreUrl);
+  const loaded = command.datasetKind === "county-fit"
+    ? decodeCountyFitSummary(raw, command.expectedBuildId)
+    : decodeMapScores(raw, command.expectedBuildId, command.level);
+  if (loaded.schema_version === 5) {
+    loadedAddOns = new Set(loadedMapAddons(loaded));
+    loadedScores = loaded;
+  }
+  const count = loaded.schema_version === 1
+    ? loaded.counties.county_fips.length
+    : loaded.columns.place_id.length;
+  profile(command.datasetGeneration, {
+    name: "scores-parsed", start: scoreStarted, duration: performance.now() - scoreStarted,
+    details: { count },
+  });
+  return loaded;
+}
+
 async function load(command: Extract<LoaderCommand, { type: "LOAD" }>) {
   activeGeneration = command.datasetGeneration;
   manifest = null;
@@ -71,28 +99,22 @@ async function load(command: Extract<LoaderCommand, { type: "LOAD" }>) {
   loadedAddOns.clear();
   addOnTasks.clear();
   pendingAddOns.clear();
+  scoreSequence += 1;
+  const initialScoreSequence = scoreSequence;
   const started = performance.now();
   try {
     const loadedManifest = await json<MapManifest>(command.manifestUrl);
     if (command.datasetGeneration !== activeGeneration) return;
-    const scoreTask = (async (): Promise<MapScores | null> => {
+    const scoreTask = (async (): Promise<MapValueDataset | null> => {
       if (command.neutralOnly) return null;
       try {
-        const scoreStarted = performance.now();
-        const loaded = decodeMapScores(
-          await json<unknown>(command.scoreUrl),
-          command.expectedBuildId,
-          command.level,
-        );
-        loadedAddOns = new Set(loadedMapAddons(loaded));
-        loadedScores = loaded;
-        profile(command.datasetGeneration, {
-          name: "scores-parsed", start: scoreStarted, duration: performance.now() - scoreStarted,
-          details: { count: loaded.columns.place_id.length },
-        });
-        return loaded;
+        const loaded = await fetchScores(command);
+        return initialScoreSequence === scoreSequence ? loaded : null;
       } catch (caught) {
-        if (command.datasetGeneration === activeGeneration) {
+        if (
+          command.datasetGeneration === activeGeneration
+          && initialScoreSequence === scoreSequence
+        ) {
           post({
             type: "ERROR", datasetGeneration: command.datasetGeneration, kind: "score",
             message: caught instanceof Error ? caught.message : "Map scores failed to load",
@@ -122,7 +144,7 @@ async function load(command: Extract<LoaderCommand, { type: "LOAD" }>) {
     });
     if (scores) profile(command.datasetGeneration, {
       name: "scores-ready", start: started, duration: performance.now() - started,
-      details: { count: scores.columns.place_id.length },
+      details: { count: scores.schema_version === 1 ? scores.counties.county_fips.length : scores.columns.place_id.length },
     });
     profile(command.datasetGeneration, {
       name: "topology-loaded", start: geometryStarted, duration: performance.now() - geometryStarted,
@@ -137,6 +159,23 @@ async function load(command: Extract<LoaderCommand, { type: "LOAD" }>) {
     if (command.datasetGeneration !== activeGeneration) return;
     const message = caught instanceof Error ? caught.message : "Map loading failed";
     post({ type: "ERROR", datasetGeneration: command.datasetGeneration, kind: "geometry", message });
+  }
+}
+
+async function reloadScores(command: Extract<LoaderCommand, { type: "SCORES" }>) {
+  const requestSequence = ++scoreSequence;
+  try {
+    const scores = await fetchScores(command);
+    if (command.datasetGeneration === activeGeneration && requestSequence === scoreSequence) {
+      post({ type: "SCORES", datasetGeneration: command.datasetGeneration, scores });
+    }
+  } catch (caught) {
+    if (command.datasetGeneration === activeGeneration && requestSequence === scoreSequence) {
+      post({
+        type: "ERROR", datasetGeneration: command.datasetGeneration, kind: "score",
+        message: caught instanceof Error ? caught.message : "Map scores failed to load",
+      });
+    }
   }
 }
 
@@ -216,6 +255,7 @@ function queueDetails(command: Extract<LoaderCommand, { type: "DETAIL" }>) {
 function connected(event: MessageEvent<LoaderCommand>) {
   const command = event.data;
   if (command.type === "LOAD") void load(command);
+  else if (command.type === "SCORES") void reloadScores(command);
   else if (command.type === "ADDON") requestAddOn(command);
   else if (command.type === "DETAIL") queueDetails(command);
   else {

@@ -95,7 +95,7 @@ def test_boundary_rejects_private_source_and_derivative_signatures(
 
 
 def test_distribution_scanner_checks_archive_members(tmp_path: Path) -> None:
-    wheel = tmp_path / "househunter-3.0.0-py3-none-any.whl"
+    wheel = tmp_path / "househunter-3.1.0-py3-none-any.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
         archive.writestr(
             "househunter/private_snapshot.json",

@@ -1,0 +1,129 @@
+{
+  "calibration_hash": "e03601f68ec16189bb505e9c443ad82be34334692e240f23c87164b2ac7805b8",
+  "calibration_id": "ranking-calibration-v2",
+  "county_fips_sha256": "e637d99538d4e253df2320f0a660e6bfca6d674d50c215f907fa1a67e287e333",
+  "coverage": {
+    "bundle_pillar_non_null_counts": {
+      "family": 3144,
+      "health": 3080,
+      "lifestyle": 3135,
+      "opportunity": 3134,
+      "safety": 1300
+    },
+    "complete_public_core_count": 1284,
+    "partial_public_core_count": 1860,
+    "row_count": 3144,
+    "schema_version": 1,
+    "source_status_counts": {
+      "broadband_status": {
+        "complete": 3135,
+        "missing": 9
+      },
+      "climate_coverage_status": {
+        "complete_in_county_station_mean": 2817,
+        "missing_no_qualifying_in_county_station": 327
+      },
+      "community_context_status": {
+        "complete": 3089,
+        "missing": 55
+      },
+      "crime_status": {
+        "below_coverage_or_missing": 1748,
+        "complete": 1378,
+        "missing": 18
+      },
+      "employment_status": {
+        "complete": 3143,
+        "missing": 1
+      },
+      "family_status": {
+        "approximate_project_authored": 3144
+      },
+      "hazard_status": {
+        "complete": 3144
+      },
+      "healthcare_status": {
+        "complete": 3135,
+        "missing_component": 9
+      },
+      "mountain_status": {
+        "complete": 3135,
+        "missing": 9
+      },
+      "population_status": {
+        "complete": 3144
+      },
+      "property_tax_status": {
+        "complete": 3135,
+        "missing_or_invalid_denominator": 9
+      },
+      "rpp_status": {
+        "complete": 3144
+      },
+      "water_overlap_quality_status": {
+        "max_intersection_proxy": 3130,
+        "missing_proxy": 14
+      },
+      "water_status": {
+        "ambiguous_served_counties": 50,
+        "below_allocation_coverage": 106,
+        "complete": 2975,
+        "missing_legacy_geography": 9,
+        "missing_no_allocatable_systems": 4
+      }
+    }
+  },
+  "files": {
+    "calibration": {
+      "bytes": 5707,
+      "filename": "calibration.json",
+      "sha256": "240b676609f8bcb594131b2b2f2c631c3a77aa15bdd1d0bbf550b6e5b9edbe4e"
+    },
+    "citations": {
+      "bytes": 2011,
+      "filename": "citations.json",
+      "sha256": "40e6aef5caeb84fac15784121bdcf3353a6d1a2adf07bc2710c54b011f9e699e"
+    },
+    "counties": {
+      "bytes": 686370,
+      "filename": "counties.parquet",
+      "rows": 3144,
+      "sha256": "8da8dd4ee2ffaf3ad313074106a3c608f32ecb78a7ebce792adc66d90114e42c"
+    },
+    "homeschool": {
+      "bytes": 26210,
+      "filename": "homeschool_policy.json",
+      "sha256": "d8b83292923aaddc71487b5d553333180b7bb19ee106a2eca1ad1e795d9fbdda"
+    }
+  },
+  "methodology_id": "top-counties-v2",
+  "release_id": "6252d64e7839098d0ea648ba2db9f2fede6ba02dc7883ae2f98403d2e5b54668",
+  "row_count": 3144,
+  "schema_version": 2,
+  "scope": "national",
+  "source_lock_sha256": "19e3cee5cc7c6a77b772b765e11ffb7a2c46a7678062dd8b28dc0cea3084c298",
+  "vintages": {
+    "acs_commute_2024": "2024 ACS 5-year",
+    "acs_property_tax_2024": "2024 ACS 5-year",
+    "arc_appalachia_counties": "2026",
+    "bea_marpp_2024": "2024",
+    "bea_sarpp_2024": "2024",
+    "bls_qcew_2024": "2024 final",
+    "bls_qcew_2025": "2025 final",
+    "census_pep_county_2025": "2025",
+    "census_tiger_county_2025": "2025",
+    "chrr_community_context_2025": "2025",
+    "chrr_nppes_mental_health_2025": "2025 supplemental 2026-03",
+    "epa_cws_service_areas_v2_1": "2.1",
+    "epa_sdwis_2026_q2": "2026Q2 submission data acquired 2026-09-14",
+    "fbi_ucr_agency_2023_2025": "2023-2025",
+    "fcc_fixed_summary_2025_12": "2025-12",
+    "fema_residential_hazard": "v1.20",
+    "homeschool_policy_v1": "2026-09-16",
+    "househunter_housing_policy": "snapshot-local",
+    "househunter_mountain_v2": "95e0f7fba44f7309",
+    "hrsa_ahrf_2024_2025": "2024-2025",
+    "noaa_normals_1991_2020": "1991-2020 v1.0.1",
+    "omb_county_cbsa_2023": "OMB Bulletin No. 23-01"
+  }
+}

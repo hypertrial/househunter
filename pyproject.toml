@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "househunter"
-version = "3.0.0"
+version = "3.1.0"
 description = "Rank residential multi-hazard building-loss exposure across U.S. tracts and counties"
 readme = "README.md"
 requires-python = ">=3.12"

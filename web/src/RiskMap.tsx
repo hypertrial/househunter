@@ -10,7 +10,7 @@ import type {
   RendererCommand,
   RendererEvent,
 } from "./mapWorkerProtocol";
-import type { Geography, MapFilters, MapScore, MapScoreAddonKind, Metric } from "./types";
+import type { CountyFitSummary, Geography, MapFilters, MapMetric, MapScore, MapScoreAddonKind } from "./types";
 
 export type FocusTarget = MapFocusTarget;
 
@@ -19,17 +19,27 @@ export interface MapPreview {
   name: string;
   state: string;
   score: MapScore | null;
+  countyFit?: {
+    activeValue: number | null;
+    eligible: boolean;
+    exclusionReason: string | null;
+    nationalRank: number | null;
+    filteredRank: number | null;
+    paretoOptimal: boolean | null;
+  };
   x: number;
   y: number;
 }
 
 interface Props {
+  active?: boolean;
   manifestUrl: string;
   scoreUrl: string;
   expectedBuildId: string;
   level: Geography;
-  metric?: Metric;
-  displayMetric?: Metric;
+  datasetKind?: "map" | "county-fit";
+  metric?: MapMetric;
+  displayMetric?: MapMetric;
   busy?: boolean;
   selected: string;
   filters: MapFilters;
@@ -44,11 +54,12 @@ interface Props {
   onCamera: (camera: CameraState) => void;
   onStatus: (message: string) => void;
   onScoresReady?: (count: number) => void;
+  onCountyFitReady?: (summary: CountyFitSummary) => void;
   onScoreError?: (message: string) => void;
   onAddonError?: (kind: MapScoreAddonKind, message: string) => void;
   onAddonReady?: (kind: MapScoreAddonKind) => void;
-  onVisibleCommit?: (metric: Metric) => void;
-  onInteractiveCommit?: (metric: Metric) => void;
+  onVisibleCommit?: (metric: MapMetric) => void;
+  onInteractiveCommit?: (metric: MapMetric) => void;
 }
 
 interface PresentedFrame {
@@ -105,10 +116,12 @@ function transformCanvas(canvas: HTMLCanvasElement, current: ZoomTransform, fram
 }
 
 export default function RiskMap({
+  active = true,
   manifestUrl,
   scoreUrl,
   expectedBuildId,
   level,
+  datasetKind = "map",
   metric = "residential-hazard",
   displayMetric = metric,
   busy = displayMetric !== metric,
@@ -125,6 +138,7 @@ export default function RiskMap({
   onCamera,
   onStatus,
   onScoresReady,
+  onCountyFitReady,
   onScoreError,
   onAddonError,
   onAddonReady,
@@ -159,13 +173,15 @@ export default function RiskMap({
   const pickPointersRef = useRef(new Map<number, PointerPick>());
   const pickStartedRef = useRef(new Map<number, number>());
   const settleStartedRef = useRef(new Map<number, number>());
+  const lastScoreUrlRef = useRef("");
+  const lastScoreRetryRef = useRef(-1);
   const callbackRef = useRef({
-    onSelect, onPreview, onCamera, onStatus, onScoresReady, onScoreError,
+    onSelect, onPreview, onCamera, onStatus, onScoresReady, onCountyFitReady, onScoreError,
     onAddonError, onAddonReady,
     onVisibleCommit, onInteractiveCommit,
   });
   callbackRef.current = {
-    onSelect, onPreview, onCamera, onStatus, onScoresReady, onScoreError,
+    onSelect, onPreview, onCamera, onStatus, onScoresReady, onCountyFitReady, onScoreError,
     onAddonError, onAddonReady,
     onVisibleCommit, onInteractiveCommit,
   };
@@ -175,6 +191,7 @@ export default function RiskMap({
   const [detailError, setDetailError] = useState("");
   const [restartGeneration, setRestartGeneration] = useState(0);
   const [presentedVersion, setPresentedVersion] = useState(0);
+  const workerRetryGeneration = datasetKind === "map" ? retryGeneration : 0;
 
   const semanticValue = useMemo<MapSemantics>(() => ({
     metric, ...filters, neutralOnly,
@@ -244,6 +261,7 @@ export default function RiskMap({
   useEffect(() => {
     setWorkerError("");
     setDetailError("");
+    if (!active) return;
     let renderer: Worker;
     let loader: Worker;
     try {
@@ -266,6 +284,8 @@ export default function RiskMap({
     const bootstrap: LoaderBootstrap = { type: "CONNECT", port: channel.port1 };
     loader.postMessage(bootstrap, [channel.port1]);
     rendererRef.current = renderer;
+    lastScoreUrlRef.current = scoreUrl;
+    lastScoreRetryRef.current = retryGeneration;
     presentedRef.current = null;
     hoverInFlightRef.current = false;
     hoverPendingRef.current = null;
@@ -287,6 +307,7 @@ export default function RiskMap({
       scoreUrl: assertSameOrigin(scoreUrl),
       expectedBuildId,
       level,
+      datasetKind,
       width: dimensions.width,
       height: dimensions.height,
       ratio: dimensions.ratio,
@@ -315,6 +336,8 @@ export default function RiskMap({
         callbackRef.current.onStatus(value.message);
       } else if (value.type === "SCORES_READY") {
         callbackRef.current.onScoresReady?.(value.count);
+      } else if (value.type === "COUNTY_FIT_READY") {
+        callbackRef.current.onCountyFitReady?.(value.summary);
       } else if (value.type === "ADDON_ERROR") {
         callbackRef.current.onAddonError?.(value.kind, value.message);
       } else if (value.type === "ADDON_READY") {
@@ -467,7 +490,28 @@ export default function RiskMap({
       loader.terminate();
       if (rendererRef.current === renderer) rendererRef.current = null;
     };
-  }, [expectedBuildId, level, manifestUrl, restartGeneration, retryGeneration, scoreUrl]);
+  }, [active, datasetKind, expectedBuildId, level, manifestUrl, restartGeneration, workerRetryGeneration]);
+
+  useEffect(() => {
+    if (!active || datasetKind !== "county-fit" || !rendererRef.current) return;
+    if (scoreUrl === lastScoreUrlRef.current && retryGeneration === lastScoreRetryRef.current) return;
+    let checkedUrl: string;
+    try {
+      checkedUrl = assertSameOrigin(scoreUrl);
+    } catch (caught) {
+      callbackRef.current.onScoreError?.(caught instanceof Error ? caught.message : "County Fit scores are unavailable");
+      return;
+    }
+    lastScoreUrlRef.current = scoreUrl;
+    lastScoreRetryRef.current = retryGeneration;
+    post({
+      type: "RELOAD_SCORES",
+      datasetGeneration: datasetGenerationRef.current,
+      scoreUrl: checkedUrl,
+      expectedBuildId,
+      datasetKind,
+    });
+  }, [active, datasetKind, expectedBuildId, post, retryGeneration, scoreUrl]);
 
   useEffect(() => {
     if (!rendererRef.current) return;
@@ -718,11 +762,14 @@ export default function RiskMap({
     if (viewport && zoomRef.current) select(viewport).call(zoomRef.current.transform, zoomIdentity);
   };
 
-  const metricLabel = displayMetric === "residential-hazard" ? "Residential Hazard Exposure"
+  const metricLabel = displayMetric === "county-fit" ? "County Fit"
+    : displayMetric === "residential-hazard" ? "Residential Hazard Exposure"
     : displayMetric === "mountain" ? "Mountain Magnitude"
       : displayMetric === "community-conditions" ? "Community Conditions"
         : displayMetric === "cost-of-living" ? "Cost of Living" : "Home Costs";
-  const metricDescription = displayMetric === "residential-hazard"
+  const metricDescription = displayMetric === "county-fit"
+    ? "Higher values indicate a stronger match for the selected pillar or preference weights. Neutral counties are unavailable or excluded."
+    : displayMetric === "residential-hazard"
     ? "Higher values indicate greater residential multi-hazard exposure."
     : displayMetric === "mountain"
       ? `Higher Mountain Magnitude means fewer U.S. ${pluralLevel} have equal-or-higher resident-weighted mountain exposure.`

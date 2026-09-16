@@ -1,6 +1,6 @@
 import type { MapFeature, Bounds } from "./mapGeometry";
 import type { CameraState } from "./map";
-import type { Geography, MapFilters, MapManifest, MapScore, MapScoreAddonKind, MapScores, Metric } from "./types";
+import type { CountyFitSummary, Geography, MapFilters, MapManifest, MapMetric, MapScore, MapScoreAddonKind, MapScores, MapValueDataset } from "./types";
 
 export interface MapTransform { k: number; x: number; y: number }
 
@@ -15,10 +15,18 @@ export interface MapPickPreview {
   name: string;
   state: string;
   score: MapScore | null;
+  countyFit?: {
+    activeValue: number | null;
+    eligible: boolean;
+    exclusionReason: string | null;
+    nationalRank: number | null;
+    filteredRank: number | null;
+    paretoOptimal: boolean | null;
+  };
 }
 
 export interface MapSemantics extends MapFilters {
-  metric: Metric;
+  metric: MapMetric;
   neutralOnly: boolean;
 }
 
@@ -30,7 +38,8 @@ export interface ProfileEntry {
 }
 
 export type RendererCommand =
-  | { type: "INIT"; loaderPort: MessagePort; datasetGeneration: number; viewportGeneration: number; cameraGeneration: number; semanticGeneration: number; manifestUrl: string; scoreUrl: string; expectedBuildId: string; level: Geography; width: number; height: number; ratio: number; camera: MapTransform; semantics: MapSemantics; selected: string }
+  | { type: "INIT"; loaderPort: MessagePort; datasetGeneration: number; viewportGeneration: number; cameraGeneration: number; semanticGeneration: number; manifestUrl: string; scoreUrl: string; expectedBuildId: string; level: Geography; datasetKind: "map" | "county-fit"; width: number; height: number; ratio: number; camera: MapTransform; semantics: MapSemantics; selected: string }
+  | { type: "RELOAD_SCORES"; datasetGeneration: number; scoreUrl: string; expectedBuildId: string; datasetKind: "map" | "county-fit" }
   | { type: "RESIZE"; datasetGeneration: number; viewportGeneration: number; cameraGeneration: number; width: number; height: number; ratio: number; camera: MapTransform }
   | { type: "SET_CAMERA"; datasetGeneration: number; cameraGeneration: number; camera: MapTransform }
   | { type: "SET_SEMANTICS"; datasetGeneration: number; semanticGeneration: number; semantics: MapSemantics }
@@ -44,8 +53,9 @@ export type RendererCommand =
 
 export type RendererEvent =
   | { type: "SCORES_READY"; datasetGeneration: number; count: number }
-  | { type: "FRAME"; datasetGeneration: number; viewportGeneration: number; cameraGeneration: number; snapshotId: number; semanticGeneration: number; metric: Metric; camera: MapTransform; originX: number; originY: number; width: number; height: number; ratio: number; featureCount: number; interactive: boolean; bitmap: ImageBitmap }
-  | { type: "FRAME_REUSED"; datasetGeneration: number; viewportGeneration: number; cameraGeneration: number; snapshotId: number; semanticGeneration: number; metric: Metric; camera: MapTransform; originX: number; originY: number; featureCount: number; interactive: boolean }
+  | { type: "COUNTY_FIT_READY"; datasetGeneration: number; summary: CountyFitSummary }
+  | { type: "FRAME"; datasetGeneration: number; viewportGeneration: number; cameraGeneration: number; snapshotId: number; semanticGeneration: number; metric: MapMetric; camera: MapTransform; originX: number; originY: number; width: number; height: number; ratio: number; featureCount: number; interactive: boolean; bitmap: ImageBitmap }
+  | { type: "FRAME_REUSED"; datasetGeneration: number; viewportGeneration: number; cameraGeneration: number; snapshotId: number; semanticGeneration: number; metric: MapMetric; camera: MapTransform; originX: number; originY: number; featureCount: number; interactive: boolean }
   | { type: "READY"; datasetGeneration: number; viewportGeneration: number; snapshotId: number; featureCount: number; level: Geography }
   | { type: "PICK_RESULT"; datasetGeneration: number; requestId: number; mode: "hover" | "activate"; snapshotId: number; preview: MapPickPreview | null }
   | { type: "FOCUS_RESULT"; datasetGeneration: number; requestId: number; snapshotId: number; bounds: Bounds | null }
@@ -56,14 +66,16 @@ export type RendererEvent =
   | { type: "PROFILE"; datasetGeneration: number; entry: ProfileEntry };
 
 export type LoaderCommand =
-  | { type: "LOAD"; datasetGeneration: number; manifestUrl: string; scoreUrl: string; expectedBuildId: string; level: Geography; neutralOnly: boolean }
+  | { type: "LOAD"; datasetGeneration: number; manifestUrl: string; scoreUrl: string; expectedBuildId: string; level: Geography; datasetKind: "map" | "county-fit"; neutralOnly: boolean }
+  | { type: "SCORES"; datasetGeneration: number; scoreUrl: string; expectedBuildId: string; level: Geography; datasetKind: "map" | "county-fit" }
   | { type: "ADDON"; datasetGeneration: number; kind: MapScoreAddonKind }
   | { type: "DETAIL"; datasetGeneration: number; requests: Array<{ state: string; priority: number }> }
   | { type: "DISPOSE" };
 
 export type LoaderEvent =
   | { type: "STATES"; datasetGeneration: number; manifest: MapManifest; states: MapFeature[] }
-  | { type: "DATASET"; datasetGeneration: number; manifest: MapManifest; scores: MapScores | null; loadedAddOns: MapScoreAddonKind[]; states: MapFeature[]; features: MapFeature[] }
+  | { type: "DATASET"; datasetGeneration: number; manifest: MapManifest; scores: MapValueDataset | null; loadedAddOns: MapScoreAddonKind[]; states: MapFeature[]; features: MapFeature[] }
+  | { type: "SCORES"; datasetGeneration: number; scores: MapValueDataset }
   | { type: "ADDON"; datasetGeneration: number; kind: MapScoreAddonKind; scores: MapScores }
   | { type: "DETAIL"; datasetGeneration: number; state: string; features: MapFeature[] }
   | { type: "ERROR"; datasetGeneration: number; kind: "score" | "geometry" | "detail"; state?: string; message: string }

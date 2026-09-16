@@ -38,22 +38,32 @@ publishable. There is no state fallback.
 
 ## Ranking v2 — pinned public county bundle
 
-`househunter top-counties` does not fetch Census, NOAA, FCC, FBI, HRSA, EPA, or
-Realtor.com during prepare, download, or build. Maintainers generate a compact
+Normal setup, `househunter top-counties`, County Fit, and ordinary builds do not fetch
+Census, NOAA, FCC, FBI, HRSA, EPA, or Realtor.com ranking inputs. Maintainers generate a compact
 `ranking_v2` bundle with `scripts/generate_ranking_reference.py` from
 `config/ranking/source-lock-v2.json`. The packaged artifacts are county rows,
 calibration knots/bounds and their hash, source vintages, citations, coverage
 statuses, and checksums. Raw agency dumps are never packaged.
 
-Population is Census PEP at one reviewed vintage and current FIPS geography. It is an
-eligibility/confidence input, never a higher-is-better utility. Connecticut and other
-current-FIPS mismatches fail instead of using an invented crosswalk.
+Population is Census PEP 2025 at current FIPS geography. It is an eligibility/context
+input, never a higher-is-better utility. Connecticut planning regions stay explicitly
+null for legacy-county inputs instead of using an invented allocation or crosswalk.
 
-FBI crime rates use attributed agencies only when reporting-population coverage is at
-least 90%. Suppression stays null, never zero. FCC input is public aggregate terrestrial
-fixed 100/20 availability; location fabric is denied. Homeschool-policy fit is a
-reviewed state rubric with statute citations and is not legal advice. NOAA climate
-normals are optional CLI gates, not a universal climate score.
+FBI crime uses 2023–2025 attributed agency aggregates only when every year has at least
+90% reporting-population coverage; violent/property person-year rates are inverse
+average-tie ECDFs combined 60/40. Suppression stays null, never zero. EPA water uses
+active retail community-system boundaries allocated by 2020 Census block population,
+including visibly labeled EPA-modeled boundaries, and is null below 90% allocatable
+coverage. Public-water share is context, not evidence of private-well use.
+
+Provider supply is an availability proxy: AHRF primary-care and dental counts plus the
+CHR&R/NPPES broad mental-health measure are converted to rates, national average-tie
+ECDF utilities, and combined equally. FCC input is the December 2025 terrestrial fixed
+100/20 served share of broadband-serviceable locations, not people; Location Fabric is
+denied. NOAA 1991–2020 climate values average equal-weight, fully qualifying in-county
+stations with no nearest-station fallback. Homeschool-policy fit is an approximate,
+project-authored state preference rubric with official citations and effective dates,
+not legal advice, legal-compliance or school-quality evidence, or a recommendation.
 
 Ranking Cost of Living uses MSA MARPP or official state all-items RPP labeled `state`.
 Map Cost of Living remains MSA or U.S. Nonmetropolitan Portion `00999`. Do not advertise
@@ -71,11 +81,13 @@ and unexported in bulk.
 2. Download into a maintainer staging directory with the shared HTTPS host allowlist,
    `trust_env=False`, redirect, size, archive, and checksum controls.
 3. Recompute national utilities on the full 50-state/DC source-valid universe, persist
-   calibration identity, and publish a new compact bundle. Changing gates must not
-   recompute calibration. Snapshot identity hashes the full bundle manifest (file
-   checksums, scope, source lock) plus trailing-12 home-market month digests, not
-   only `calibration_hash` or the latest-month pointer.
-4. Rebuild a schema-12 snapshot and re-run ranking golden fixtures plus both
+   calibration identity, exact per-source status distributions, bundle-pillar
+   availability, and complete/partial public-core counts, then publish a new compact
+   bundle. The validator recomputes those coverage aggregates from `counties.parquet`.
+   Changing gates must not recompute calibration. Snapshot identity hashes the full
+   bundle manifest (file checksums, coverage, scope, source lock) plus trailing-12
+   home-market month digests, not only `calibration_hash` or the latest-month pointer.
+4. Rebuild a schema-13 snapshot and re-run ranking golden fixtures plus both
    verification scripts.
 
 ## Housing stock — ACS 2024 five-year estimates
