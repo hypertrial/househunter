@@ -15,21 +15,6 @@ from .dimensions import SUMMARY_DIMENSION_COLUMNS
 from .errors import AmbiguousPlaceError, BuildNotFoundError, HouseHunterError
 from .hazards import HAZARDS, hazard_percentiles_from_record, hazard_select_sql
 
-SUMMARY_COLUMNS = """
-place_id, name, state, place_type, population_2020, housing_units_2020,
-res_hazard_npctl, res_hazard_spread, res_hazard_spectral, res_hazard_tail,
-res_hazard_power4, property_loss_npctl, res_hazard_data_quality,
-res_hazard_available_count, res_hazard_coverage_ratio, alr_npctl, alr_valb,
-fema_vintage, census_vintage, county_fips, county_name,
-community_conditions_group, community_conditions_geography, chrr_release_year,
-mountain_magnitude, mountain_magnitude_version, mountain_pipeline_version,
-relief_5km_m, relief_10km_m, relief_20km_m, relief_40km_m, relief_20km_pct,
-rugged_fraction_20km, rugged_pct, public_mountain_access_raw, public_mountain_access_pct,
-open_mountain_km2_5, open_mountain_km2_15, open_mountain_km2_30,
-restricted_mountain_km2_30, closed_mountain_km2_30, unknown_mountain_km2_30,
-nearest_mountain_trail_km, mountain_trail_km_10, mountain_trail_km_25,
-trail_access_raw, trail_access_pct, mountain_population_coverage, mountain_coverage_status
-"""
 SUMMARY_KEYS = [
     "place_id",
     "name",
