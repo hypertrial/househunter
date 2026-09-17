@@ -34,7 +34,7 @@ from .ranking_reference import (
 )
 
 PIPELINE_VERSION = "ranking-maintainer-etl-v2"
-CRIME_STAGE_SCHEMA = 3
+CRIME_STAGE_SCHEMA = 5
 EMPLOYMENT_STAGE_SCHEMA = 2
 IN_SCOPE_STATE_FIPS = frozenset(
     code for code, state in STATE_BY_FIPS.items() if state not in {"AS", "GU", "MP", "PR", "VI"}
@@ -466,23 +466,29 @@ def _crime(data_root: Path, manifest: Mapping[str, Any]) -> pl.DataFrame:
                     for series in (actuals, populations, participated)
                 ):
                     aggregate[(county_fips, family, year)]["valid"] = False
-            for month in sorted(actuals):
-                year = int(month[-4:])
-                target = aggregate[(county_fips, family, year)]
-                values = (
-                    _number(actuals[month]),
-                    _number(populations.get(month)),
-                    _number(participated.get(month)),
-                )
-                if any(value is None for value in values):
-                    target["valid"] = False
-                    continue
-                offenses, population, reported = values
-                if population < 0 or reported < 0 or offenses < 0:
-                    raise HouseHunterError("FBI summary contains a negative measure")
-                target["offenses"] += offenses
-                target["population"] += population
-                target["participated"] += reported
+                for month in sorted(expected):
+                    target = aggregate[(county_fips, family, year)]
+                    population = _number(populations.get(month))
+                    if population is None:
+                        target["valid"] = False
+                        continue
+                    if population < 0:
+                        raise HouseHunterError("FBI summary contains a negative measure")
+                    target["population"] += population
+                    offenses = _number(actuals.get(month))
+                    reported = _number(participated.get(month))
+                    if offenses is None or reported is None:
+                        continue
+                    if reported < 0 or offenses < 0:
+                        raise HouseHunterError("FBI summary contains a negative measure")
+                    if reported > population:
+                        raise HouseHunterError(
+                            "FBI participated population exceeds the agency population"
+                        )
+                    if reported == 0 and offenses > 0:
+                        continue
+                    target["offenses"] += offenses
+                    target["participated"] += reported
     rows: list[dict[str, Any]] = []
     for county_fips in sorted(set(agencies.values())):
         row: dict[str, Any] = {"county_fips": county_fips}
@@ -492,6 +498,7 @@ def _crime(data_root: Path, manifest: Mapping[str, Any]) -> pl.DataFrame:
         for family, short in (("violent-crime", "violent"), ("property-crime", "property")):
             offenses = 0.0
             participated = 0.0
+            family_complete = True
             for year in (2023, 2024, 2025):
                 value = aggregate.get((county_fips, family, year))
                 coverage = None
@@ -501,12 +508,13 @@ def _crime(data_root: Path, manifest: Mapping[str, Any]) -> pl.DataFrame:
                     participated += float(value["participated"])
                 row[f"crime_{short}_coverage_{year}"] = coverage
                 if coverage is None or coverage < CRIME_COVERAGE_FLOOR:
+                    family_complete = False
                     complete = False
                 else:
                     all_coverages.append(coverage)
             rates[short] = (
                 offenses / (participated / 12.0) * 100_000.0
-                if complete and participated > 0
+                if family_complete and participated > 0
                 else None
             )
         if not complete:

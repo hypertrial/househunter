@@ -476,6 +476,43 @@ test("keeps the County Fit hover preview stable after camera initialization", as
   await expect(tooltip).toHaveCount(0);
 });
 
+test("preserves one-step Back and Forward history across workspace switches", async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.endsWith("-wide"), "Workspace history runs once per browser engine");
+  await installRoutes(page);
+  await page.goto("/?direct-county-fit=1#level=county&metric=residential-hazard&cx=.5&cy=.5&z=1&workspace=county-fit&fit_view=safety&fit_preset=balanced&fit_cx=.5&fit_cy=.5&fit_z=1");
+  await page.getByRole("button", { name: "Map", exact: true }).click();
+  await expect(page).not.toHaveURL(/workspace=county-fit/);
+  await page.goBack();
+  await expect(page).toHaveURL(/workspace=county-fit/);
+
+  await page.goto("/#level=county&metric=residential-hazard&cx=.5&cy=.5&z=1");
+  await page.getByRole("button", { name: "County Fit", exact: true }).click();
+  await expect(page).toHaveURL(/workspace=county-fit/);
+  await page.goBack();
+  await expect(page).not.toHaveURL(/workspace=county-fit/);
+  await page.goForward();
+  await expect(page).toHaveURL(/workspace=county-fit/);
+});
+
+test("keeps ordinary Map semantic history to one entry", async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.endsWith("-wide"), "Map history control runs once per browser engine");
+  await installRoutes(page);
+  await page.goto("/#level=county&metric=residential-hazard&cx=.5&cy=.5&z=1");
+  await selectLayer(page, "mountain");
+  await expect(page).toHaveURL(/metric=mountain/);
+  await page.goBack();
+  await expect(page).toHaveURL(/metric=residential-hazard/);
+
+  await page.goto("/?direct-map-history=1#level=county&metric=residential-hazard&cx=.5&cy=.5&z=1&workspace=county-fit&fit_view=safety&fit_preset=balanced&fit_cx=.5&fit_cy=.5&fit_z=1");
+  await page.getByRole("button", { name: "Map", exact: true }).click();
+  await selectLayer(page, "mountain");
+  await page.goBack();
+  await expect(page).not.toHaveURL(/workspace=county-fit/);
+  await expect(page).toHaveURL(/metric=residential-hazard/);
+  await page.goBack();
+  await expect(page).toHaveURL(/workspace=county-fit/);
+});
+
 test("isolates a County Fit API failure from the five-layer map", async ({ page }) => {
   await installRoutes(page, true, false, 0, false, true);
   await page.goto("/#level=tract&metric=mountain&cx=.4&cy=.6&z=2");

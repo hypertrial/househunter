@@ -334,7 +334,7 @@ population-weighted lower-rank ECDF per component; no tile or state percentile o
 aggregate is cached. A generated schema-2 candidate is written inside the release
 filesystem, validated by independently reconstructing block percentiles, the internal
 composite, tract/county bases, both same-grain peer calibrations, and final magnitudes,
-then renamed to its content identity. The timed path finishes only after the schema-11
+then renamed to its content identity. The timed path finishes only after the schema-13
 HouseHunter snapshot is rebuilt and queryable. It also publishes one content-addressed
 compact fallback under `data/mountain/compact/`.
 

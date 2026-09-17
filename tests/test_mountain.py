@@ -1421,7 +1421,10 @@ def test_rescore_v1_matches_fresh_v2_and_commits_one_recoverable_identity(
 
     monkeypatch.setattr(mountain_migration, "atomic_write_json", recording_atomic_write)
 
-    report = mountain_migration.rescore_v1_release(paths, source_lock_path)
+    progress: list[tuple[int, str]] = []
+    report = mountain_migration.rescore_v1_release(
+        paths, source_lock_path, progress=lambda value, message: progress.append((value, message))
+    )
 
     assert report["legacy_release_id"] == legacy.name
     assert report["release_id"] == report["compact_release_id"]
@@ -1437,6 +1440,7 @@ def test_rescore_v1_matches_fresh_v2_and_commits_one_recoverable_identity(
         for payload in journal_writes
     )
     assert not (paths.data / "mountain" / "migration-v2.json").exists()
+    assert (70, f"Staging schema-{BUILD_SCHEMA_VERSION} HouseHunter snapshot") in progress
     assert Path(str(report["lineage_report"])).is_file()
     assert legacy.is_dir()
     assert {

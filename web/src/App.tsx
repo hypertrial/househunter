@@ -347,7 +347,8 @@ function Workspace({ meta, active, onCountyFit }: { meta: Meta; active: boolean;
   const [extremesLoading, setExtremesLoading] = useState(false);
   const camera = useRef<CameraState>(initial.camera);
   const [cameraTarget, setCameraTarget] = useState<(CameraState & { nonce: number }) | undefined>();
-  const firstSemantic = useRef(true);
+  const firstSemantic = useRef(active);
+  const wasActive = useRef(active);
   const scopeHashNormalized = useRef(false);
   const restoringHistory = useRef(false);
   const layerMenu = useRef<HTMLDivElement | null>(null);
@@ -483,10 +484,18 @@ function Workspace({ meta, active, onCountyFit }: { meta: Meta; active: boolean;
     window.history[mode === "push" ? "pushState" : "replaceState"](null, "", `#${params}`);
   }, [active, communityConditionsGroupMax, costOfLivingIndexMax, county, homeSqftFor1mMin, housingBuilt2000PlusPctMin, level, metric, mountainMagnitudeMin, selected, showUnranked, state]);
   useEffect(() => {
+    if (!active) {
+      wasActive.current = false;
+      return;
+    }
+    if (!wasActive.current) {
+      wasActive.current = true;
+      return;
+    }
     if (firstSemantic.current) firstSemantic.current = false;
     else if (restoringHistory.current) restoringHistory.current = false;
     else writeHash("push");
-  }, [writeHash]);
+  }, [active, writeHash]);
   useEffect(() => {
     if (!builtState || scopeHashNormalized.current) return;
     scopeHashNormalized.current = true;

@@ -1498,7 +1498,7 @@ def _publish_current(paths: RuntimePaths, target: Path, build_id: str, scope: st
 
 
 def publish_snapshot(paths: RuntimePaths, target: Path) -> None:
-    """Validate and atomically publish an already staged schema-10 snapshot."""
+    """Validate and atomically publish an already staged current-schema snapshot."""
     if (
         paths.builds.is_symlink()
         or target.is_symlink()

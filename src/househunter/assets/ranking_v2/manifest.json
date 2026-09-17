@@ -1,5 +1,5 @@
 {
-  "calibration_hash": "e03601f68ec16189bb505e9c443ad82be34334692e240f23c87164b2ac7805b8",
+  "calibration_hash": "92f2230f6241f724c065c032bc6fcc9f07fde7bb966fef47ad468598a2b0df5d",
   "calibration_id": "ranking-calibration-v2",
   "county_fips_sha256": "e637d99538d4e253df2320f0a660e6bfca6d674d50c215f907fa1a67e287e333",
   "coverage": {
@@ -8,10 +8,10 @@
       "health": 3080,
       "lifestyle": 3135,
       "opportunity": 3134,
-      "safety": 1300
+      "safety": 2129
     },
-    "complete_public_core_count": 1284,
-    "partial_public_core_count": 1860,
+    "complete_public_core_count": 2111,
+    "partial_public_core_count": 1033,
     "row_count": 3144,
     "schema_version": 1,
     "source_status_counts": {
@@ -28,8 +28,8 @@
         "missing": 55
       },
       "crime_status": {
-        "below_coverage_or_missing": 1748,
-        "complete": 1378,
+        "below_coverage_or_missing": 870,
+        "complete": 2256,
         "missing": 18
       },
       "employment_status": {
@@ -77,7 +77,7 @@
     "calibration": {
       "bytes": 5707,
       "filename": "calibration.json",
-      "sha256": "240b676609f8bcb594131b2b2f2c631c3a77aa15bdd1d0bbf550b6e5b9edbe4e"
+      "sha256": "a0a46c76dccbc658dcbd94d3953ca4581c72a7b18ab20c5e001f30fc6fd70129"
     },
     "citations": {
       "bytes": 2011,
@@ -85,10 +85,10 @@
       "sha256": "40e6aef5caeb84fac15784121bdcf3353a6d1a2adf07bc2710c54b011f9e699e"
     },
     "counties": {
-      "bytes": 686370,
+      "bytes": 784887,
       "filename": "counties.parquet",
       "rows": 3144,
-      "sha256": "8da8dd4ee2ffaf3ad313074106a3c608f32ecb78a7ebce792adc66d90114e42c"
+      "sha256": "9b72d65a968669a920002e26d4033f2ab3398a987c98fca63f14fbaa875288c8"
     },
     "homeschool": {
       "bytes": 26210,
@@ -97,11 +97,11 @@
     }
   },
   "methodology_id": "top-counties-v2",
-  "release_id": "6252d64e7839098d0ea648ba2db9f2fede6ba02dc7883ae2f98403d2e5b54668",
+  "release_id": "9e4d46238de4abac9179abb25f27a7fe8486a08c21b43687318444afdded4576",
   "row_count": 3144,
   "schema_version": 2,
   "scope": "national",
-  "source_lock_sha256": "19e3cee5cc7c6a77b772b765e11ffb7a2c46a7678062dd8b28dc0cea3084c298",
+  "source_lock_sha256": "cdd20405ebb27157b4b3bc21cda7bd4f75ae43bdbcf06e36a37e47dd9b82d8b3",
   "vintages": {
     "acs_commute_2024": "2024 ACS 5-year",
     "acs_property_tax_2024": "2024 ACS 5-year",

@@ -566,7 +566,7 @@
       "deduplication": "one row per ORI, month, and offense family; duplicate rows fail",
       "limitation": "agency service populations are a reporting-coverage proxy and may overlap; coverage is not a distinct-resident census",
       "rate": "sum offenses across 2023-2025 / (sum participated_population across included ORI-months / 12) * 100000",
-      "reported_zero": "zero offenses with positive participated_population is valid; null participation or offense is missing",
+      "reported_zero": "zero offenses with positive participated_population is valid; null participation or offense is missing; positive offenses with zero participated_population are nonreporting, so the valid population remains in the coverage denominator while both offense and participation numerators are omitted",
       "utility": "0.60 * inverse average-tie ECDF violent rate + 0.40 * inverse average-tie ECDF property rate"
     },
     "employment": {

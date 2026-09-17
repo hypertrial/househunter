@@ -148,7 +148,7 @@ def test_etl_revalidates_staged_bytes_before_normalized_checkpoint_reuse(
     [
         (
             "crime",
-            {"stage": "crime", "schema": 2, "sources_sha256": "locked"},
+            {"stage": "crime", "schema": 4, "sources_sha256": "locked"},
             {
                 "stage": "crime",
                 "schema": ranking_pipeline.CRIME_STAGE_SCHEMA,
@@ -256,9 +256,9 @@ def test_packaged_production_ranking_bundle_is_valid() -> None:
     assert bundle.counties.height == 3144
     coverage = bundle.manifest["coverage"]
     assert coverage == bundle_coverage_summary(bundle.counties)
-    assert coverage["complete_public_core_count"] == 1284
-    assert coverage["partial_public_core_count"] == 1860
-    assert coverage["source_status_counts"]["crime_status"]["complete"] == 1378
+    assert coverage["complete_public_core_count"] == 2111
+    assert coverage["partial_public_core_count"] == 1033
+    assert coverage["source_status_counts"]["crime_status"]["complete"] == 2256
     assert coverage["source_status_counts"]["water_status"]["complete"] == 2975
     assert coverage["source_status_counts"]["climate_coverage_status"][
         "complete_in_county_station_mean"
@@ -417,6 +417,124 @@ def test_crime_requires_every_offense_month_but_accepts_explicit_zero(tmp_path: 
     assert explicit_zero["crime_coverage"] == pytest.approx(1.0)
     assert explicit_zero["crime_violent_rate"] == pytest.approx(0.0)
     assert explicit_zero["crime_property_rate"] == pytest.approx(0.0)
+
+
+def test_crime_uses_partial_reporting_coverage_and_matching_person_years(
+    tmp_path: Path,
+) -> None:
+    months = [f"{month:02d}-{year}" for year in (2023, 2024, 2025) for month in range(1, 13)]
+    contract = "b" * 64
+    agencies: list[dict[str, str]] = []
+
+    def write_agency(
+        county_fips: str,
+        suffix: str,
+        *,
+        population: int | None,
+        participated: int | None,
+        offenses: int | None,
+    ) -> None:
+        ori = f"AL{county_fips[-3:]}{suffix}"
+        agencies.append({"ori": ori, "county_fips": county_fips})
+        for family in ("violent-crime", "property-crime"):
+            payload = {
+                "offenses": {
+                    "actuals": {"Fixture Offenses": {month: offenses for month in months}}
+                },
+                "populations": {
+                    "population": {"Fixture": {month: population for month in months}},
+                    "participated_population": {
+                        "Fixture": {month: participated for month in months}
+                    },
+                },
+            }
+            path = tmp_path / "raw" / "fbi" / contract / "summaries" / family / f"{ori}.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload))
+
+    # Exact 90%, above 90%, below 90%, and an unknowable denominator.
+    for fips, reporting, missing in (
+        ("01001", 90, 10),
+        ("01003", 91, 9),
+        ("01005", 89, 11),
+    ):
+        write_agency(fips, "0001", population=reporting, participated=reporting, offenses=1)
+        write_agency(fips, "0002", population=missing, participated=missing, offenses=None)
+    write_agency("01007", "0001", population=90, participated=90, offenses=1)
+    write_agency("01007", "0002", population=None, participated=None, offenses=None)
+    write_agency("01009", "0001", population=99, participated=99, offenses=1)
+    write_agency("01009", "0002", population=1, participated=0, offenses=1)
+    write_agency("01011", "0001", population=90, participated=90, offenses=1)
+    write_agency("01011", "0002", population=10, participated=None, offenses=1)
+
+    rows = {
+        row["county_fips"]: row
+        for row in ranking_pipeline._crime(
+            tmp_path, {"contract_sha256": contract, "agencies": agencies}
+        ).iter_rows(named=True)
+    }
+
+    exact = rows["01001"]
+    assert exact["crime_status"] == "complete"
+    assert exact["crime_coverage"] == pytest.approx(0.9)
+    assert exact["crime_violent_coverage_2023"] == pytest.approx(0.9)
+    assert exact["crime_property_coverage_2025"] == pytest.approx(0.9)
+    assert exact["crime_violent_rate"] == pytest.approx(100_000 * 36 / (90 * 36 / 12))
+    assert exact["crime_property_rate"] == pytest.approx(100_000 * 36 / (90 * 36 / 12))
+
+    assert rows["01003"]["crime_status"] == "complete"
+    assert rows["01003"]["crime_coverage"] == pytest.approx(0.91)
+    assert rows["01005"]["crime_status"] == "below_coverage_or_missing"
+    assert rows["01005"]["crime_violent_coverage_2023"] == pytest.approx(0.89)
+    assert rows["01005"]["crime_coverage"] is None
+    assert rows["01005"]["crime_violent_rate"] is None
+    assert rows["01007"]["crime_status"] == "below_coverage_or_missing"
+    assert rows["01007"]["crime_violent_coverage_2023"] is None
+    zero_participation = rows["01009"]
+    assert zero_participation["crime_status"] == "complete"
+    assert zero_participation["crime_coverage"] == pytest.approx(0.99)
+    assert zero_participation["crime_violent_rate"] == pytest.approx(
+        100_000 * 36 / (99 * 36 / 12)
+    )
+    assert rows["01011"]["crime_status"] == "complete"
+    assert rows["01011"]["crime_coverage"] == pytest.approx(0.9)
+    assert rows["01011"]["crime_violent_rate"] == pytest.approx(100_000 * 36 / (90 * 36 / 12))
+
+
+@pytest.mark.parametrize(
+    ("population", "participated", "offenses", "message"),
+    [
+        (100, 101, 0, "participated population exceeds"),
+        (100, -1, 0, "negative measure"),
+    ],
+)
+def test_crime_rejects_impossible_reporting_values(
+    tmp_path: Path,
+    population: int,
+    participated: int,
+    offenses: int,
+    message: str,
+) -> None:
+    months = [f"{month:02d}-{year}" for year in (2023, 2024, 2025) for month in range(1, 13)]
+    contract = "c" * 64
+    ori = "AL0010001"
+    payload = {
+        "offenses": {"actuals": {"Fixture Offenses": {month: offenses for month in months}}},
+        "populations": {
+            "population": {"Fixture": {month: population for month in months}},
+            "participated_population": {"Fixture": {month: participated for month in months}},
+        },
+    }
+    for family in ("violent-crime", "property-crime"):
+        path = tmp_path / "raw" / "fbi" / contract / "summaries" / family / f"{ori}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload))
+
+    with pytest.raises(HouseHunterError, match=message):
+        ranking_pipeline._crime(
+            tmp_path,
+            {"contract_sha256": contract, "agencies": [{"ori": ori, "county_fips": "01001"}]},
+        )
 
 
 def test_employment_keeps_suppressed_commute_components_null(

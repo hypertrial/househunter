@@ -50,7 +50,10 @@ cache and regenerate the compact manifest without making network requests.
 - Census PEP population is context and an eligibility gate, never a utility.
 - FBI reporting is voluntary. Crime is null unless both offense families meet the
   90% population-served coverage floor in every included year. Multi-county agency
-  catalog entries are not assigned to an invented primary county.
+  catalog entries are not assigned to an invented primary county. A month with
+  positive offenses but zero participated population is treated as nonreporting:
+  its valid agency population remains in the coverage denominator, while its
+  offense and participation numerators are omitted.
 - EPA water allocations use active retail CWS boundaries and 2020 block
   population. A system marked as a wholesaler remains included when its service
   areas also contain a non-wholesale code; only an exact `{WH}` service-area set is

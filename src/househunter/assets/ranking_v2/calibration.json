@@ -25,20 +25,20 @@
       "valid_count": 3143
     },
     "u_crime_property": {
-      "county_fips_sha256": "d034e400c2fb99e3aaccf6495c728c56e2761d6bc4f7ef07459f154c2d266ae8",
+      "county_fips_sha256": "5a7df60a510e43229661b12a44f6d43d3e0226c69643b55a62b02c6537426b3a",
       "direction": "lower_is_better",
       "raw_column": "crime_property_rate",
-      "raw_utility_sha256": "3140ab62651b3e18343b276b5a4414a14a8741e25ed57cca092b03e7aa71a4ae",
+      "raw_utility_sha256": "be6c1b656385954b1c95ec2b25e6f5815095bf6e89a80d33c91ccf335595d717",
       "tie_policy": "average_tie_national_ecdf",
-      "valid_count": 1378
+      "valid_count": 2256
     },
     "u_crime_violent": {
-      "county_fips_sha256": "d034e400c2fb99e3aaccf6495c728c56e2761d6bc4f7ef07459f154c2d266ae8",
+      "county_fips_sha256": "5a7df60a510e43229661b12a44f6d43d3e0226c69643b55a62b02c6537426b3a",
       "direction": "lower_is_better",
       "raw_column": "crime_violent_rate",
-      "raw_utility_sha256": "16ab369a2947ab7d4e92abc5d3cc1b8a3c76c4e115be5c5dad6788e17bd6e0c0",
+      "raw_utility_sha256": "1cc1ca4972fb16358970a43f92a5d77b17defddca44c8ba957f5e7bc430962d2",
       "tie_policy": "average_tie_national_ecdf",
-      "valid_count": 1378
+      "valid_count": 2256
     },
     "u_dental": {
       "county_fips_sha256": "e637d99538d4e253df2320f0a660e6bfca6d674d50c215f907fa1a67e287e333",
@@ -102,7 +102,7 @@
     "growth": 0.5,
     "weekly_wage": 0.25
   },
-  "hash": "e03601f68ec16189bb505e9c443ad82be34334692e240f23c87164b2ac7805b8",
+  "hash": "92f2230f6241f724c065c032bc6fcc9f07fde7bb966fef47ad468598a2b0df5d",
   "housing_sqft_bounds": {
     "high": 2500.0,
     "low": 500.0
