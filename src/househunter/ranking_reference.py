@@ -35,7 +35,6 @@ HOMESCHOOL_SOURCE_CHECK_SCOPE = (
     "statutory interpretation, or currency determination was performed."
 )
 CRIME_COVERAGE_FLOOR = 0.90
-CONNECTICUT_CURRENT_FIPS_PREFIX = "09"
 IN_SCOPE_STATE_FIPS = frozenset(
     code for code, state in STATE_BY_FIPS.items() if state not in {"AS", "GU", "MP", "PR", "VI"}
 )
