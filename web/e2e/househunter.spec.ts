@@ -448,6 +448,34 @@ test("loads partial County Fit lazily and preserves the original map workspace",
   await expect(page).not.toHaveURL(/workspace=county-fit/);
 });
 
+test("keeps the County Fit hover preview stable after camera initialization", async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.endsWith("-wide"), "Hover stability runs once per browser engine");
+  await installRoutes(page);
+  await page.goto("/#level=county&workspace=county-fit&fit_view=safety&fit_cx=.5&fit_cy=.5&fit_z=1");
+  const map = page.getByRole("img", { name: /Focusable USA county County Fit map/ });
+  await expect(map).toHaveAttribute("aria-busy", "false");
+  const bounds = await map.boundingBox();
+  if (!bounds) throw new Error("County Fit map has no bounds");
+  const stateCollection = topoFeature(
+    states as Parameters<typeof topoFeature>[0],
+    states.objects.geography as Parameters<typeof topoFeature>[1],
+  );
+  const projection = geoAlbersUsa().fitExtent(
+    [[24, 64], [Math.max(25, bounds.width - 24), Math.max(65, bounds.height - 112)]],
+    stateCollection,
+  );
+  const colorado = projection([-105.5, 39]);
+  if (!colorado) throw new Error("Colorado fixture could not be projected");
+
+  await page.mouse.move(bounds.x + colorado[0], bounds.y + colorado[1]);
+  const tooltip = page.locator(".map-tooltip");
+  await expect(tooltip).toContainText("Boulder");
+  await page.waitForTimeout(250);
+  await expect(tooltip).toContainText("Boulder");
+  await page.mouse.move(8, 8);
+  await expect(tooltip).toHaveCount(0);
+});
+
 test("isolates a County Fit API failure from the five-layer map", async ({ page }) => {
   await installRoutes(page, true, false, 0, false, true);
   await page.goto("/#level=tract&metric=mountain&cx=.4&cy=.6&z=2");

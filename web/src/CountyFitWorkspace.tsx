@@ -169,7 +169,9 @@ export default function CountyFit({ meta, active, onMap }: {
   const [visibleRows, setVisibleRows] = useState(100);
   const [panel, setPanel] = useState<"filters" | "weights" | "readiness" | null>(null);
   const [status, setStatus] = useState("County Fit is loading");
-  const camera = useRef<CameraState>(parsed?.camera ?? { cx: 0.5, cy: 0.5, z: 1 });
+  const initialCamera = useRef<CameraState>(parsed?.camera ?? { cx: 0.5, cy: 0.5, z: 1 });
+  const camera = useRef<CameraState>(initialCamera.current);
+  const [cameraTarget, setCameraTarget] = useState<(CameraState & { nonce: number }) | undefined>();
   const detailTrigger = useRef<HTMLElement | null>(null);
   const restoring = useRef(false);
   const firstHash = useRef(true);
@@ -211,6 +213,7 @@ export default function CountyFit({ meta, active, onMap }: {
       setPreset(next.preset); setWeights(next.weights); setDraftWeights(next.weights);
       setFilters(next.filters); setDraftFilters(next.filters); setSelected(next.selected);
       camera.current = next.camera;
+      setCameraTarget({ ...next.camera, nonce: Date.now() });
       setFocusTarget(next.selected ? { kind: "place", id: next.selected, nonce: Date.now() } : null);
       setPanel(null);
     };
@@ -303,7 +306,8 @@ export default function CountyFit({ meta, active, onMap }: {
       neutralOnly={Boolean(error)}
       retryGeneration={retry}
       focusTarget={focusTarget}
-      initialCamera={camera.current}
+      cameraTarget={cameraTarget}
+      initialCamera={initialCamera.current}
       onSelect={selectCounty}
       onPreview={setPreview}
       onCamera={(next) => { camera.current = next; updateHash("replace"); }}
