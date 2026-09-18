@@ -197,7 +197,8 @@ The magnitude does not claim property views, trail quality, drive time, or guara
 public access.
 
 For Cost of Living, HouseHunter preserves BEA's source values without clamping.
-Only the map colors clamp visually at 80 and 120. The pinned ACS county-to-CBSA
+Only the map colors clamp visually at 80 and 120, using eight stepped classes.
+The pinned ACS county-to-CBSA
 relationship assigns metropolitan counties to BEA MARPP rows; all other in-scope
 counties, including micropolitan counties, use BEA geography `00999`, the U.S.
 Nonmetropolitan Portion. Puerto Rico and other territories are outside scope for RPP.
@@ -336,6 +337,10 @@ metric bounds exclude null rows even with `include_unranked`; exact and maximum 
 filters both apply when supplied. Bounds reject nonfinite, out-of-domain, and inverted
 ranges. The map uses a visual domain of M0–M5 for tracts and M0–M4 for counties without
 capping stored values; common M0–M4 values keep the same colors across grains.
+Map fills use one shared stepped palette rather than continuous interpolation:
+five hazard and home-cost classes, ten community groups, eight cost-of-living
+classes, Mountain Magnitude half-step classes plus a terminal cap, and five
+County Fit classes. Stored metric values are unchanged.
 
 The real-data interaction benchmark is kept separate from fixture CI because its
 timings are machine-sensitive:
