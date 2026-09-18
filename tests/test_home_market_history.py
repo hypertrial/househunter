@@ -180,6 +180,33 @@ def test_duplicate_month_dirs_with_conflicting_content_are_rejected(
         home_market.list_imported_releases(paths)
 
 
+def test_corrupt_imported_release_is_not_silently_omitted(
+    fixture_environment: tuple[RuntimePaths, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, _ = fixture_environment
+    home_market_root = paths.data / "home-market"
+    releases = home_market_root / "releases"
+    releases.mkdir(parents=True, exist_ok=True)
+    home_market_root.chmod(0o700)
+    releases.chmod(0o700)
+    broken_release = releases / "broken-release"
+    broken_release.mkdir()
+    broken_release.chmod(0o700)
+    monkeypatch.setattr(home_market, "load_release_lock", lambda path=None: {"releases": []})
+    monkeypatch.setattr(
+        home_market,
+        "validate_release_directory",
+        lambda _directory, _lock: (_ for _ in ()).throw(HouseHunterError("checksum mismatch")),
+    )
+
+    with pytest.raises(
+        HouseHunterError,
+        match="Home-market history release broken-release is invalid: checksum mismatch",
+    ):
+        home_market.list_imported_releases(paths)
+
+
 def test_history_import_requires_acknowledgement_and_lock(
     fixture_environment: tuple[RuntimePaths, Path],
     tmp_path: Path,

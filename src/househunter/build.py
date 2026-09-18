@@ -246,7 +246,11 @@ def _load_optional_dimension_inputs(
             "logical_sha256": home_manifest["logical_sha256"],
             "month": home_manifest["month"],
         }
-    if current_home_identity is None and not t12_identity.get("months"):
+    if (
+        current_home_identity is None
+        and not t12_identity.get("months")
+        and "error" not in t12_identity
+    ):
         home_digest = sha256_bytes(b"home-market:source-unavailable")
     else:
         home_digest = sha256_bytes(
@@ -309,9 +313,11 @@ def _build_ranking_sidecar(
                 ],
             },
         }
+    history_error: str | None = None
     try:
         housing = trailing_twelve_month_metrics(paths)
-    except (HouseHunterError, OSError, KeyError, TypeError, ValueError):
+    except (HouseHunterError, OSError, KeyError, TypeError, ValueError) as exc:
+        history_error = str(exc)
         housing = pl.DataFrame(
             {
                 "county_fips": [],
@@ -360,7 +366,7 @@ def _build_ranking_sidecar(
         if housing.height and "housing_valid_months" in housing.columns
         else 0
     )
-    history_ready = valid_months >= 9
+    history_ready = history_error is None and valid_months >= 9
     public_pillars = [
         pillar
         for pillar, column in (
@@ -376,7 +382,13 @@ def _build_ranking_sidecar(
     return sidecar, {
         "available": sidecar.height > 0,
         "readiness": "ready" if sidecar.height and history_ready else "partial",
-        "reason_code": None if history_ready else "home_market_history_insufficient",
+        "reason_code": (
+            None
+            if history_ready
+            else "home_market_history_invalid"
+            if history_error is not None
+            else "home_market_history_insufficient"
+        ),
         "methodology_id": METHODOLOGY_ID,
         "calibration_id": bundle.manifest["calibration_id"],
         "calibration_hash": bundle.manifest["calibration_hash"],
@@ -391,7 +403,7 @@ def _build_ranking_sidecar(
         "homeschool": bundle.homeschool,
         "notices": [HOMESCHOOL_NOTICE],
         "local_history": {
-            "status": "ready" if history_ready else "insufficient",
+            "status": "ready" if history_ready else "invalid" if history_error else "insufficient",
             "valid_months": valid_months,
             "required_months": 9,
             "commands": [
@@ -399,7 +411,7 @@ def _build_ranking_sidecar(
                 "househunter build",
             ],
         },
-        "error": None,
+        "error": history_error,
     }
 
 

@@ -247,6 +247,67 @@ beforeEach(() => {
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
+it("preserves navigation that occurs while metadata is loading", async () => {
+  const baseFetch = mockFetch();
+  let releaseMeta: () => void = () => {};
+  const pendingMeta = new Promise<void>((resolve) => { releaseMeta = resolve; });
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    const url = new URL(String(input), "http://127.0.0.1");
+    if (url.pathname === "/api/v3/meta") await pendingMeta;
+    return baseFetch(input);
+  }));
+  window.history.replaceState(null, "", "/#level=tract&metric=residential-hazard");
+  render(<App />);
+  expect(screen.getByRole("status")).toHaveTextContent("Opening HouseHunter map");
+
+  window.history.pushState(
+    null,
+    "",
+    "/#level=county&metric=mountain&state=CO&cx=0.4000&cy=0.6000&z=2.000",
+  );
+  window.dispatchEvent(new PopStateEvent("popstate"));
+  releaseMeta();
+
+  await screen.findAllByText("HouseHunter");
+  await waitFor(() => expect(layerButton()).toHaveAccessibleName(
+    "Map layer: Mountain Magnitude — HouseHunter",
+  ));
+  expect(screen.getByRole("button", { name: "Counties" })).toHaveAttribute("aria-pressed", "true");
+  expect(window.location.hash).toContain("metric=mountain");
+  expect(window.location.hash).toContain("state=CO");
+  expect(window.location.hash).toContain("cx=0.4000");
+  expect(window.location.hash).toContain("cy=0.6000");
+  expect(window.location.hash).toContain("z=2.000");
+});
+
+it("does not leak Explore failures into address Search", async () => {
+  const baseFetch = mockFetch();
+  vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+    const url = new URL(String(input), "http://127.0.0.1");
+    if (url.pathname === "/api/v3/places" && url.searchParams.has("direction")) {
+      return Promise.resolve(new Response(JSON.stringify({ detail: "Extremes unavailable" }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      }));
+    }
+    return baseFetch(input);
+  }));
+  render(<App />);
+  await screen.findByText("HouseHunter");
+
+  const explore = screen.getByRole("button", { name: "Lowest / Highest" });
+  fireEvent.click(explore);
+  const explorePanel = screen.getByRole("region", {
+    name: "Lowest and highest Residential Hazard Exposure",
+  });
+  expect(await within(explorePanel).findByRole("alert")).toHaveTextContent("Extremes unavailable");
+  fireEvent.click(explore);
+  fireEvent.click(screen.getByRole("button", { name: "Search" }));
+
+  expect(within(screen.getByRole("region", { name: "Search" })).queryByRole("alert"))
+    .not.toBeInTheDocument();
+});
+
 describe("score semantics", () => {
   it("retains qualitative score labels independently of continuous colors", () => {
     expect([0, 19.94, 19.96, 39.94, 39.96, 59.96, 79.96, 100].map(scoreBand)).toEqual([

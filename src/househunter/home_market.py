@@ -836,8 +836,17 @@ def list_imported_releases(
             continue
         try:
             frame, manifest = validate_release_directory(directory, lock)
-        except (HouseHunterError, SourceContractError, OSError, KeyError, TypeError, ValueError):
-            continue
+        except (
+            HouseHunterError,
+            SourceContractError,
+            OSError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise HouseHunterError(
+                f"Home-market history release {directory.name} is invalid: {exc}"
+            ) from exc
         month = str(manifest["month"])
         digest = str(manifest["logical_sha256"])
         previous = seen_months.get(month)

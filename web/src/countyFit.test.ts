@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   COUNTY_FIT_POPULATION_FLOOR, COUNTY_FIT_PRESETS, COUNTY_FIT_VIEWS,
-  countyFitFiltersValid, countyFitParams, countyFitWeightsValid,
+  countyFitFiltersValid, countyFitHistoryNotice, countyFitParams, countyFitWeightsValid,
   decodeCountyFitSummary, EMPTY_COUNTY_FIT_FILTERS, readCountyFitHash,
 } from "./countyFit";
 
@@ -88,6 +88,14 @@ describe("County Fit public contract", () => {
       lifestyle: "Mountain Landscape",
       family: "Homeschool Policy Fit",
     });
+  });
+
+  it("distinguishes invalid approved history from insufficient history", () => {
+    expect(countyFitHistoryNotice("home_market_history_invalid")).toEqual({
+      title: "Approved home-market history failed validation.",
+      summary: "Affordability and Custom Fit are unavailable until the invalid approved history is repaired or re-imported and the snapshot is rebuilt.",
+    });
+    expect(countyFitHistoryNotice("home_market_history_insufficient").summary).toContain("≥9 approved");
   });
 
   it("round-trips valid custom hash state and rejects malformed state", () => {

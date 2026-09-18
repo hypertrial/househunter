@@ -337,6 +337,27 @@ def test_build_identity_includes_source_vintages(
     assert metadata["source_vintages"]["chrr"] == config["chrr"]["version"]
 
 
+def test_invalid_home_market_history_cannot_reuse_missing_history_snapshot(
+    fixture_environment: tuple[RuntimePaths, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, fixture_root = fixture_environment
+    install_ranking_fixture(monkeypatch, fixture_root)
+    without_history = build_snapshot(paths)
+
+    def invalid_history(*_args: object, **_kwargs: object) -> pl.DataFrame:
+        raise HouseHunterError("Home-market history release broken is invalid: checksum mismatch")
+
+    monkeypatch.setattr("househunter.build.trailing_twelve_month_identity", invalid_history)
+    monkeypatch.setattr("househunter.build.trailing_twelve_month_metrics", invalid_history)
+    with_invalid_history = build_snapshot(paths)
+
+    assert with_invalid_history != without_history
+    metadata = json.loads((with_invalid_history / "build.json").read_text())
+    assert metadata["ranking"]["reason_code"] == "home_market_history_invalid"
+    assert metadata["ranking"]["local_history"]["status"] == "invalid"
+
+
 def test_build_joins_promoted_mountain_release_and_changes_identity(
     fixture_environment: tuple[RuntimePaths, Path],
 ) -> None:

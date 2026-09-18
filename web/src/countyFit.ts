@@ -18,6 +18,22 @@ export const COUNTY_FIT_VIEWS: Array<{ key: CountyFitView; label: string }> = [
   { key: "custom", label: "Custom Fit" },
 ];
 
+export function countyFitHistoryNotice(reasonCode: string | null): {
+  title: string;
+  summary: string;
+} {
+  if (reasonCode === "home_market_history_invalid") {
+    return {
+      title: "Approved home-market history failed validation.",
+      summary: "Affordability and Custom Fit are unavailable until the invalid approved history is repaired or re-imported and the snapshot is rebuilt.",
+    };
+  }
+  return {
+    title: "Affordability and Custom Fit need approved history.",
+    summary: "Affordability and Custom Fit need ≥9 approved Realtor.com history months.",
+  };
+}
+
 export const COUNTY_FIT_PRESETS: Record<string, Record<CountyFitPillar, number>> = {
   balanced: { safety: 20, health: 15, affordability: 25, opportunity: 15, lifestyle: 15, family: 10 },
   "safety-health": { safety: 35, health: 25, affordability: 15, opportunity: 10, lifestyle: 5, family: 10 },

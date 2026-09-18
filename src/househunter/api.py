@@ -362,6 +362,8 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
                 "reason_code": "snapshot_missing_or_incompatible",
                 "methodology_id": "top-counties-v2",
                 "available_pillars": [],
+                "population_floor": POPULATION_FLOOR,
+                "rank_policy": RANK_POLICY,
             }
         return result
 

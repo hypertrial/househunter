@@ -199,6 +199,11 @@ the app displays its canonical county name.
    scripts. Delete temporary copies when the review is complete. Never add this source
    to `download --source all`.
 
+If any immutable imported history release later fails validation, County Fit reports
+`home_market_history_invalid` and keeps its public-data pillars available, but disables
+Affordability and Custom Fit. Repair or re-import the affected approved history and run
+`househunter build`; a corrupt release is never silently skipped.
+
 ## FEMA National Risk Index tracts
 
 - Dataset: National Risk Index Census Tracts

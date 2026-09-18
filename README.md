@@ -240,6 +240,10 @@ pillars present. Missing cores exclude the county; null stays null. Explicit
 the normal one-month import, County Fit is explicitly partial: Safety Factors, Health,
 Opportunity, Mountain Landscape, and Homeschool Policy Fit remain available while
 Affordability and Custom Fit show the history-import and rebuild commands.
+If an imported immutable history release fails validation, readiness instead reports
+`home_market_history_invalid`; the public-data views remain available, while
+Affordability and Custom Fit stay disabled until the approved history is repaired or
+re-imported and the snapshot is rebuilt.
 
 Each packaged ranking release records validator-checked source-status distributions,
 non-null bundle-pillar counts, and complete/partial public-core county counts in its

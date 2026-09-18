@@ -21,6 +21,7 @@ from test_build_store import _install_dimension_fixture, _promote_mountain_fixtu
 from test_map_assets import write_assets
 
 import househunter.api as api_module
+import househunter.build as build_module
 import househunter.ranking_reference as ranking_reference
 from househunter import __version__
 from househunter.api import create_app
@@ -33,6 +34,19 @@ from househunter.geocode import OSM_ATTRIBUTION, AddressMatch, reset_geocode_run
 from househunter.home_market import is_stale
 from househunter.mountain import MOUNTAIN_RUNTIME_COLUMNS
 from househunter.ranking_reference import validate_ranking_assets
+
+
+def test_meta_keeps_county_fit_policy_when_snapshot_is_missing(
+    fixture_environment: tuple[RuntimePaths, object],
+) -> None:
+    paths, _ = fixture_environment
+    with TestClient(create_app(paths, testing=True)) as client:
+        readiness = client.get("/api/v3/meta").json()["county_fit"]
+
+    assert readiness["readiness"] == "unavailable"
+    assert readiness["reason_code"] == "snapshot_missing_or_incompatible"
+    assert readiness["population_floor"] == 25_000
+    assert readiness["rank_policy"] == "competition"
 
 
 @pytest.mark.parametrize("method", ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
@@ -624,6 +638,35 @@ def test_county_fit_api_detail_export_and_validation_share_one_ranking_contract(
             )
             assert response.status_code == 422
         assert client.get("/api/v3/top-counties").status_code == 404
+
+
+def test_corrupt_home_market_history_disables_private_ranking_views(
+    fixture_environment: tuple[RuntimePaths, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, root = fixture_environment
+    _install_dimension_fixture(monkeypatch)
+    install_ranking_fixture(monkeypatch, root)
+
+    def invalid_history(*_args: object, **_kwargs: object) -> pl.DataFrame:
+        raise HouseHunterError("Home-market history release broken is invalid: checksum mismatch")
+
+    monkeypatch.setattr(build_module, "trailing_twelve_month_metrics", invalid_history)
+    build_snapshot(paths)
+    with TestClient(create_app(paths, testing=True)) as client:
+        readiness = client.get("/api/v3/meta").json()["county_fit"]
+
+    assert readiness["readiness"] == "partial"
+    assert readiness["reason_code"] == "home_market_history_invalid"
+    assert readiness["local_history"]["status"] == "invalid"
+    assert readiness["local_history"]["valid_months"] == 0
+    assert readiness["available_pillars"] == [
+        "safety",
+        "health",
+        "opportunity",
+        "lifestyle",
+        "family",
+    ]
 
 
 def test_county_fit_api_preserves_partial_readiness_boundaries(
