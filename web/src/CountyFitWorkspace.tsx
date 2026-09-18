@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import RiskMap, { type FocusTarget, type MapPreview } from "./RiskMap";
 import {
   COUNTY_FIT_PILLARS,
+  COUNTY_FIT_POPULATION_FLOOR,
   COUNTY_FIT_PRESETS,
   COUNTY_FIT_VIEWS,
   EMPTY_COUNTY_FIT_FILTERS,
@@ -28,8 +29,17 @@ const MAP_FILTERS: MapFilters = {
   homeSqftFor1mMin: null, housingBuilt2000PlusPctMin: null,
 };
 const PILLAR_LABELS: Record<CountyFitPillar, string> = {
-  safety: "Safety", health: "Health", affordability: "Affordability",
-  opportunity: "Opportunity", lifestyle: "Lifestyle", family: "Family Autonomy",
+  safety: "Safety Factors", health: "Health", affordability: "Affordability",
+  opportunity: "Opportunity", lifestyle: "Mountain Landscape", family: "Homeschool Policy Fit",
+};
+const VIEW_DESCRIPTIONS: Record<CountyFitView, string> = {
+  safety: "50% residential hazard, 35% reported crime, and 15% public-water violation share. Public-water coverage is context only; it excludes private wells and is not countywide water quality.",
+  health: "Provider availability plus County Health Rankings & Roadmaps community context.",
+  affordability: "Housing buying power, regional price parity, and property-tax inputs.",
+  opportunity: "Employment growth, wages, commute time, and broadband availability.",
+  lifestyle: "Mountain Magnitude only. Climate remains a filter and is not scored.",
+  family: "Approximate state-level homeschool-policy rubric. Counties within a state tie.",
+  custom: "A weighted combination of all six pillars using the selected preset or exact custom weights.",
 };
 const PRESET_LABELS: Record<string, string> = {
   balanced: "Balanced",
@@ -47,6 +57,13 @@ function displayMeasure(value: unknown): string {
   if (typeof value === "number") return Number.isInteger(value)
     ? value.toLocaleString("en-US") : value.toLocaleString("en-US", { maximumFractionDigits: 3 });
   return String(value).replaceAll("_", " ");
+}
+
+function exclusionLabel(reason: string | null | undefined, referenceOnly = false): string {
+  if (reason === "population") {
+    return referenceOnly ? "Population below 25,000" : "Below selected population minimum";
+  }
+  return displayMeasure(reason);
 }
 
 function apiFilters(filters: CountyFitFilters): Record<string, string | number | boolean | null> {
@@ -111,9 +128,11 @@ function DetailDrawer({ detail, loading, error, onClose, onRetry }: {
     {detail && <>
       <p className="eyebrow">County Fit · {detail.county.fips}</p>
       <h2>{detail.county.name}, {detail.county.state}</h2>
+      {detail.reference_only && <p className="notice"><strong>Reference only.</strong> This county is below the 25,000 population floor, so it has no County Fit score or rank. Component utilities remain visible for context.</p>}
       <dl className="facts">
-        <div><dt>Active value</dt><dd>{displayPercent(detail.active_value)}</dd></div>
-        <div><dt>Status</dt><dd>{detail.eligible ? "Included" : displayMeasure(detail.exclusion_reason)}</dd></div>
+        <div><dt>Population</dt><dd>{detail.population === null ? "—" : detail.population.toLocaleString()}</dd></div>
+        <div><dt>Active value</dt><dd>{detail.reference_only ? "Not ranked" : displayPercent(detail.active_value)}</dd></div>
+        <div><dt>Status</dt><dd>{detail.eligible ? "Included" : exclusionLabel(detail.exclusion_reason, detail.reference_only)}</dd></div>
         <div><dt>National rank</dt><dd>{detail.national_rank ?? "—"}</dd></div>
         <div><dt>Filtered rank</dt><dd>{detail.filtered_rank ?? "—"}</dd></div>
       </dl>
@@ -123,6 +142,7 @@ function DetailDrawer({ detail, loading, error, onClose, onRetry }: {
           <div className="fit-pillar-heading"><h3>{PILLAR_LABELS[pillar]}</h3><strong>{displayPercent(item.utility)}</strong></div>
           <p>Weight {(item.weight * 100).toFixed(0)}% · contribution {item.contribution === null ? "—" : (item.contribution * 100).toFixed(1)}</p>
           <dl className="card-facts">{Object.entries(item.measures).map(([key, value]) => <div key={key}><dt>{key.replaceAll("_", " ")}</dt><dd>{displayMeasure(value)}</dd></div>)}</dl>
+          {pillar === "safety" && typeof item.measures.public_water_coverage === "number" && <p className="notice">Public-system coverage proxy: {(item.measures.public_water_coverage * 100).toFixed(1)}%. It excludes private wells and is not countywide water quality.</p>}
           {pillar === "family" && <p className="notice">{FIT_DISCLAIMER}</p>}
         </section>;
       })}
@@ -131,7 +151,7 @@ function DetailDrawer({ detail, loading, error, onClose, onRetry }: {
         <h3>Vintages</h3><pre>{JSON.stringify(detail.vintages, null, 2)}</pre>
         <h3>Provider sources</h3><pre>{JSON.stringify(detail.sources, null, 2)}</pre>
         <h3>Citations</h3><pre>{JSON.stringify(detail.citations, null, 2)}</pre>
-        {detail.rubric_components && <><h3>Family Autonomy rubric</h3><pre>{JSON.stringify(detail.rubric_components, null, 2)}</pre></>}
+        {detail.rubric_components && <><h3>Homeschool Policy Fit rubric</h3><pre>{JSON.stringify(detail.rubric_components, null, 2)}</pre></>}
       </details>
       {detail.limitations.map((notice) => <p className="notice" key={notice}>{notice}</p>)}
     </>}
@@ -243,7 +263,9 @@ export default function CountyFit({ meta, active, onMap }: {
   }, [active, detailRetry, params, selected, summary]);
 
   const orderedRows = useMemo(() => summary ? countyFitRows(summary).sort((left, right) => {
-    if (left.filteredRank !== null && right.filteredRank !== null) return left.filteredRank - right.filteredRank;
+    if (left.filteredRank !== null && right.filteredRank !== null) {
+      return left.filteredRank - right.filteredRank || left.fips.localeCompare(right.fips);
+    }
     if (left.filteredRank !== null) return -1;
     if (right.filteredRank !== null) return 1;
     return left.name.localeCompare(right.name) || left.fips.localeCompare(right.fips);
@@ -330,28 +352,29 @@ export default function CountyFit({ meta, active, onMap }: {
 
     {panel === "filters" && <section className="floating-panel fit-filter-panel" aria-label="County Fit filters"><h2>County Fit filters</h2><p>Filters remove counties; they never recalibrate utilities or renormalize weights.</p><label>State<select value={draftFilters.state} onChange={(event) => setDraftFilters((current) => ({ ...current, state: event.target.value }))}><option value="">All states + DC</option>{STATE_ABBREVIATIONS.filter((state) => !["AS", "GU", "MP", "PR", "VI"].includes(state)).map((state) => <option key={state}>{state}</option>)}</select></label><div className="fit-filter-grid">
       {([
-        ["min_population", "Minimum population", "1"], ["min_valid_months", "Minimum housing months", "1"], ["min_active_listings", "Minimum active listings", "1"],
+        ["min_population", "Minimum population (25,000 floor)", "1"], ["min_valid_months", "Minimum housing months", "1"], ["min_active_listings", "Minimum active listings", "1"],
         ["min_jan_temp_f", "Minimum January mean °F", "0.1"], ["max_jan_temp_f", "Maximum January mean °F", "0.1"], ["min_jul_temp_f", "Minimum July mean °F", "0.1"], ["max_jul_temp_f", "Maximum July mean °F", "0.1"],
         ["max_extreme_heat_days", "Maximum ≥90°F days", "0.1"], ["max_extreme_cold_days", "Maximum ≤32°F days", "0.1"],
-      ] as const).map(([key, label, step]) => <label key={key}>{label}<input type="number" step={step} value={draftFilters[key]} onChange={(event) => setDraftFilters((current) => ({ ...current, [key]: event.target.value }))} placeholder="Any" /></label>)}
-    </div><h3>Minimum pillar utility (%)</h3><div className="fit-filter-grid">{COUNTY_FIT_PILLARS.map((pillar) => <label key={pillar}>{PILLAR_LABELS[pillar]}<input type="number" min="0" max="100" step="1" value={draftFilters[`min_${pillar}`]} onChange={(event) => setDraftFilters((current) => ({ ...current, [`min_${pillar}`]: event.target.value }))} placeholder="Any" /></label>)}</div><label className="check"><input type="checkbox" checked={draftFilters.exclude_appalachia} onChange={(event) => setDraftFilters((current) => ({ ...current, exclude_appalachia: event.target.checked }))} />Exclude Appalachian Regional Commission counties</label>{!filtersValid && <p className="weight-total invalid" role="status">Enter valid whole-number population, listing, month, and percentage filters.</p>}<div className="panel-buttons"><button className="primary" disabled={!filtersValid} onClick={applyFilters}>Apply</button><button className="secondary" onClick={clearFilters}>Clear</button></div></section>}
+      ] as const).map(([key, label, step]) => <label key={key}>{label}<input type="number" min={key === "min_population" ? COUNTY_FIT_POPULATION_FLOOR : undefined} step={step} value={draftFilters[key]} onChange={(event) => setDraftFilters((current) => ({ ...current, [key]: event.target.value }))} placeholder={key === "min_population" ? "25,000" : "Any"} /></label>)}
+    </div><h3>Minimum pillar utility (%)</h3><div className="fit-filter-grid">{COUNTY_FIT_PILLARS.map((pillar) => <label key={pillar}>{PILLAR_LABELS[pillar]}<input type="number" min="0" max="100" step="1" value={draftFilters[`min_${pillar}`]} onChange={(event) => setDraftFilters((current) => ({ ...current, [`min_${pillar}`]: event.target.value }))} placeholder="Any" /></label>)}</div><label className="check"><input type="checkbox" checked={draftFilters.exclude_appalachia} onChange={(event) => setDraftFilters((current) => ({ ...current, exclude_appalachia: event.target.checked }))} />Exclude Appalachian Regional Commission counties</label>{!filtersValid && <p className="weight-total invalid" role="status">Population must be a whole number of at least 25,000; listing, month, and percentage filters must also be valid.</p>}<div className="panel-buttons"><button className="primary" disabled={!filtersValid} onClick={applyFilters}>Apply</button><button className="secondary" onClick={clearFilters}>Clear</button></div></section>}
 
     {panel === "weights" && <section className="floating-panel fit-weights-panel" aria-label="Custom Fit weights"><h2>Custom Fit weights</h2><div className="fit-presets">{Object.entries(PRESET_LABELS).map(([key, label]) => <button className="secondary" key={key} onClick={() => choosePreset(key)}>{label}</button>)}</div>{COUNTY_FIT_PILLARS.map((pillar) => <label className="weight-control" key={pillar}><span>{PILLAR_LABELS[pillar]}</span><input type="range" min="0" max="100" step="1" value={draftWeights[pillar]} onChange={(event) => { const value = Number(event.target.value); setDraftWeights((current) => ({ ...current, [pillar]: value })); }} /><input aria-label={`${PILLAR_LABELS[pillar]} weight percent`} type="number" min="0" max="100" step="1" value={draftWeights[pillar]} onChange={(event) => { const value = Math.max(0, Math.min(100, Number(event.target.value) || 0)); setDraftWeights((current) => ({ ...current, [pillar]: value })); }} /></label>)}<p className={`weight-total ${weightsValid ? "valid" : "invalid"}`} role="status">Total: {totalWeight}%</p>{!weightsValid && <p className="muted">{Object.values(draftWeights).every(Number.isInteger) ? "Weights must total 100%." : "Use whole percentages totaling 100%."}</p>}<div className="panel-buttons"><button className="primary" disabled={!weightsValid} onClick={applyWeights}>Apply weights</button><button className="secondary" onClick={() => { setDraftWeights({ ...COUNTY_FIT_PRESETS.balanced }); }}>Reset balanced</button></div></section>}
 
-    {panel === "readiness" && <section className="floating-panel info-panel" aria-label="About County Fit"><h2>About County Fit</h2><p><strong>{readiness.readiness === "ready" ? "All seven views are ready." : "Five public-data views are ready."}</strong> County Fit is loaded only when this workspace opens and never requests agency data at runtime.</p>{readiness.readiness === "partial" && <div className="notice"><strong>Affordability and Custom Fit need approved history.</strong>{historyCommands.map((command) => <code key={command}>{command}</code>)}</div>}<p>Utilities are fixed national calibrations. Custom Fit requires complete six-pillar data, ≥90% crime coverage, population ≥25,000, ≥9 valid housing months, and median active listings ≥100.</p><p>Provider and water values are availability proxies. FCC broadband is the share of broadband-serviceable locations, not population. Water boundaries may be supplied or EPA-modeled. Climate is missing without a qualifying in-county station.</p><p className="notice">{FIT_DISCLAIMER}</p><p>Ranking state RPP is an official state all-items value for non-MSA counties. It is distinct from the existing map’s nonmetropolitan <code>00999</code> assignment.</p></section>}
+    {panel === "readiness" && <section className="floating-panel info-panel" aria-label="About County Fit"><h2>About County Fit</h2><p><strong>{readiness.readiness === "ready" ? "All seven views are ready." : "Five public-data views are ready."}</strong> County Fit is loaded only when this workspace opens and never requests agency data at runtime.</p>{readiness.readiness === "partial" && <div className="notice"><strong>Affordability and Custom Fit need approved history.</strong>{historyCommands.map((command) => <code key={command}>{command}</code>)}</div>}<p>Utilities are calibrated against the full source-valid national universe. Every view ranks only counties with population ≥25,000; higher population filters apply afterward. Equal values share competition ranks.</p><p>Custom Fit also requires complete six-pillar data, ≥90% crime coverage, ≥9 valid housing months, and median active listings ≥100.</p><p>Provider values are availability proxies. FCC broadband is the share of broadband-serviceable locations, not population. Public-water coverage is context only, excludes private wells, and is not countywide water quality; boundaries may be supplied or EPA-modeled. Climate is missing without a qualifying in-county station.</p><p className="notice">{FIT_DISCLAIMER}</p><p>Ranking state RPP is an official state all-items value for non-MSA counties. It is distinct from the existing map’s nonmetropolitan <code>00999</code> assignment.</p></section>}
 
     {readiness.readiness === "partial" && <aside className="fit-readiness-banner"><strong>Partial readiness</strong><span>Affordability and Custom Fit need ≥9 approved Realtor.com history months.</span><button onClick={() => setPanel("readiness")}>Show commands</button></aside>}
 
     <aside className="county-fit-ranking" aria-label="County Fit ranked counties" aria-busy={loading}>
       <div className="fit-ranking-heading"><div><p className="eyebrow">{activeViewLabel}</p><h2>Ranked counties</h2></div><span>{summary?.cohort_count.toLocaleString("en-US") ?? "—"} included</span></div>
-      {view === "family" && <p className="notice fit-family-disclaimer" role="note" aria-label="Family Autonomy limitation">{FIT_DISCLAIMER}</p>}
+      <p className="fit-view-methodology">{VIEW_DESCRIPTIONS[view]}</p>
+      {view === "family" && <p className="notice fit-family-disclaimer" role="note" aria-label="Homeschool Policy Fit limitation">{FIT_DISCLAIMER}</p>}
       {error && <div className="error" role="alert"><p>{error}</p><button className="secondary" onClick={() => setRetry((value) => value + 1)}>Retry County Fit</button></div>}
-      {!error && <ol className="fit-ranking-list">{orderedRows.slice(0, visibleRows).map((row) => <li key={row.fips} className={!row.eligible ? "excluded" : row.fips === selected ? "selected" : ""}><button onClick={(event) => selectCounty(row.fips, event.currentTarget)}><span className="fit-rank">{row.filteredRank ?? "—"}</span><span className="fit-county"><strong>{row.name}</strong><small>{row.state} · {row.fips}{row.paretoOptimal ? " · Pareto" : ""}</small>{!row.eligible && <em>{displayMeasure(row.exclusionReason)}</em>}</span><span className="fit-score">{displayPercent(row.activeValue)}<small>Nat. {row.nationalRank ?? "—"}</small></span></button></li>)}</ol>}
+      {!error && <ol className="fit-ranking-list">{orderedRows.slice(0, visibleRows).map((row) => { const populationExcluded = row.exclusionReason === "population" && row.activeValue === null && row.nationalRank === null; return <li key={row.fips} className={!row.eligible ? "excluded" : row.fips === selected ? "selected" : ""}><button onClick={(event) => selectCounty(row.fips, event.currentTarget)}><span className="fit-rank">{row.filteredRank ?? "—"}</span><span className="fit-county"><strong>{row.name}</strong><small>{row.state} · {row.fips}{row.paretoOptimal ? " · Pareto" : ""}</small>{!row.eligible && <em>{exclusionLabel(row.exclusionReason, populationExcluded)}</em>}</span><span className="fit-score">{populationExcluded ? "Not ranked" : displayPercent(row.activeValue)}<small>{populationExcluded ? "25,000 floor" : `Nat. ${row.nationalRank ?? "—"}`}</small></span></button></li>; })}</ol>}
       {!error && visibleRows < orderedRows.length && <button className="secondary load-more" onClick={() => setVisibleRows((value) => value + 100)}>Load 100 more</button>}
     </aside>
 
     <div className="legend county-fit-legend"><div className="legend-keys"><div className="continuous-key"><i className="legend-gradient" style={{ background: COUNTY_FIT_GRADIENT }} /><div className="legend-ticks"><span style={{ left: "0%" }}>0</span><span style={{ left: "25%" }}>25</span><span style={{ left: "50%" }}>50</span><span style={{ left: "75%" }}>75</span><span style={{ left: "100%" }}>100</span></div></div><span className="missing-key"><i className="hatched" />Excluded / unavailable</span></div><p><strong>{activeViewLabel}</strong> · higher is better · fixed national calibration · cohort {summary?.cohort_count ?? 0}</p></div>
-    {preview && <div className={tooltipClass} style={{ left: preview.x, top: preview.y }}><strong>{preview.name}</strong><span>{preview.state} · {preview.placeId}</span><b>{preview.countyFit?.eligible ? displayPercent(preview.countyFit.activeValue) : displayMeasure(preview.countyFit?.exclusionReason)}</b></div>}
+    {preview && <div className={tooltipClass} style={{ left: preview.x, top: preview.y }}><strong>{preview.name}</strong><span>{preview.state} · {preview.placeId}</span><b>{preview.countyFit?.eligible ? displayPercent(preview.countyFit.activeValue) : exclusionLabel(preview.countyFit?.exclusionReason, preview.countyFit?.activeValue === null && preview.countyFit?.nationalRank === null)}</b></div>}
     {selected && <DetailDrawer detail={detail} loading={detailLoading} error={detailError} onClose={closeDetail} onRetry={() => setDetailRetry((value) => value + 1)} />}
     <p className="sr-only" aria-live="polite">{status}</p>
   </main>;

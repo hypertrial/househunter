@@ -83,16 +83,17 @@ const countySummary = {
 const fitColumns = {
   county_fips: ["01001", "08013"], name: ["Autauga", "Boulder"], state: ["AL", "CO"],
   active_value: [null, 0.82], eligible: [false, true],
-  exclusion_reason: ["missing_active_data", null],
+  exclusion_reason: ["population", null],
   national_rank: [null, 1], filtered_rank: [null, 1], pareto_optimal: [null, true],
-  u_safety: [null, 0.82], u_health: [0.42, 0.76], u_affordability: [0.34, 0.64],
+  u_safety: [0.52, 0.82], u_health: [0.42, 0.76], u_affordability: [0.34, 0.64],
   u_opportunity: [0.41, 0.71], u_lifestyle: [0.23, 0.93], u_family: [0.72, 0.45],
 };
 
 const fitDetail = {
   schema_version: 1, build_id: build.build_id,
   county: { fips: "08013", name: "Boulder", state: "CO" },
-  view: "safety", active_value: 0.82, eligible: true, exclusion_reason: null,
+  view: "safety", population: 120000, active_value: 0.82, eligible: true, exclusion_reason: null,
+  reference_only: false,
   national_rank: 1, filtered_rank: 1, pareto_optimal: null,
   weights: { safety: 1, health: 0, affordability: 0, opportunity: 0, lifestyle: 0, family: 0 },
   gates: {},
@@ -102,7 +103,7 @@ const fitDetail = {
   ].map(([pillar, utility]) => [pillar, {
     utility, weight: pillar === "safety" ? 1 : 0,
     contribution: pillar === "safety" ? utility : 0,
-    measures: pillar === "safety" ? { crime_coverage: 0.98, water_allocation_coverage: 0.94 } : {},
+    measures: pillar === "safety" ? { crime_coverage: 0.98, public_water_coverage: 0.88, water_allocation_coverage: 0.94 } : {},
   }])),
   subutilities: { u_crime: 0.8 }, coverage: { water_boundary_provenance: "mixed" },
   vintages: { bundle: { population: 2025 } }, citations: { census_pep: { title: "Census PEP" } },
@@ -261,6 +262,7 @@ async function installRoutes(
           reason_code: countyFitReady ? null : "home_market_history_insufficient",
           methodology_id: "top-counties-v2", calibration_id: "fixture", bundle_schema_version: 2,
           bundle_release: "fixture", vintages: { population: 2025 }, row_count: 1,
+          population_floor: 25000, rank_policy: "competition",
           available_pillars: countyFitReady
             ? ["safety", "health", "affordability", "opportunity", "lifestyle", "family"]
             : ["safety", "health", "opportunity", "lifestyle", "family"],
@@ -301,27 +303,40 @@ async function installRoutes(
       const weights = view === "custom"
         ? { safety: .2, health: .15, affordability: .25, opportunity: .15, lifestyle: .15, family: .1 }
         : { safety: 1, health: 0, affordability: 0, opportunity: 0, lifestyle: 0, family: 0 };
+      const minPopulation = Number(url.searchParams.get("min_population") || 25000);
+      const higherPopulationFilter = minPopulation > 25000;
+      const columns = higherPopulationFilter ? {
+        ...fitColumns,
+        active_value: [null, 0.82], eligible: [false, false],
+        exclusion_reason: ["population", "population"],
+        national_rank: [null, 1], filtered_rank: [null, null],
+        pareto_optimal: [null, null],
+      } : fitColumns;
       await route.fulfill({ json: {
         schema_version: 1, build_id: build.build_id, methodology_id: "top-counties-v2",
         calibration_id: "fixture", view, preset: view === "custom" ? "balanced" : null,
-        weights, gates: {}, reference_count: 2, national_count: 1, cohort_count: 1,
-        exclusions: { missing_active_data: 1 },
+        weights, gates: { population_floor: 25000, min_population: minPopulation, rank_policy: "competition" }, reference_count: 2, national_count: 1, cohort_count: higherPopulationFilter ? 0 : 1,
+        exclusions: { population: higherPopulationFilter ? 2 : 1 },
         notices: ["Approximate, project-authored policy preference rubric."],
-        counties: fitColumns,
+        counties: columns,
       } });
     } else if (url.pathname.startsWith("/api/v3/county-fit/counties/")) {
       const fips = url.pathname.split("/").pop();
       const excluded = fips === "01001";
+      const higherPopulationExcluded = !excluded
+        && Number(url.searchParams.get("min_population") || 25000) > 25000;
       await route.fulfill({ json: {
         ...fitDetail,
         county: excluded
           ? { fips: "01001", name: "Autauga", state: "AL" }
           : fitDetail.county,
+        population: excluded ? 24999 : fitDetail.population,
         active_value: excluded ? null : fitDetail.active_value,
-        eligible: !excluded,
-        exclusion_reason: excluded ? "missing_active_data" : null,
+        eligible: !excluded && !higherPopulationExcluded,
+        exclusion_reason: excluded || higherPopulationExcluded ? "population" : null,
+        reference_only: excluded,
         national_rank: excluded ? null : fitDetail.national_rank,
-        filtered_rank: excluded ? null : fitDetail.filtered_rank,
+        filtered_rank: excluded || higherPopulationExcluded ? null : fitDetail.filtered_rank,
         view: url.searchParams.get("view") || "safety",
       } });
     } else if (url.pathname === "/api/v3/lookup") {
@@ -394,15 +409,17 @@ test("loads partial County Fit lazily and preserves the original map workspace",
   await expect(page.getByLabel("View").locator("option[value=affordability]")).toHaveAttribute("disabled", "");
   await expect(page.getByLabel("View").locator("option[value=custom]")).toHaveAttribute("disabled", "");
   await expect(page.getByRole("heading", { name: "Ranked counties" })).toBeVisible();
+  await expect(page.getByText(/50% residential hazard, 35% reported crime/)).toBeVisible();
   await expect(page.getByRole("button", { name: /Boulder.*82\.0/ })).toBeVisible();
   await expect.poll(() => fitSummaryRequests.length).toBe(1);
   await expect.poll(() => countyGeometryRequests.length).toBe(1);
 
   await page.getByLabel("View").selectOption("family");
   await expect.poll(() => fitSummaryRequests.length).toBe(2);
-  await expect(page.getByRole("note", { name: "Family Autonomy limitation" })).toHaveText(
+  await expect(page.getByRole("note", { name: "Homeschool Policy Fit limitation" })).toHaveText(
     "Approximate, project-authored policy preference rubric. It is not legal advice, a legal-compliance determination, school-quality evidence, or a recommendation. Laws and interpretations may change; verify current requirements with official state sources or qualified counsel.",
   );
+  await expect(page.getByText(/Counties within a state tie/)).toBeVisible();
   await page.getByLabel("View").selectOption("health");
   await expect.poll(() => fitSummaryRequests.length).toBe(3);
   expect(countyGeometryRequests).toHaveLength(1);
@@ -420,17 +437,20 @@ test("loads partial County Fit lazily and preserves the original map workspace",
   const closeDetail = detail.getByRole("button", { name: "Close County Fit details" });
   await expect(closeDetail).toBeFocused();
   await expect(detail).toContainText(/water allocation coverage/i);
-  await expect(detail).toContainText("Family Autonomy");
+  await expect(detail).toContainText("Public-system coverage proxy: 88.0%");
+  await expect(detail).toContainText("Homeschool Policy Fit");
   await expect(page).toHaveURL(/fit_place=08013/);
   await closeDetail.click();
   await expect(includedCounty).toBeFocused();
 
-  const excludedCounty = page.getByRole("button", { name: /Autauga.*missing active data/i });
+  const excludedCounty = page.getByRole("button", { name: /Autauga.*Population below 25,000.*Not ranked/i });
   await excludedCounty.focus();
   await excludedCounty.press("Enter");
   const excludedClose = detail.getByRole("button", { name: "Close County Fit details" });
   await expect(excludedClose).toBeFocused();
-  await expect(detail).toContainText("missing active data");
+  await expect(detail).toContainText("Reference only");
+  await expect(detail).toContainText("Population below 25,000");
+  await expect(detail).toContainText("24,999");
   await excludedClose.click();
   await expect(excludedCounty).toBeFocused();
 
@@ -535,7 +555,7 @@ test("applies exact Custom Fit weights and validated shareable filters", async (
   await page.getByRole("button", { name: "Weights · 100%" }).click();
   const weights = page.getByRole("region", { name: "Custom Fit weights" });
   await expect(weights.getByText("Total: 100%", { exact: true })).toBeVisible();
-  await weights.getByLabel("Safety weight percent").fill("21");
+  await weights.getByLabel("Safety Factors weight percent").fill("21");
   await expect(weights.getByText("Total: 101%", { exact: true })).toBeVisible();
   await expect(weights.getByRole("button", { name: "Apply weights" })).toBeDisabled();
   await weights.getByRole("button", { name: "Reset balanced" }).click();
@@ -544,15 +564,34 @@ test("applies exact Custom Fit weights and validated shareable filters", async (
 
   await page.getByRole("button", { name: "Filters" }).click();
   const filters = page.getByRole("region", { name: "County Fit filters" });
+  const population = filters.getByLabel("Minimum population (25,000 floor)");
+  await expect(population).toHaveValue("25000");
+  await population.fill("24999");
+  await expect(filters.getByRole("button", { name: "Apply" })).toBeDisabled();
+  await population.fill("50000");
   await filters.getByLabel("State").selectOption("CO");
-  await filters.getByLabel("Safety", { exact: true }).fill("75");
+  await filters.getByLabel("Safety Factors", { exact: true }).fill("75");
   await filters.getByRole("button", { name: "Apply" }).click();
   await expect(page).toHaveURL(/fit_state=CO/);
+  await expect(page).toHaveURL(/fit_min_population=50000/);
   await expect(page).toHaveURL(/fit_min_safety=75/);
   const exportLink = page.getByRole("link", { name: "Export CSV" });
   await expect(exportLink).toHaveAttribute("href", /view=custom/);
   await expect(exportLink).toHaveAttribute("href", /state=CO/);
+  await expect(exportLink).toHaveAttribute("href", /min_population=50000/);
   await expect(exportLink).toHaveAttribute("href", /min_safety=0\.75/);
+  const filteredCounty = page.getByRole("button", { name: /Boulder.*Below selected population minimum.*82\.0.*Nat\. 1/i });
+  await expect(filteredCounty).toBeVisible();
+  await filteredCounty.click();
+  const filteredDetail = page.getByRole("dialog", { name: "County Fit details" });
+  await expect(filteredDetail).toContainText("Below selected population minimum");
+  await expect(filteredDetail).toContainText("82.0");
+  await expect(filteredDetail).not.toContainText("Reference only");
+  await filteredDetail.getByRole("button", { name: "Close County Fit details" }).click();
+  await page.getByRole("button", { name: "Filters" }).click();
+  await page.getByRole("region", { name: "County Fit filters" }).getByRole("button", { name: "Clear" }).click();
+  await page.getByRole("button", { name: "Filters" }).click();
+  await expect(page.getByRole("region", { name: "County Fit filters" }).getByLabel("Minimum population (25,000 floor)")).toHaveValue("25000");
 });
 
 test("renders Community Conditions as an independent county-level layer", async ({ page }) => {

@@ -26,6 +26,7 @@ from .geography import STATE_BY_FIPS
 from .locking import exclusive_lock
 from .store import Store
 from .top_counties import (
+    POPULATION_FLOOR,
     PREFERENCE_NOTICE,
     rank_counties,
     require_complete_national_snapshot,
@@ -1075,7 +1076,14 @@ def top_counties(
     weight_family: Annotated[float | None, typer.Option("--weight-family", min=0)] = None,
     limit: Annotated[int, typer.Option("--limit", min=1, max=500)] = 10,
     as_json: Annotated[bool, typer.Option("--json", help="Print JSON")] = False,
-    min_population: Annotated[int, typer.Option("--min-population")] = 25_000,
+    min_population: Annotated[
+        int,
+        typer.Option(
+            "--min-population",
+            min=POPULATION_FLOOR,
+            help="Apply a population filter at or above the fixed 25,000 floor",
+        ),
+    ] = POPULATION_FLOOR,
     min_active_listings: Annotated[int, typer.Option("--min-active-listings")] = 100,
     min_valid_months: Annotated[int, typer.Option("--min-valid-months")] = 9,
     states: Annotated[

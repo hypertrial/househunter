@@ -6,13 +6,15 @@ export const COUNTY_FIT_PILLARS: CountyFitPillar[] = [
   "safety", "health", "affordability", "opportunity", "lifestyle", "family",
 ];
 
+export const COUNTY_FIT_POPULATION_FLOOR = 25_000;
+
 export const COUNTY_FIT_VIEWS: Array<{ key: CountyFitView; label: string }> = [
-  { key: "safety", label: "Safety" },
+  { key: "safety", label: "Safety Factors" },
   { key: "health", label: "Health" },
   { key: "affordability", label: "Affordability" },
   { key: "opportunity", label: "Opportunity" },
-  { key: "lifestyle", label: "Lifestyle" },
-  { key: "family", label: "Family Autonomy" },
+  { key: "lifestyle", label: "Mountain Landscape" },
+  { key: "family", label: "Homeschool Policy Fit" },
   { key: "custom", label: "Custom Fit" },
 ];
 
@@ -33,7 +35,7 @@ const COUNTY_FIT_STATES = new Set([
 export const EMPTY_COUNTY_FIT_FILTERS = {
   state: "",
   exclude_appalachia: false,
-  min_population: "",
+  min_population: String(COUNTY_FIT_POPULATION_FLOOR),
   min_active_listings: "",
   min_valid_months: "",
   min_jan_temp_f: "",
@@ -65,7 +67,7 @@ export function countyFitFiltersValid(filters: CountyFitFilters): boolean {
     return typeof raw === "string" && raw !== "" ? Number(raw) : null;
   };
   const integerRanges = [
-    ["min_population", 0, Number.MAX_SAFE_INTEGER],
+    ["min_population", COUNTY_FIT_POPULATION_FLOOR, Number.MAX_SAFE_INTEGER],
     ["min_active_listings", 0, Number.MAX_SAFE_INTEGER],
     ["min_valid_months", 1, 12],
   ] as const;
@@ -127,8 +129,8 @@ export function readCountyFitHash(hash: string): CountyFitHashState | null {
   filters.exclude_appalachia = params.get("fit_exclude_appalachia") === "1";
   for (const key of Object.keys(filters) as Array<keyof CountyFitFilters>) {
     if (key === "state" || key === "exclude_appalachia") continue;
-    const raw = params.get(`fit_${key}`) || "";
-    (filters[key] as string) = raw;
+    const raw = params.get(`fit_${key}`);
+    if (raw !== null) (filters[key] as string) = raw;
   }
   if (!countyFitFiltersValid(filters)) return null;
   const selected = params.get("fit_place") || "";

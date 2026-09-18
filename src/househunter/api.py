@@ -47,7 +47,13 @@ from .map_assets import (
     map_asset_status,
 )
 from .store import Store, _export_select_sql, current_build
-from .top_counties import PILLARS, PREFERENCE_NOTICE, evaluate_counties
+from .top_counties import (
+    PILLARS,
+    POPULATION_FLOOR,
+    PREFERENCE_NOTICE,
+    RANK_POLICY,
+    evaluate_counties,
+)
 
 
 class JobRequest(BaseModel):
@@ -145,6 +151,10 @@ def _public_build_metadata(metadata: dict[str, object]) -> dict[str, object]:
 
 
 def _county_fit_readiness(metadata: dict[str, object]) -> dict[str, object]:
+    ranking_policy = {
+        "population_floor": POPULATION_FLOOR,
+        "rank_policy": RANK_POLICY,
+    }
     scope = metadata.get("scope")
     if not isinstance(scope, dict) or scope.get("kind") != "national":
         return {
@@ -152,6 +162,7 @@ def _county_fit_readiness(metadata: dict[str, object]) -> dict[str, object]:
             "reason_code": "national_snapshot_required",
             "methodology_id": "top-counties-v2",
             "available_pillars": [],
+            **ranking_policy,
         }
     ranking = metadata.get("ranking")
     if not isinstance(ranking, dict):
@@ -160,22 +171,26 @@ def _county_fit_readiness(metadata: dict[str, object]) -> dict[str, object]:
             "reason_code": "ranking_metadata_missing",
             "methodology_id": "top-counties-v2",
             "available_pillars": [],
+            **ranking_policy,
         }
     return {
-        key: ranking.get(key)
-        for key in (
-            "readiness",
-            "reason_code",
-            "methodology_id",
-            "calibration_id",
-            "bundle_schema_version",
-            "bundle_release",
-            "vintages",
-            "row_count",
-            "available_pillars",
-            "local_history",
-            "notices",
-        )
+        **{
+            key: ranking.get(key)
+            for key in (
+                "readiness",
+                "reason_code",
+                "methodology_id",
+                "calibration_id",
+                "bundle_schema_version",
+                "bundle_release",
+                "vintages",
+                "row_count",
+                "available_pillars",
+                "local_history",
+                "notices",
+            )
+        },
+        **ranking_policy,
     }
 
 
@@ -202,7 +217,7 @@ def _county_fit_query(
     state: Annotated[list[str] | None, Query()] = None,
     exclude_state: Annotated[list[str] | None, Query()] = None,
     exclude_appalachia: bool = False,
-    min_population: int | None = Query(None, ge=0),
+    min_population: int | None = Query(None, ge=POPULATION_FLOOR),
     min_active_listings: int | None = Query(None, ge=0),
     min_valid_months: int | None = Query(None, ge=1, le=12),
     min_jan_temp_f: float | None = None,
@@ -776,9 +791,15 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
             "build_id": metadata["build_id"],
             "county": {"fips": fips, "name": result.name, "state": result.state},
             "view": evaluation.view,
+            "population": source.get("population"),
             "active_value": result.active_value,
             "eligible": result.eligible,
             "exclusion_reason": result.exclusion_reason,
+            "reference_only": (
+                result.exclusion_reason == "population"
+                and result.active_value is None
+                and result.national_rank is None
+            ),
             "national_rank": result.national_rank,
             "filtered_rank": result.filtered_rank,
             "pareto_optimal": result.pareto_optimal,
@@ -929,6 +950,7 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
             "pareto_optimal",
             *source_columns,
             "weights_json",
+            "gates_json",
             "vintages_json",
             "notices_json",
         ]
@@ -956,6 +978,7 @@ def create_app(paths: RuntimePaths | None = None, *, testing: bool = False) -> F
                         result.pareto_optimal,
                         *(source.get(column) for column in source_columns),
                         json.dumps(evaluation.weights, sort_keys=True),
+                        json.dumps(evaluation.gates, sort_keys=True),
                         json.dumps(ranking.get("vintages") or {}, sort_keys=True),
                         json.dumps(
                             list(

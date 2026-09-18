@@ -129,13 +129,13 @@ def test_exclusions_do_not_rescale_utilities() -> None:
     assert by_id["02001"].pillars["lifestyle"] == 0.8
     assert by_id["01001"].preference_fit != pytest.approx(0.0)
     unfiltered = rank_counties(
-        [low, high], limit=10, min_population=0, min_active_listings=0, min_valid_months=1
+        [low, high], limit=10, min_population=25_000, min_active_listings=0, min_valid_months=1
     )
     assert by_id["01001"].preference_fit == pytest.approx(unfiltered.items[1].preference_fit)
     assert by_id["02001"].preference_fit == pytest.approx(unfiltered.items[0].preference_fit)
 
 
-def test_national_rank_is_assigned_before_eligibility_gates() -> None:
+def test_hard_population_floor_precedes_national_rank_but_higher_filter_does_not() -> None:
     small_leader = _county(
         "01001",
         population=24_999,
@@ -158,10 +158,10 @@ def test_national_rank_is_assigned_before_eligibility_gates() -> None:
     assert ranking.eligible_count == 1
     assert ranking.exclusions["population"] == 1
     assert ranking.items[0].place_id == "02001"
-    assert ranking.items[0].national_rank == 2
+    assert ranking.items[0].national_rank == 1
     assert ranking.items[0].filtered_rank == 1
     stricter = rank_counties([small_leader, large_follower], min_population=50_000, limit=10)
-    assert stricter.items[0].national_rank == 2
+    assert stricter.items[0].national_rank == 1
 
 
 def test_threshold_edges() -> None:
@@ -191,7 +191,7 @@ def test_threshold_edges() -> None:
     assert ranking.exclusions["crime_coverage"] == 1
 
 
-def test_pillar_views_need_only_the_active_pillar_and_no_implicit_size_gates() -> None:
+def test_pillar_views_need_only_the_active_pillar_but_apply_the_hard_population_floor() -> None:
     row = _county(
         "01001",
         population=1,
@@ -205,16 +205,44 @@ def test_pillar_views_need_only_the_active_pillar_and_no_implicit_size_gates() -
         u_family=None,  # type: ignore[arg-type]
     )
     safety = evaluate_counties([row], view="safety")
-    assert safety.filtered_count == 1
-    assert safety.rows[0].eligible is True
-    assert safety.rows[0].active_value == 0.8
+    assert safety.filtered_count == 0
+    assert safety.rows[0].eligible is False
+    assert safety.rows[0].exclusion_reason == "population"
+    assert safety.rows[0].active_value is None
+    assert safety.rows[0].national_rank is None
+    assert safety.rows[0].filtered_rank is None
+    assert safety.rows[0].pillars["safety"] == 0.8
     assert safety.rows[0].pareto_optimal is None
-    assert safety.gates["min_population"] is None
+    assert safety.gates["population_floor"] == 25_000
+    assert safety.gates["min_population"] == 25_000
+    assert safety.gates["rank_policy"] == "competition"
     assert safety.gates["min_valid_months"] is None
     assert safety.gates["min_active_listings"] is None
 
-    gated = evaluate_counties([row], view="safety", min_population=25_000)
-    assert gated.rows[0].exclusion_reason == "population"
+
+@pytest.mark.parametrize("view", [*PILLARS, "custom"])
+@pytest.mark.parametrize(
+    ("population", "eligible"),
+    [(None, False), (24_999, False), (25_000, True), (25_001, True)],
+)
+def test_population_floor_boundaries_apply_to_every_view(
+    view: str, population: int | None, eligible: bool
+) -> None:
+    row = _county("01001")
+    row["population"] = population
+    evaluation = evaluate_counties([row], view=view)
+    result = evaluation.rows[0]
+    assert result.eligible is eligible
+    if eligible:
+        assert result.active_value is not None
+        assert result.national_rank == 1
+        assert result.filtered_rank == 1
+    else:
+        assert result.exclusion_reason == "population"
+        assert result.active_value is None
+        assert result.national_rank is None
+        assert result.filtered_rank is None
+        assert result.pillars["safety"] == 0.5
 
 
 def test_county_fit_exclusion_precedence_is_stable() -> None:
@@ -249,9 +277,65 @@ def test_county_fit_exclusion_precedence_is_stable() -> None:
 def test_ties_break_by_county_fips() -> None:
     left = _county("02001", name="B")
     right = _county("01001", name="A")
-    ranking = rank_counties([left, right], limit=2)
-    assert [item.place_id for item in ranking.items] == ["01001", "02001"]
+    lower = _county("04001", name="C", u_safety=0.1)
+    ranking = rank_counties([left, lower, right], limit=3)
+    assert [item.place_id for item in ranking.items] == ["01001", "02001", "04001"]
     assert ranking.items[0].preference_fit == ranking.items[1].preference_fit
+    assert [item.national_rank for item in ranking.items] == [1, 1, 3]
+    assert [item.filtered_rank for item in ranking.items] == [1, 1, 3]
+
+
+def test_statewide_homeschool_policy_ties_use_competition_ranks() -> None:
+    rows = [
+        _county("08013", state="CO", u_family=0.8),
+        _county("08001", state="CO", u_family=0.8),
+        _county("01001", state="AL", u_family=0.2),
+    ]
+    evaluation = evaluate_counties(rows, view="family")
+    ranked = sorted(
+        (row for row in evaluation.rows if row.eligible),
+        key=lambda row: (row.filtered_rank or 0, row.place_id),
+    )
+    assert [row.place_id for row in ranked] == ["08001", "08013", "01001"]
+    assert [row.national_rank for row in ranked] == [1, 1, 3]
+    assert [row.filtered_rank for row in ranked] == [1, 1, 3]
+
+
+def test_higher_population_filter_preserves_national_rank_and_follows_housing_gates() -> None:
+    leader = _county("01001", population=30_000, months=8, u_safety=1.0)
+    follower = _county("02001", population=80_000, u_safety=0.1)
+    evaluation = evaluate_counties(
+        [leader, follower], view="custom", min_population=50_000
+    )
+    by_id = {row.place_id: row for row in evaluation.rows}
+    assert by_id["01001"].national_rank == 1
+    assert by_id["01001"].exclusion_reason == "valid_months"
+    assert by_id["02001"].national_rank == 2
+    assert by_id["02001"].filtered_rank == 1
+    assert evaluation.gates["population_floor"] == 25_000
+    assert evaluation.gates["min_population"] == 50_000
+    assert evaluation.gates["rank_policy"] == "competition"
+
+
+def test_higher_population_filter_does_not_turn_a_scored_county_into_reference_data() -> None:
+    below_filter = _county("01001", population=30_000, u_safety=1.0)
+    above_filter = _county("02001", population=80_000, u_safety=0.1)
+    evaluation = evaluate_counties(
+        [below_filter, above_filter], view="safety", min_population=50_000
+    )
+    by_id = {row.place_id: row for row in evaluation.rows}
+
+    assert by_id["01001"].eligible is False
+    assert by_id["01001"].exclusion_reason == "population"
+    assert by_id["01001"].active_value == 1.0
+    assert by_id["01001"].national_rank == 1
+    assert by_id["01001"].filtered_rank is None
+    assert by_id["02001"].filtered_rank == 1
+
+
+def test_population_threshold_below_hard_floor_is_rejected() -> None:
+    with pytest.raises(HouseHunterError, match="25,000"):
+        evaluate_counties([_county("01001")], view="safety", min_population=24_999)
 
 
 def test_named_presets_change_order_when_tradeoffs_exist() -> None:

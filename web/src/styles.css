@@ -197,6 +197,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .fit-ranking-heading { position: sticky; z-index: 2; top: 0; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 15px 16px 12px; border-bottom: 1px solid rgba(225, 235, 232, .1); background: rgba(17, 27, 32, .97); }
 .fit-ranking-heading h2 { margin: 3px 0 0; font: 700 22px/1.05 Georgia, serif; }
 .fit-ranking-heading > span { color: #a8b8b3; font-size: 10px; }
+.fit-view-methodology { margin: 0; padding: 10px 16px; border-bottom: 1px solid rgba(225, 235, 232, .1); color: #a8b8b3; font-size: 10px; line-height: 1.45; }
 .fit-family-disclaimer { margin: 0; border-bottom: 1px solid rgba(210, 167, 39, .2); font-size: 10px; }
 .fit-ranking-list { list-style: none; margin: 0; padding: 0; }
 .fit-ranking-list li + li { border-top: 1px solid rgba(225, 235, 232, .08); }

@@ -550,6 +550,12 @@ def test_top_counties_rejects_out_of_range_limit() -> None:
     assert "RANK" not in too_large.output
 
 
+def test_top_counties_rejects_population_below_fixed_floor() -> None:
+    result = CliRunner().invoke(app, ["top-counties", "--min-population", "24999"])
+    assert result.exit_code != 0
+    assert "25000" in result.output.replace(",", "")
+
+
 def test_top_counties_ranks_complete_counties_for_each_preset(
     fixture_environment: tuple[RuntimePaths, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:

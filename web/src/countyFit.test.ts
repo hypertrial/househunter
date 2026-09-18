@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  COUNTY_FIT_PRESETS, countyFitFiltersValid, countyFitParams, countyFitWeightsValid,
+  COUNTY_FIT_POPULATION_FLOOR, COUNTY_FIT_PRESETS, COUNTY_FIT_VIEWS,
+  countyFitFiltersValid, countyFitParams, countyFitWeightsValid,
   decodeCountyFitSummary, EMPTY_COUNTY_FIT_FILTERS, readCountyFitHash,
 } from "./countyFit";
 
@@ -74,6 +75,21 @@ describe("County Fit public contract", () => {
     }, {})).toThrow("integer percentages");
   });
 
+  it("anchors every cleared filter state at the fixed population floor", () => {
+    expect(COUNTY_FIT_POPULATION_FLOOR).toBe(25_000);
+    expect(EMPTY_COUNTY_FIT_FILTERS.min_population).toBe("25000");
+    expect(readCountyFitHash("#workspace=county-fit")?.filters.min_population).toBe("25000");
+    expect(countyFitParams(
+      "build-1", "safety", "balanced", COUNTY_FIT_PRESETS.balanced,
+      EMPTY_COUNTY_FIT_FILTERS,
+    ).get("min_population")).toBe("25000");
+    expect(Object.fromEntries(COUNTY_FIT_VIEWS.map(({ key, label }) => [key, label]))).toMatchObject({
+      safety: "Safety Factors",
+      lifestyle: "Mountain Landscape",
+      family: "Homeschool Policy Fit",
+    });
+  });
+
   it("round-trips valid custom hash state and rejects malformed state", () => {
     const weights = "safety=20&health=15&affordability=25&opportunity=15&lifestyle=15&family=10"
       .split("&").map((item) => item.split("=")).map(([key, value]) => `fit_weight_${key}=${value}`).join("&");
@@ -88,6 +104,7 @@ describe("County Fit public contract", () => {
   it("rejects invalid filter state instead of issuing a bad API request", () => {
     expect(readCountyFitHash("#workspace=county-fit&fit_state=ZZ")).toBeNull();
     expect(readCountyFitHash("#workspace=county-fit&fit_min_population=-1")).toBeNull();
+    expect(readCountyFitHash("#workspace=county-fit&fit_min_population=24999")).toBeNull();
     expect(readCountyFitHash("#workspace=county-fit&fit_min_population=25000.5")).toBeNull();
     expect(readCountyFitHash("#workspace=county-fit&fit_min_active_listings=100.5")).toBeNull();
     expect(readCountyFitHash("#workspace=county-fit&fit_min_valid_months=13")).toBeNull();

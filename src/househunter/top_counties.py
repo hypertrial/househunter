@@ -37,7 +37,9 @@ PILLAR_FIELDS = {
     "lifestyle": "u_lifestyle",
     "family": "u_family",
 }
-DEFAULT_MIN_POPULATION = 25_000
+POPULATION_FLOOR = 25_000
+DEFAULT_MIN_POPULATION = POPULATION_FLOOR
+RANK_POLICY = "competition"
 DEFAULT_MIN_ACTIVE_LISTINGS = 100
 DEFAULT_MIN_VALID_MONTHS = 9
 KNOWN_REGIONS = ("appalachia",)
@@ -250,8 +252,8 @@ def validate_ranking_options(
 ) -> None:
     if limit is not None and not 1 <= limit <= 500:
         raise HouseHunterError("Top-counties limit must be between 1 and 500")
-    if min_population is not None and min_population < 0:
-        raise HouseHunterError("--min-population must be >= 0")
+    if min_population is not None and min_population < POPULATION_FLOOR:
+        raise HouseHunterError("--min-population must be >= 25,000")
     if min_active_listings is not None and min_active_listings < 0:
         raise HouseHunterError("--min-active-listings must be >= 0")
     if min_valid_months is not None and not 1 <= min_valid_months <= 12:
@@ -419,6 +421,20 @@ def _climate_excluded(row: Mapping[str, Any], climate: Mapping[str, float | None
     return False
 
 
+def _competition_ranks(
+    ordered: Sequence[tuple[float | None, Mapping[str, Any]]],
+) -> dict[str, int]:
+    ranks: dict[str, int] = {}
+    previous_score: float | None = None
+    rank = 0
+    for position, (score, row) in enumerate(ordered, start=1):
+        if position == 1 or score != previous_score:
+            rank = position
+        ranks[str(row["place_id"])] = rank
+        previous_score = score
+    return ranks
+
+
 def evaluate_counties(
     candidates: Sequence[Mapping[str, Any]],
     *,
@@ -449,8 +465,6 @@ def evaluate_counties(
         raise HouseHunterError("County Fit view is invalid")
     if selected_view == "custom":
         selected_preset, weights = resolve_weights(preset, custom_weights)
-        if min_population is None:
-            min_population = DEFAULT_MIN_POPULATION
         if min_active_listings is None:
             min_active_listings = DEFAULT_MIN_ACTIVE_LISTINGS
         if min_valid_months is None:
@@ -460,6 +474,9 @@ def evaluate_counties(
             raise HouseHunterError("Custom weights apply only to the Custom Fit view")
         selected_preset = None
         weights = {pillar: float(pillar == selected_view) for pillar in PILLARS}
+    effective_min_population = (
+        POPULATION_FLOOR if min_population is None else min_population
+    )
     include_states = _normalized_states(states)
     excluded_states = _normalized_states(exclude_states)
     climate = {
@@ -472,7 +489,7 @@ def evaluate_counties(
     }
     pillar_gates = dict(min_pillars or {})
     validate_ranking_options(
-        min_population=min_population,
+        min_population=effective_min_population,
         min_active_listings=min_active_listings,
         min_valid_months=min_valid_months,
         exclude_states=excluded_states,
@@ -498,25 +515,22 @@ def evaluate_counties(
         else:
             active = row["pillars"][selected_view]
             reason = None if active is not None else "missing_active"
+        if reason is None and (
+            row["population"] is None or row["population"] < POPULATION_FLOOR
+        ):
+            reason = "population"
+            active = None
         reason_by_id[row["place_id"]] = reason
         active_by_id[row["place_id"]] = active
         if reason is None and active is not None:
             national_candidates.append((active, row))
     national_candidates.sort(key=lambda item: (-item[0], item[1]["place_id"]))
-    national_ranks = {
-        row["place_id"]: rank for rank, (_, row) in enumerate(national_candidates, start=1)
-    }
+    national_ranks = _competition_ranks(national_candidates)
 
     initially_eligible = 0
     for _, row in national_candidates:
         place_id = row["place_id"]
         reason = reason_by_id[place_id]
-        if (
-            reason is None
-            and min_population is not None
-            and (row["population"] is None or row["population"] < min_population)
-        ):
-            reason = "population"
         if (
             reason is None
             and min_valid_months is not None
@@ -535,6 +549,12 @@ def evaluate_counties(
             )
         ):
             reason = "active_listings"
+        if (
+            reason is None
+            and row["population"] is not None
+            and row["population"] < effective_min_population
+        ):
+            reason = "population"
         reason_by_id[place_id] = reason
         if reason is None:
             initially_eligible += 1
@@ -568,7 +588,7 @@ def evaluate_counties(
         if reason_by_id[row["place_id"]] is None
     ]
     filtered.sort(key=lambda item: (-float(item[0]), item[1]["place_id"]))
-    filtered_ranks = {row["place_id"]: rank for rank, (_, row) in enumerate(filtered, start=1)}
+    filtered_ranks = _competition_ranks(filtered)
     pareto_by_id: dict[str, bool] = {}
     if selected_view == "custom":
         flags = pareto_optimal(
@@ -583,7 +603,9 @@ def evaluate_counties(
         if reason is not None:
             exclusions[reason] += 1
     gates = {
-        "min_population": min_population,
+        "population_floor": POPULATION_FLOOR,
+        "min_population": effective_min_population,
+        "rank_policy": RANK_POLICY,
         "min_active_listings": min_active_listings,
         "min_valid_months": min_valid_months,
         "states": include_states,
@@ -679,7 +701,7 @@ def rank_counties(
     )
     ranked = sorted(
         (row for row in evaluation.rows if row.eligible),
-        key=lambda row: int(row.filtered_rank or 0),
+        key=lambda row: (int(row.filtered_rank or 0), row.place_id),
     )[:limit]
     items = [
         RankedCounty(

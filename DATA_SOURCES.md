@@ -46,7 +46,12 @@ calibration knots/bounds and their hash, source vintages, citations, coverage
 statuses, and checksums. Raw agency dumps are never packaged.
 
 Population is Census PEP 2025 at current FIPS geography. It is an eligibility/context
-input, never a higher-is-better utility. Connecticut planning regions stay explicitly
+input, never a higher-is-better utility. Ranking utilities remain calibrated on the
+full source-valid national universe, but every County Fit pillar and Custom Fit excludes
+counties with missing population or population below the inclusive 25,000 floor before
+national ranks are assigned. Higher user thresholds apply after that fixed rank;
+thresholds below 25,000 are rejected. Equal values use competition ranks (`1, 1, 3`),
+with FIPS only ordering tied rows. Connecticut planning regions stay explicitly
 null for legacy-county inputs instead of using an invented allocation or crosswalk.
 
 FBI crime uses 2023–2025 attributed agency aggregates only when every year has at least
@@ -55,15 +60,19 @@ average-tie ECDFs combined 60/40. Suppression stays null, never zero. EPA water 
 active retail community-system boundaries allocated by 2020 Census block population,
 including visibly labeled EPA-modeled boundaries, and is null below 90% allocatable
 coverage. Public-water share is context, not evidence of private-well use.
+It excludes private wells and must not be interpreted as countywide water quality;
+the water-violation utility, not the coverage share, contributes to Safety Factors.
 
 Provider supply is an availability proxy: AHRF primary-care and dental counts plus the
 CHR&R/NPPES broad mental-health measure are converted to rates, national average-tie
 ECDF utilities, and combined equally. FCC input is the December 2025 terrestrial fixed
 100/20 served share of broadband-serviceable locations, not people; Location Fabric is
 denied. NOAA 1991–2020 climate values average equal-weight, fully qualifying in-county
-stations with no nearest-station fallback. Homeschool-policy fit is an approximate,
-project-authored state preference rubric with official citations and effective dates,
-not legal advice, legal-compliance or school-quality evidence, or a recommendation.
+stations with no nearest-station fallback. Mountain Landscape uses Mountain Magnitude
+only; climate remains filter-only. Homeschool Policy Fit is an approximate,
+project-authored state preference rubric, so counties within a state tie. It includes
+official citations and effective dates but is not legal advice, legal-compliance or
+school-quality evidence, or a recommendation.
 
 Ranking Cost of Living uses MSA MARPP or official state all-items RPP labeled `state`.
 Map Cost of Living remains MSA or U.S. Nonmetropolitan Portion `00999`. Do not advertise

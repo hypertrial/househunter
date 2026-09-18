@@ -42,7 +42,9 @@ command use the named `top-counties-v2` weighted-utility preference model. Count
 is separate from the five map layers, loads lazily, and never writes a blended score
 to the snapshot. Preset names are unchanged from earlier releases, but the score
 formula and results are not comparable to the former TOPSIS model or a universal
-livability score.
+livability score. Every County Fit view uses a fixed inclusive Census PEP population
+floor of 25,000; smaller counties remain selectable for reference but receive no score
+or rank.
 
 Residential Hazard Exposure derives national same-grain percentiles from 17 FEMA
 building-specific `*_ALRB` fields, treating not-applicable hazards as zero while
@@ -123,7 +125,7 @@ househunter download [--source fema|fema_counties|chrr|bea_rpp|all]
 househunter import-home-market FILE --acknowledge-personal-use [--history]
 househunter build [--state CO]
 househunter rank [--state CO] [--county STCOFIPS] [--level tract|county] [--metric residential-hazard|community-conditions|mountain|cost-of-living|home-costs] [--res-hazard-min N] [--res-hazard-max N] [--mountain-magnitude-min N] [--max-community-conditions-group 1..10] [--cost-of-living-index-min N] [--cost-of-living-index-max N] [--home-sqft-for-1m-min N] [--home-sqft-for-1m-max N] [--housing-built-2000-plus-pct-min 0..100] [--housing-built-2000-plus-pct-max 0..100] [--order best|worst] [--limit N] [--include-unranked]
-househunter top-counties [--preset balanced|safety-health|affordability|mountain-lifestyle] [--weight-safety N --weight-health N --weight-affordability N --weight-opportunity N --weight-lifestyle N --weight-family N] [--limit N] [--json] [--min-population N] [--min-active-listings N] [--min-valid-months N] [--state ST] [--exclude-state ST] [--exclude-region appalachia]
+househunter top-counties [--preset balanced|safety-health|affordability|mountain-lifestyle] [--weight-safety N --weight-health N --weight-affordability N --weight-opportunity N --weight-lifestyle N --weight-family N] [--limit N] [--json] [--min-population N>=25000] [--min-active-listings N] [--min-valid-months N] [--state ST] [--exclude-state ST] [--exclude-region appalachia]
 househunter inspect TRACT_FIPS|COUNTY_FIPS
 househunter lookup "1670 Broadway, Denver, CO" [--allow-approximate]
 househunter export --format parquet|csv|json [--level tract|county] [--output PATH]
@@ -216,40 +218,52 @@ tract percentages. ACS sentinels and zero denominators become null with an expli
 status; v1 does not invent a combined percentage margin of error.
 
 `househunter top-counties` and County Fit are request-scoped preference views, not a
-sixth stored metric. Methodology `top-counties-v2` scores the full pinned 50-state/DC
-national reference first, then applies eligibility and user gates. Gates drop rows;
+sixth stored metric. Methodology `top-counties-v2` calibrates utilities over the full
+pinned 50-state/DC source-valid reference, then applies eligibility and user gates.
+Gates drop rows;
 they never recompute utilities or renormalize weights. Rebuild older snapshots to
-schema 13 with `househunter build` before ranking. Custom Fit national rank is assigned
-on the complete-core reference before population, market, state, region, climate, or
-pillar gates; a pillar view ranks all counties that have that pillar and does not add
-population or housing gates unless the user selects them.
+schema 13 with `househunter build` before ranking. Utilities keep their full
+source-valid national calibration, but every pillar and Custom Fit applies the fixed
+inclusive Census PEP population floor of 25,000 before national ranks are assigned.
+Counties below the floor or without population keep reference-only pillar utilities in
+details but have a null active value and no national or filtered rank. A higher user
+population threshold applies after the fixed national rank, so it cannot change that
+rank. Custom Fit applies its housing gates before higher user filters; pillar views do
+not add housing gates unless the user selects them.
 
 Public inputs come from the schema-2 maintainer `ranking_v2` county bundle. Private
 trailing-12-month housing metrics come from approved `import-home-market` month or
-`--history` imports. Custom Fit defaults are population `>= 25,000`, `>= 9` valid
-months in the trailing 12, median active listings `>= 100`, crime coverage `>= 90%`,
-and all six pillars present. Missing cores exclude the county; null stays null. With
-the normal one-month import, County Fit is explicitly partial: Safety, Health,
-Opportunity, Lifestyle, and Family Autonomy remain available while Affordability and
-Custom Fit show the history-import and rebuild commands.
+`--history` imports. Custom Fit additionally requires `>= 9` valid months in the
+trailing 12, median active listings `>= 100`, crime coverage `>= 90%`, and all six
+pillars present. Missing cores exclude the county; null stays null. Explicit
+`--min-population` values below 25,000 are rejected rather than clamped. With
+the normal one-month import, County Fit is explicitly partial: Safety Factors, Health,
+Opportunity, Mountain Landscape, and Homeschool Policy Fit remain available while
+Affordability and Custom Fit show the history-import and rebuild commands.
 
 Each packaged ranking release records validator-checked source-status distributions,
 non-null bundle-pillar counts, and complete/partial public-core county counts in its
 release-identity-bound manifest. These are release coverage baselines, not estimates
 of household access or service quality.
 
-Pillar internals are Safety 50/35/15 hazard/crime/water, Health 60/40 healthcare/CHR&R
-context, Affordability 45/35/20 housing/RPP/property tax, Opportunity 60/40
-employment/broadband, Lifestyle 100 Mountain, Family Autonomy 100 homeschool-policy fit.
-The score is exactly `sum(effective_weight * utility)` with weights summing to 1.
+Pillar internals are Safety Factors 50/35/15 hazard/crime/water-violation utility,
+Health 60/40 healthcare/CHR&R context, Affordability 45/35/20 housing/RPP/property tax,
+Opportunity 60/40
+employment/broadband, Mountain Landscape 100 Mountain Magnitude, and Homeschool Policy
+Fit 100 approximate state-level homeschool-policy fit. Counties within a state therefore
+tie on Homeschool Policy Fit. The score is exactly
+`sum(effective_weight * utility)` with weights summing to 1.
 Named presets in safety/health/affordability/opportunity/lifestyle/family order are
 `balanced` 20/15/25/15/15/10 (default), `safety-health` 35/25/15/10/5/10,
 `affordability` 15/10/45/15/5/10, and `mountain-lifestyle` 10/10/15/10/45/10.
-Exact ties break by county FIPS. Pareto flags annotate pillar utilities and are not a
-ranking input. Climate bounds are optional and default off. Healthcare providers are
-availability proxies; water boundaries may be EPA-supplied or modeled; FCC measures
+Exact ties receive competition ranks (`1, 1, 3`); county FIPS is only the deterministic
+display-order tie-breaker. Pareto flags annotate pillar utilities and are not a ranking
+input. Climate bounds are optional and default off. Healthcare providers are
+availability proxies. The public-water violation share contributes to Safety Factors,
+while public-water coverage is context only: it excludes private wells and is not
+countywide water quality. Water boundaries may be EPA-supplied or modeled; FCC measures
 broadband-serviceable locations, not population; and climate is null without a fully
-qualified in-county NOAA station. Family Autonomy uses an approximate,
+qualified in-county NOAA station. Homeschool Policy Fit uses an approximate,
 project-authored preference rubric. It is not legal advice, legal-compliance or
 school-quality evidence, or a recommendation; users must verify current requirements.
 
@@ -294,11 +308,14 @@ filters is first used. Every add-on independently validates schema, build, scope
 level, ordered IDs, aligned lengths, nulls, and numeric domains before merging. The
 full endpoint remains available for local clients.
 
-County Fit is a separate lazy contract. `/api/v3/meta` reports sanitized readiness;
+County Fit is a separate lazy contract. `/api/v3/meta` reports sanitized readiness,
+including `population_floor: 25000` and `rank_policy: competition`;
 `GET /api/v3/county-fit` returns a build-bound schema-1 columnar county vector;
 `GET /api/v3/county-fit/counties/{fips}` returns measures, utilities, coverage,
 vintages, citations, and limitations; and `GET /api/v3/exports/county-fit.csv` uses the
-same query parser and ranking call. Stale or state-scoped builds return 409, invalid
+same query parser and ranking call and includes the complete evaluation gates as JSON.
+Hard-floor-excluded details label retained utilities as reference-only. Stale or
+state-scoped builds return 409, invalid
 weights or gates return 422, and missing or invalid bundles return 503. Missing values
 remain null. The decoded summary must stay below 1 MB and gzip below 300 KB, without
 changing the initial map payload.

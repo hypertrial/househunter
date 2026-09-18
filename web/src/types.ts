@@ -215,6 +215,8 @@ export interface CountyFitReadiness {
   bundle_release?: string | null;
   vintages?: Record<string, string | number>;
   row_count?: number;
+  population_floor?: number;
+  rank_policy?: "competition";
   available_pillars: CountyFitPillar[];
   local_history?: {
     status?: string;
@@ -265,9 +267,11 @@ export interface CountyFitDetail {
   build_id: string;
   county: { fips: string; name: string; state: string };
   view: CountyFitView;
+  population: number | null;
   active_value: number | null;
   eligible: boolean;
   exclusion_reason: string | null;
+  reference_only: boolean;
   national_rank: number | null;
   filtered_rank: number | null;
   pareto_optimal: boolean | null;

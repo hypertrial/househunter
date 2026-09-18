@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import csv
 import gzip
+import io
 import json
 import os
 import time
@@ -471,6 +473,8 @@ def test_county_fit_api_detail_export_and_validation_share_one_ranking_contract(
         readiness = meta["county_fit"]
         assert readiness["readiness"] == "ready"
         assert readiness["row_count"] == 2
+        assert readiness["population_floor"] == 25_000
+        assert readiness["rank_policy"] == "competition"
         assert set(readiness["available_pillars"]) == {
             "safety",
             "health",
@@ -525,6 +529,8 @@ def test_county_fit_api_detail_export_and_validation_share_one_ranking_contract(
             == custom_payload["counties"]["active_value"][alaska_index]
         )
         assert detail_payload["filtered_rank"] == 1
+        assert detail_payload["population"] == 80_000
+        assert detail_payload["reference_only"] is False
         assert set(detail_payload["pillars"]) == {
             "safety",
             "health",
@@ -551,12 +557,34 @@ def test_county_fit_api_detail_export_and_validation_share_one_ranking_contract(
             detail_payload["coverage"]
         )
 
+        higher_population_params = {
+            "build_id": build_id,
+            "view": "safety",
+            "min_population": 70_000,
+        }
+        higher_population = client.get(
+            "/api/v3/county-fit", params=higher_population_params
+        ).json()
+        autauga_index = higher_population["counties"]["county_fips"].index("01001")
+        assert higher_population["counties"]["eligible"][autauga_index] is False
+        assert higher_population["counties"]["exclusion_reason"][autauga_index] == "population"
+        assert higher_population["counties"]["active_value"][autauga_index] is not None
+        assert higher_population["counties"]["national_rank"][autauga_index] is not None
+        higher_population_detail = client.get(
+            "/api/v3/county-fit/counties/01001", params=higher_population_params
+        ).json()
+        assert higher_population_detail["population"] == 58_000
+        assert higher_population_detail["reference_only"] is False
+
         exported = client.get("/api/v3/exports/county-fit.csv", params=custom_params)
         assert exported.status_code == 200
         lines = exported.text.splitlines()
         assert lines[0].startswith("county_fips,name,state,view,active_value")
         assert lines[1].startswith("02001,")
         assert len(lines) == 2
+        exported_row = next(csv.DictReader(io.StringIO(exported.text)))
+        assert json.loads(exported_row["gates_json"])["population_floor"] == 25_000
+        assert json.loads(exported_row["gates_json"])["rank_policy"] == "competition"
 
         assert (
             client.get(
@@ -585,6 +613,7 @@ def test_county_fit_api_detail_export_and_validation_share_one_ranking_contract(
         assert wrong_total.status_code == 422
         for invalid_params in (
             {"state": "ZZ"},
+            {"min_population": 24_999},
             {"min_jan_temp_f": "nan"},
             {"min_jan_temp_f": "inf"},
             {"min_jan_temp_f": "-inf"},
@@ -930,6 +959,8 @@ def test_map_scores_and_assets_are_complete_ordered_and_safe(
             "reason_code": "national_snapshot_required",
             "methodology_id": "top-counties-v2",
             "available_pillars": [],
+            "population_floor": 25_000,
+            "rank_policy": "competition",
         }
         assert (
             client.get(
