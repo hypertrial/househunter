@@ -1,20 +1,33 @@
 import { zoomIdentity, type ZoomTransform } from "d3-zoom";
-import type { Geography, MapScore, Metric } from "./types";
+import type { Geography, Metric } from "./types";
 
-export const MAP_COLORS = {
-  low: "#7fa87e",
-  below: "#c4b04a",
-  typical: "#d2a727",
-  high: "#c56a42",
-  highest: "#b14a3c",
-} as const;
-
-export type ScoreBand = keyof typeof MAP_COLORS;
-
-export const COMMUNITY_GROUP_COLORS = [
-  "#7fa87e", "#9eac67", "#bcaf50", "#c9ad3e", "#cfa92f",
-  "#cf992d", "#c97e39", "#c36641", "#ba583f", "#b14a3c",
-] as const;
+export {
+  COMMUNITY_COLOR_SCALE,
+  COMMUNITY_GROUP_COLORS,
+  communityGroupColor,
+  COST_OF_LIVING_COLOR_SCALE,
+  costOfLivingColor,
+  COUNTY_FIT_COLOR_SCALE,
+  COUNTY_FIT_GRADIENT,
+  COUNTY_MOUNTAIN_COLOR_SCALE,
+  countyFitColor,
+  HAZARD_COLOR_SCALE,
+  HOME_COSTS_COLOR_SCALE,
+  homeBuyingPowerColor,
+  layerColor,
+  MAP_COLORS,
+  METRIC_COLOR_SCALES,
+  metricColor,
+  metricColorScale,
+  metricValueColor,
+  MOUNTAIN_BAND_COLORS,
+  MOUNTAIN_COLOR_SCALE,
+  MOUNTAIN_COLORS,
+  mountainColor,
+  scoreBand,
+  scoreColor,
+  type ScoreBand,
+} from "./palette";
 
 export const METRIC_UI = {
   "residential-hazard": {
@@ -28,108 +41,6 @@ export const METRIC_UI = {
   "home-costs": { name: "Home Costs", source: "Realtor.com / ACS", descriptorKey: "home-costs" },
 } as const satisfies Record<Metric, { name: string; source: string; descriptorKey: string }>;
 
-export const MOUNTAIN_BAND_COLORS = [
-  "#440154", "#482878", "#3e4989", "#31688e", "#26828e", "#1f9e89",
-  "#35b779", "#6ece58", "#b5de2b", "#fde725", "#fff4a8",
-] as const;
-
-export const MOUNTAIN_COLORS = {
-  low: MOUNTAIN_BAND_COLORS[0],
-  below: MOUNTAIN_BAND_COLORS[2],
-  typical: MOUNTAIN_BAND_COLORS[4],
-  high: MOUNTAIN_BAND_COLORS[6],
-  highest: MOUNTAIN_BAND_COLORS[8],
-  summit: MOUNTAIN_BAND_COLORS[10],
-} as const;
-
-const COLOR_SCALE_SIZE = 256;
-
-function colorScale(anchors: readonly string[]): readonly string[] {
-  const channels = anchors.map((color) => [
-    Number.parseInt(color.slice(1, 3), 16),
-    Number.parseInt(color.slice(3, 5), 16),
-    Number.parseInt(color.slice(5, 7), 16),
-  ]);
-  const positions = anchors.map((_, index) =>
-    Math.round(index * (COLOR_SCALE_SIZE - 1) / (anchors.length - 1))
-  );
-  return Array.from({ length: COLOR_SCALE_SIZE }, (_, index) => {
-    let right = 1;
-    while (index > positions[right]) right += 1;
-    const left = right - 1;
-    const mix = (index - positions[left]) / (positions[right] - positions[left]);
-    const rgb = channels[left].map((channel, offset) =>
-      Math.round(channel + (channels[right][offset] - channel) * mix)
-    );
-    return `#${rgb.map((channel) => channel.toString(16).padStart(2, "0")).join("")}`;
-  });
-}
-
-function gradient(colors: readonly string[]): string {
-  return `linear-gradient(90deg, ${colors.map((color, index) =>
-    `${color} ${index * 100 / colors.length}% ${(index + 1) * 100 / colors.length}%`
-  ).join(", ")})`;
-}
-
-const HAZARD_ANCHORS = Object.values(MAP_COLORS);
-export const HAZARD_COLOR_SCALE = colorScale(HAZARD_ANCHORS);
-export const COMMUNITY_COLOR_SCALE = colorScale(COMMUNITY_GROUP_COLORS);
-export const MOUNTAIN_COLOR_SCALE = MOUNTAIN_BAND_COLORS;
-export const COUNTY_MOUNTAIN_COLOR_SCALE = MOUNTAIN_BAND_COLORS.slice(0, 9);
-export const COST_OF_LIVING_COLOR_SCALE = colorScale(HAZARD_ANCHORS);
-export const HOME_COSTS_COLOR_SCALE = colorScale([...HAZARD_ANCHORS].reverse());
-export const COUNTY_FIT_COLOR_SCALE = colorScale([
-  "#5f6770", "#4f7180", "#3f8790", "#58a184", "#91b765", "#d2bd55", "#f0d98b",
-]);
-export const COUNTY_FIT_GRADIENT = gradient(COUNTY_FIT_COLOR_SCALE);
-
-export const METRIC_COLOR_SCALES = {
-  "residential-hazard": {
-    minimum: 0, maximum: 100, ticks: [0, 20, 40, 60, 80, 100],
-    distinguishAt: [20, 40, 60, 80],
-    colors: HAZARD_COLOR_SCALE, gradient: gradient(HAZARD_COLOR_SCALE),
-  },
-  "community-conditions": {
-    minimum: 1, maximum: 10, ticks: [1, 3, 5, 7, 10],
-    distinguishAt: [],
-    colors: COMMUNITY_COLOR_SCALE, gradient: gradient(COMMUNITY_COLOR_SCALE),
-  },
-  mountain: {
-    minimum: 0, maximum: 5, ticks: [0, 1, 2, 3, 4, 5],
-    distinguishAt: [1, 2, 3, 4],
-    colors: MOUNTAIN_COLOR_SCALE, gradient: gradient(MOUNTAIN_COLOR_SCALE.slice(0, -1)),
-  },
-  "cost-of-living": {
-    minimum: 80, maximum: 120, ticks: [80, 90, 100, 110, 120],
-    distinguishAt: [100],
-    colors: COST_OF_LIVING_COLOR_SCALE, gradient: gradient(COST_OF_LIVING_COLOR_SCALE),
-  },
-  "home-costs": {
-    minimum: 0, maximum: 100, ticks: [0, 20, 40, 60, 80, 100],
-    distinguishAt: [],
-    colors: HOME_COSTS_COLOR_SCALE, gradient: gradient(HOME_COSTS_COLOR_SCALE),
-  },
-} as const satisfies Record<Metric, {
-  minimum: number;
-  maximum: number;
-  ticks: readonly number[];
-  distinguishAt: readonly number[];
-  colors: readonly string[];
-  gradient: string;
-}>;
-
-export function metricColorScale(metric: Metric, level: Geography) {
-  if (metric !== "mountain" || level === "tract") return METRIC_COLOR_SCALES[metric];
-  return {
-    minimum: 0,
-    maximum: 4,
-    ticks: [0, 1, 2, 3, 4] as const,
-    distinguishAt: [1, 2, 3] as const,
-    colors: COUNTY_MOUNTAIN_COLOR_SCALE,
-    gradient: gradient(COUNTY_MOUNTAIN_COLOR_SCALE.slice(0, -1)),
-  };
-}
-
 export const STATE_FIPS = {
   AK: "02", AL: "01", AR: "05", AS: "60", AZ: "04", CA: "06", CO: "08", CT: "09",
   DC: "11", DE: "10", FL: "12", GA: "13", GU: "66", HI: "15", IA: "19", ID: "16",
@@ -141,100 +52,6 @@ export const STATE_FIPS = {
 } as const;
 
 export const STATE_ABBREVIATIONS = Object.keys(STATE_FIPS).sort() as Array<keyof typeof STATE_FIPS>;
-
-export function scoreBand(value: number | null): ScoreBand | null {
-  if (value === null || !Number.isFinite(value) || value < 0 || value > 100) return null;
-  const displayed = Number(value.toFixed(1));
-  if (displayed < 20) return "low";
-  if (displayed < 40) return "below";
-  if (displayed < 60) return "typical";
-  if (displayed < 80) return "high";
-  return "highest";
-}
-
-export function scoreColor(value: number | null): string | null {
-  return scaleColor(value, METRIC_COLOR_SCALES["residential-hazard"]);
-}
-
-export function communityGroupColor(value: number | null): string | null {
-  return value !== null && Number.isInteger(value)
-    ? scaleColor(value, METRIC_COLOR_SCALES["community-conditions"])
-    : null;
-}
-
-export function mountainColor(value: number | null, level: Geography = "tract"): string | null {
-  if (value === null || !Number.isFinite(value) || value < 0) return null;
-  const maximum = level === "tract" ? 5 : 4;
-  return MOUNTAIN_BAND_COLORS[Math.min(Math.floor(value * 2), maximum * 2)];
-}
-
-export function costOfLivingColor(value: number | null): string | null {
-  if (value === null || !Number.isFinite(value)) return null;
-  return scaleColor(Math.max(80, Math.min(120, value)), METRIC_COLOR_SCALES["cost-of-living"]);
-}
-
-export function homeBuyingPowerColor(value: number | null): string | null {
-  return scaleColor(value, METRIC_COLOR_SCALES["home-costs"]);
-}
-
-export function countyFitColor(value: number | null): string | null {
-  return scaleColor(value, {
-    minimum: 0,
-    maximum: 1,
-    distinguishAt: [],
-    colors: COUNTY_FIT_COLOR_SCALE,
-  });
-}
-
-function scaleColor(
-  value: number | null,
-  scale: {
-    minimum: number;
-    maximum: number;
-    distinguishAt: readonly number[];
-    colors: readonly string[];
-  },
-): string | null {
-  const { minimum, maximum, colors } = scale;
-  if (value === null || !Number.isFinite(value) || value < minimum || value > maximum) {
-    return null;
-  }
-  let index = Math.round((value - minimum) / (maximum - minimum) * (colors.length - 1));
-  for (const boundary of scale.distinguishAt) {
-    const boundaryIndex = Math.round(
-      (boundary - minimum) / (maximum - minimum) * (colors.length - 1),
-    );
-    if (value < boundary || index !== boundaryIndex) continue;
-    const lowerColor = colors[index];
-    while (index < colors.length - 1 && colors[index] === lowerColor) index += 1;
-  }
-  return colors[index];
-}
-
-export function metricColor(
-  score: MapScore | null | undefined,
-  metric: Metric,
-  level: Geography = "tract",
-): string | null {
-  const value = metric === "residential-hazard" ? score?.res_hazard_npctl
-    : metric === "community-conditions" ? score?.community_conditions_group
-      : metric === "mountain" ? score?.mountain_magnitude
-        : metric === "cost-of-living" ? score?.cost_of_living_index
-          : score?.home_buying_power_percentile;
-  return metricValueColor(value ?? null, metric, level);
-}
-
-export function metricValueColor(
-  value: number | null,
-  metric: Metric,
-  level: Geography = "tract",
-): string | null {
-  if (metric === "community-conditions") return communityGroupColor(value);
-  if (metric === "mountain") return mountainColor(value, level);
-  if (metric === "cost-of-living") return costOfLivingColor(value);
-  if (metric === "home-costs") return homeBuyingPowerColor(value);
-  return scoreColor(value);
-}
 
 export interface CameraState {
   cx: number;

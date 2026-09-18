@@ -18,7 +18,7 @@ import {
   type Projectors,
   type SpatialGrid,
 } from "./mapGeometry";
-import { countyFitColor, metricValueColor } from "./map";
+import { layerColor, SURFACE } from "./palette";
 import type {
   LoaderCommand,
   LoaderEvent,
@@ -265,7 +265,8 @@ function activeMetricValue(index: number, metric: MapMetric): number | null {
   if (metric === "community-conditions") return scores.columns.community_conditions_group[index];
   if (metric === "mountain") return scores.columns.mountain_magnitude[index];
   if (metric === "cost-of-living") return scores.columns.cost_of_living_index[index];
-  return scores.columns.home_buying_power_percentile[index];
+  if (metric === "home-costs") return scores.columns.home_buying_power_percentile[index];
+  return null;
 }
 
 function scoreIncluded(index: number | null, value: MapSemantics): boolean {
@@ -313,17 +314,15 @@ function featureStyle(
   const index = scoreIndexes.get(id) ?? null;
   const included = scoreIncluded(index, value);
   const active = included && index !== null ? activeMetricValue(index, value.metric) : null;
-  const color = included
-    ? value.metric === "county-fit" ? countyFitColor(active) : metricValueColor(active, value.metric, level)
-    : null;
+  const color = included ? layerColor(active, value.metric, level) : null;
   const filtered = Boolean(
     (value.state && featureState !== value.state)
     || (value.county && countyFips !== value.county),
   );
   return {
-    fill: color || (included && value.showUnavailable ? "hatch" : "#344149"),
+    fill: color || (included && value.showUnavailable ? "hatch" : SURFACE.noData),
     alpha: filtered ? 0.12 : included && (active !== null || value.showUnavailable) ? 1 : 0.34,
-    stroke: filtered ? "#233038" : "rgba(9,15,18,.54)",
+    stroke: filtered ? SURFACE.strokeFiltered : SURFACE.stroke,
   };
 }
 
@@ -527,10 +526,10 @@ function activePartitions(value: MapTransform, expanded = true): Partition[] {
 function hatchPattern(target: OffscreenCanvasRenderingContext2D, scale: number): CanvasPattern | string {
   const tile = new OffscreenCanvas(8, 8);
   const brush = tile.getContext("2d");
-  if (!brush) return "#566169";
-  brush.fillStyle = "#3b474e";
+  if (!brush) return SURFACE.hatchFallback;
+  brush.fillStyle = SURFACE.hatchBg;
   brush.fillRect(0, 0, 8, 8);
-  brush.strokeStyle = "#7a8589";
+  brush.strokeStyle = SURFACE.hatchFg;
   brush.lineWidth = 1;
   brush.beginPath();
   brush.moveTo(-2, 8);
@@ -540,7 +539,7 @@ function hatchPattern(target: OffscreenCanvasRenderingContext2D, scale: number):
   if (pattern && typeof pattern.setTransform === "function") {
     pattern.setTransform({ a: 1 / scale, d: 1 / scale });
   }
-  return pattern || "#566169";
+  return pattern || SURFACE.hatchFallback;
 }
 
 function ensureCanvas(renderWidth: number, renderHeight: number) {
@@ -581,7 +580,7 @@ async function render(epoch: number) {
   if (!target || !canvas) return;
   target.setTransform(1, 0, 0, 1, 0, 0);
   target.globalAlpha = 1;
-  target.fillStyle = "#10191e";
+  target.fillStyle = SURFACE.bg;
   target.fillRect(0, 0, canvas.width, canvas.height);
   target.setTransform(
     ratio * renderCamera.k, 0, 0, ratio * renderCamera.k,
@@ -617,7 +616,7 @@ async function render(epoch: number) {
   for (const state of stateMetadata) {
     if (!boundsIntersect(state.bounds, visible)) continue;
     if (epoch !== renderEpoch) throw new Cancelled();
-    target.strokeStyle = "rgba(223,231,230,.52)";
+    target.strokeStyle = SURFACE.stateOutline;
     target.lineWidth = 0.8 / renderCamera.k;
     target.stroke(state.path);
     const boundsWidth = (state.bounds[1][0] - state.bounds[0][0]) * renderCamera.k;
@@ -630,7 +629,7 @@ async function render(epoch: number) {
       target.setTransform(ratio, 0, 0, ratio, 0, 0);
       target.font = "600 10px ui-sans-serif, system-ui";
       target.textAlign = "center";
-      target.fillStyle = "rgba(231,238,236,.72)";
+      target.fillStyle = SURFACE.stateLabel;
       target.fillText(state.code, screenX, screenY);
       target.setTransform(
         ratio * renderCamera.k, 0, 0, ratio * renderCamera.k,
@@ -647,7 +646,7 @@ async function render(epoch: number) {
       .find((record) => record.id === selected);
     if (selectedRecord) {
       target.globalAlpha = 1;
-      target.strokeStyle = "#f7f4e8";
+      target.strokeStyle = SURFACE.selection;
       target.lineWidth = 2.2 / renderCamera.k;
       target.stroke(selectedRecord.path);
     }

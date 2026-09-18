@@ -2,6 +2,12 @@ import { expect, test, type Page, type Route } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { geoAlbersUsa } from "d3-geo";
 import { feature as topoFeature } from "topojson-client";
+import { scoreColor } from "../src/map";
+
+function cssRgb(hex: string): string {
+  const value = Number.parseInt(hex.slice(1), 16);
+  return `rgb(${value >> 16}, ${(value >> 8) & 255}, ${value & 255})`;
+}
 
 const build = {
   build_id: "national-fixture", place_count: 1, ranked_place_count: 1,
@@ -381,9 +387,9 @@ test("keeps preparation and retained workflows inside the map shell", async ({ p
   await expect(detailDrawer).toContainText("Wildfire");
   await expect(detailDrawer).toContainText("0.0 · Not applicable");
   const scoreValue = detailDrawer.locator('.metric-card[aria-label="Residential Hazard Exposure"] > span');
-  await expect(scoreValue).toHaveCSS("color", "rgb(185, 175, 82)");
+  await expect(scoreValue).toHaveCSS("color", cssRgb(scoreColor(summary.res_hazard_npctl)!));
   const wildfireBar = detailDrawer.locator(".contribution", { hasText: "Wildfire" }).locator(".bar i");
-  await expect(wildfireBar).toHaveCSS("background-color", "rgb(193, 99, 65)");
+  await expect(wildfireBar).toHaveCSS("background-color", cssRgb(scoreColor(hazards[0].percentile)!));
 });
 
 test("loads partial County Fit lazily and preserves the original map workspace", async ({ page }) => {
@@ -409,6 +415,8 @@ test("loads partial County Fit lazily and preserves the original map workspace",
   await expect(page.getByLabel("View").locator("option[value=affordability]")).toHaveAttribute("disabled", "");
   await expect(page.getByLabel("View").locator("option[value=custom]")).toHaveAttribute("disabled", "");
   await expect(page.getByRole("heading", { name: "Ranked counties" })).toBeVisible();
+  await expect(page.getByLabel("Stepped County Fit color scale with 5 classes, higher is better")).toBeVisible();
+  await expect(page.getByLabel(/^Continuous /)).toHaveCount(0);
   await expect(page.getByText(/50% residential hazard, 35% reported crime/)).toBeVisible();
   await expect(page.getByRole("button", { name: /Boulder.*82\.0/ })).toBeVisible();
   await expect.poll(() => fitSummaryRequests.length).toBe(1);
@@ -599,7 +607,7 @@ test("renders Community Conditions as an independent county-level layer", async 
   await page.goto("/");
   await selectLayer(page, "community-conditions");
   await expect(page).toHaveURL(/metric=community-conditions/);
-  await expect(page.getByLabel("Continuous Community Conditions color scale, Group 1 is healthiest"))
+  await expect(page.getByLabel("Stepped Community Conditions color scale with 10 classes, Group 1 is healthiest"))
     .toContainText("county-level clusters, not percentiles");
   await page.getByRole("button", { name: "Best / Worst" }).click();
   const panel = page.getByRole("region", { name: "Best and worst Community Conditions" });
@@ -657,7 +665,7 @@ test("combines Cost of Living and Home Costs with the other map filters", async 
   await selectLayer(page, "cost-of-living");
   await expect.poll(() => scoreRequests).toContain("/api/v3/map/scores/addons/cost-of-living");
   const costLegend = page.getByLabel(
-    "Cost of Living color scale from 80 to 120, lower is better, U.S. equals 100",
+    "Stepped Cost of Living color scale with 8 classes from 80 to 120, lower is better, U.S. equals 100",
   );
   await expect(costLegend).toContainText("100 · U.S.");
   await expect(costLegend).toContainText("BEA RPP · 2024");
@@ -678,7 +686,7 @@ test("combines Cost of Living and Home Costs with the other map filters", async 
 
   await selectLayer(page, "home-costs");
   const homeLegend = page.getByLabel(
-    "Home Costs national buying power percentile color scale, higher is better",
+    "Stepped Home Costs national buying power percentile color scale with 5 classes, higher is better",
   );
   await expect(homeLegend).toContainText("asking-market indicator");
   await expect(page).toHaveURL(/metric=home-costs/);
@@ -963,7 +971,7 @@ test("keeps ACS filtering usable when Home Costs is unavailable", async ({ page 
   await page.goto("/");
   await selectLayer(page, "home-costs");
   await expect(page.getByLabel(
-    "Home Costs national buying power percentile color scale, higher is better",
+    "Stepped Home Costs national buying power percentile color scale with 5 classes, higher is better",
   )).toContainText("Unavailable in this snapshot");
 
   await page.getByRole("button", { name: /Filters/ }).click();
@@ -1162,8 +1170,9 @@ test("is keyboard operable and never overflows the viewport", async ({ page }, t
   const dimensions = await page.evaluate(() => ({ page: document.documentElement.scrollWidth, viewport: innerWidth }));
   expect(dimensions.page).toBe(dimensions.viewport);
   await expect(page.getByLabel(/Focusable USA tract Residential Hazard Exposure map/)).toBeVisible();
-  await expect(page.getByLabel("Continuous Residential Hazard Exposure color scale, higher is worse"))
+  await expect(page.getByLabel("Stepped Residential Hazard Exposure color scale with 5 classes, higher is worse"))
     .toContainText("not property-level risk");
+  await expect(page.getByLabel(/^Continuous /)).toHaveCount(0);
   const accessibility = await new AxeBuilder({ page })
     .withTags(["wcag2a", "wcag2aa", "wcag21aa", "wcag22aa"])
     .analyze();
@@ -1522,8 +1531,8 @@ test("cancels an obsolete metric paint when returning to a cached metric", async
   await page.waitForTimeout(350);
 
   await expect(layerButton(page)).toHaveAccessibleName("Map layer: Residential Hazard Exposure — HouseHunter / FEMA NRI");
-  await expect(page.getByLabel("Continuous Residential Hazard Exposure color scale, higher is worse")).toBeVisible();
-  await expect(page.getByLabel(/Continuous Mountain Magnitude color scale/)).toHaveCount(0);
+  await expect(page.getByLabel("Stepped Residential Hazard Exposure color scale with 5 classes, higher is worse")).toBeVisible();
+  await expect(page.getByLabel(/Stepped Mountain Magnitude color scale/)).toHaveCount(0);
   expect(await page.evaluate(() => (window.__HOUSEHUNTER_MAP_PROFILE__ || [])
     .filter((entry) => entry.name === "bitmap-commit" || entry.name === "bitmap-reuse-commit")
     .at(-1)?.metric)).toBe("residential-hazard");

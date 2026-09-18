@@ -14,7 +14,7 @@ import {
   readCountyFitHash,
   type CountyFitFilters,
 } from "./countyFit";
-import { COUNTY_FIT_GRADIENT, STATE_ABBREVIATIONS, type CameraState } from "./map";
+import { metricColorScale, STATE_ABBREVIATIONS, type CameraState } from "./map";
 import type {
   CountyFitDetail, CountyFitPillar, CountyFitSummary, CountyFitView, MapFilters, Meta,
 } from "./types";
@@ -205,6 +205,7 @@ export default function CountyFit({ meta, active, onMap }: {
     buildId, view, preset, weights, apiFilters(filters),
   ), [buildId, filters, preset, view, weights]);
   const scoreUrl = `/api/v3/county-fit?${params}`;
+  const fitScale = metricColorScale("county-fit", "county");
 
   const updateHash = useCallback((mode: "push" | "replace") => {
     if (!active) return;
@@ -375,7 +376,7 @@ export default function CountyFit({ meta, active, onMap }: {
       {!error && visibleRows < orderedRows.length && <button className="secondary load-more" onClick={() => setVisibleRows((value) => value + 100)}>Load 100 more</button>}
     </aside>
 
-    <div className="legend county-fit-legend"><div className="legend-keys"><div className="continuous-key"><i className="legend-gradient" style={{ background: COUNTY_FIT_GRADIENT }} /><div className="legend-ticks"><span style={{ left: "0%" }}>0</span><span style={{ left: "25%" }}>25</span><span style={{ left: "50%" }}>50</span><span style={{ left: "75%" }}>75</span><span style={{ left: "100%" }}>100</span></div></div><span className="missing-key"><i className="hatched" />Excluded / unavailable</span></div><p><strong>{activeViewLabel}</strong> · higher is better · fixed national calibration · cohort {summary?.cohort_count ?? 0}</p></div>
+    <div className="legend county-fit-legend" role="group" aria-label="Stepped County Fit color scale with 5 classes, higher is better"><div className="legend-keys"><div className="stepped-key"><i className="legend-gradient" style={{ backgroundImage: fitScale.gradient }} role="img" aria-label="County Fit stepped color scale from 0 to 100" /><div className="legend-ticks">{fitScale.ticks.map((tick) => <span key={tick} style={{ left: `${(tick - fitScale.minimum) * 100 / (fitScale.maximum - fitScale.minimum)}%` }}>{tick * 100}</span>)}</div></div><span className="missing-key"><i className="hatched" />Excluded / unavailable</span></div><p><strong>{activeViewLabel}</strong> · higher is better · fixed national calibration · cohort {summary?.cohort_count ?? 0}</p></div>
     {preview && <div className={tooltipClass} style={{ left: preview.x, top: preview.y }}><strong>{preview.name}</strong><span>{preview.state} · {preview.placeId}</span><b>{preview.countyFit?.eligible ? displayPercent(preview.countyFit.activeValue) : exclusionLabel(preview.countyFit?.exclusionReason, preview.countyFit?.activeValue === null && preview.countyFit?.nationalRank === null)}</b></div>}
     {selected && <DetailDrawer detail={detail} loading={detailLoading} error={detailError} onClose={closeDetail} onRetry={() => setDetailRetry((value) => value + 1)} />}
     <p className="sr-only" aria-live="polite">{status}</p>

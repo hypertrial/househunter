@@ -180,23 +180,23 @@ function MetricLegend({ metric, level, descriptor }: {
   const missing = metric === "residential-hazard" ? "Unranked"
     : metric === "community-conditions" ? "Not grouped" : "Unavailable";
   const label = metric === "residential-hazard"
-    ? "Continuous Residential Hazard Exposure color scale, higher is worse"
+    ? "Stepped Residential Hazard Exposure color scale with 5 classes, higher is worse"
     : metric === "mountain"
       ? `Stepped Mountain Magnitude color scale for U.S. ${peers}, higher means fewer equal-or-higher peers`
       : metric === "community-conditions"
-        ? "Continuous Community Conditions color scale, Group 1 is healthiest"
+        ? "Stepped Community Conditions color scale with 10 classes, Group 1 is healthiest"
         : metric === "cost-of-living"
-          ? "Cost of Living color scale from 80 to 120, lower is better, U.S. equals 100"
-          : "Home Costs national buying power percentile color scale, higher is better";
+          ? "Stepped Cost of Living color scale with 8 classes from 80 to 120, lower is better, U.S. equals 100"
+          : "Stepped Home Costs national buying power percentile color scale with 5 classes, higher is better";
   const rampLabel = metric === "residential-hazard"
-    ? "Residential Hazard Exposure continuous color ramp from 0 to 100"
+    ? "Residential Hazard Exposure stepped color scale with 5 classes from 0 to 100"
     : metric === "mountain"
       ? `Mountain Magnitude half-step color bands from M0 up to M${maximum} for U.S. ${peers}; M${maximum} and above use the separate cap color`
       : metric === "community-conditions"
-        ? "Community Conditions color ramp from Group 1 to Group 10"
+        ? "Community Conditions stepped color scale from Group 1 to Group 10"
         : metric === "cost-of-living"
-          ? "BEA Regional Price Parity color ramp from 80 to 120 with U.S. 100 marked"
-          : "Home buying power national percentile color ramp from 0 to 100";
+          ? "BEA Regional Price Parity stepped color scale from 80 to 120 with U.S. 100 marked"
+          : "Home buying power national percentile stepped color scale from 0 to 100";
   const explanation = metric === "residential-hazard"
     ? <><strong>Residential Hazard Exposure</strong> · HouseHunter composite of FEMA building-specific loss rates · higher is worse · national percentile within {peers} · not property-level risk</>
     : metric === "mountain"
@@ -208,7 +208,7 @@ function MetricLegend({ metric, level, descriptor }: {
           : <><strong>Square feet purchasable for $1M</strong> · national county percentile · higher is better · asking-market indicator</>;
   return <div className="legend" role="group" aria-label={label}>
     <div className="legend-keys">
-      <div className="continuous-key">
+      <div className="stepped-key">
         <i className="legend-gradient" style={{ backgroundImage: gradient }} role="img" aria-label={rampLabel} />
         <div className="legend-ticks">{ticks.map((tick) => <span
           key={tick}

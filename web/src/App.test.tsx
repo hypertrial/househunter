@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App, { communityLabel, mapFocusTarget, mapTooltipClass, mountainLabel, mountainRarityLabel, scoreBand, scoreLabel, scorePillLabel, sensitivityLabel, sortedHazardPercentiles, STATE_ABBREVIATIONS } from "./App";
 import RiskMap from "./RiskMap";
-import { cameraFromTransform, COMMUNITY_COLOR_SCALE, COMMUNITY_GROUP_COLORS, communityGroupColor, costOfLivingColor, COUNTY_MOUNTAIN_COLOR_SCALE, HAZARD_COLOR_SCALE, homeBuyingPowerColor, MAP_COLORS, METRIC_COLOR_SCALES, metricColor, metricColorScale, MOUNTAIN_BAND_COLORS, MOUNTAIN_COLOR_SCALE, MOUNTAIN_COLORS, mountainColor, readHash, relativeTransform, scoreColor, transformFromCamera } from "./map";
+import { cameraFromTransform, COMMUNITY_COLOR_SCALE, COMMUNITY_GROUP_COLORS, communityGroupColor, COST_OF_LIVING_COLOR_SCALE, costOfLivingColor, COUNTY_FIT_COLOR_SCALE, COUNTY_MOUNTAIN_COLOR_SCALE, countyFitColor, HAZARD_COLOR_SCALE, HOME_COSTS_COLOR_SCALE, homeBuyingPowerColor, MAP_COLORS, METRIC_COLOR_SCALES, metricColor, metricColorScale, MOUNTAIN_BAND_COLORS, MOUNTAIN_COLOR_SCALE, MOUNTAIN_COLORS, mountainColor, readHash, relativeTransform, scoreColor, transformFromCamera } from "./map";
 import type { HazardPercentile, MapFilters, MapScore, PlaceSummary } from "./types";
 
 const mapFilters: MapFilters = {
@@ -313,6 +313,10 @@ describe("score semantics", () => {
     expect([0, 19.94, 19.96, 39.94, 39.96, 59.96, 79.96, 100].map(scoreBand)).toEqual([
       "low", "low", "below", "below", "typical", "high", "highest", "highest",
     ]);
+    expect(scoreBand(-0.04)).toBe("low");
+    expect(scoreBand(100.04)).toBe("highest");
+    expect(scoreBand(-0.05)).toBeNull();
+    expect(scoreBand(100.06)).toBeNull();
     expect(scoreBand(null)).toBeNull(); expect(scoreBand(101)).toBeNull();
     expect(scoreLabel({ ...tract, res_hazard_npctl: 19.96 })).toBe("20.0");
     expect(scorePillLabel({ ...tract, res_hazard_npctl: 19.96 })).toBe("20.0, below typical");
@@ -351,32 +355,41 @@ describe("score semantics", () => {
     expect(readHash("#metric=quality").metric).toBe("residential-hazard");
   });
   it("uses bounded fixed-domain color scales and honest null labels", () => {
-    expect(HAZARD_COLOR_SCALE).toHaveLength(256);
+    expect(HAZARD_COLOR_SCALE).toHaveLength(5);
     expect(MOUNTAIN_COLOR_SCALE).toHaveLength(11);
     expect(COUNTY_MOUNTAIN_COLOR_SCALE).toHaveLength(9);
-    expect(COMMUNITY_COLOR_SCALE).toHaveLength(256);
+    expect(COMMUNITY_COLOR_SCALE).toHaveLength(10);
+    expect(COST_OF_LIVING_COLOR_SCALE).toHaveLength(8);
+    expect(HOME_COSTS_COLOR_SCALE).toHaveLength(5);
+    expect(COUNTY_FIT_COLOR_SCALE).toHaveLength(5);
     expect(METRIC_COLOR_SCALES["residential-hazard"]).toMatchObject({
-      minimum: 0, maximum: 100, ticks: [0, 20, 40, 60, 80, 100],
+      minimum: 0, maximum: 100, ticks: [0, 20, 40, 60, 80, 100], classes: 5,
     });
     expect(METRIC_COLOR_SCALES["community-conditions"]).toMatchObject({
-      minimum: 1, maximum: 10, ticks: [1, 3, 5, 7, 10],
+      minimum: 1, maximum: 10, ticks: [1, 3, 5, 7, 10], classes: 10,
     });
     expect(METRIC_COLOR_SCALES.mountain).toMatchObject({
-      minimum: 0, maximum: 5, ticks: [0, 1, 2, 3, 4, 5],
+      minimum: 0, maximum: 5, ticks: [0, 1, 2, 3, 4, 5], classes: 10,
     });
     expect(METRIC_COLOR_SCALES["cost-of-living"]).toMatchObject({
-      minimum: 80, maximum: 120, ticks: [80, 90, 100, 110, 120],
+      minimum: 80, maximum: 120, ticks: [80, 90, 100, 110, 120], classes: 8,
     });
     expect(METRIC_COLOR_SCALES["home-costs"]).toMatchObject({
-      minimum: 0, maximum: 100, ticks: [0, 20, 40, 60, 80, 100],
+      minimum: 0, maximum: 100, ticks: [0, 20, 40, 60, 80, 100], classes: 5,
     });
     expect(metricColorScale("mountain", "county")).toMatchObject({
-      minimum: 0, maximum: 4, ticks: [0, 1, 2, 3, 4],
+      minimum: 0, maximum: 4, ticks: [0, 1, 2, 3, 4], classes: 8,
     });
-    expect(METRIC_COLOR_SCALES["residential-hazard"].gradient.match(/#[\da-f]{6}/g)).toHaveLength(256);
+    expect(metricColorScale("county-fit")).toMatchObject({
+      minimum: 0, maximum: 1, ticks: [0, 0.2, 0.4, 0.6, 0.8, 1], classes: 5,
+    });
+    expect(METRIC_COLOR_SCALES["residential-hazard"].gradient.match(/#[\da-f]{6}/g)).toHaveLength(5);
     expect(METRIC_COLOR_SCALES["community-conditions"].gradient.match(/#[\da-f]{6}/g))
-      .toHaveLength(256);
+      .toHaveLength(10);
     expect(METRIC_COLOR_SCALES.mountain.gradient.match(/#[\da-f]{6}/g)).toHaveLength(10);
+    expect(METRIC_COLOR_SCALES["cost-of-living"].gradient.match(/#[\da-f]{6}/g)).toHaveLength(8);
+    expect(METRIC_COLOR_SCALES["home-costs"].gradient.match(/#[\da-f]{6}/g)).toHaveLength(5);
+    expect(metricColorScale("county-fit").gradient.match(/#[\da-f]{6}/g)).toHaveLength(5);
     expect(scoreColor(0)).toBe(MAP_COLORS.low);
     expect(scoreColor(25)).toBe(MAP_COLORS.below);
     expect(scoreColor(50)).toBe(MAP_COLORS.typical);
@@ -394,17 +407,17 @@ describe("score semantics", () => {
     expect(mountainColor(4)).toBe(MOUNTAIN_COLORS.highest);
     expect(mountainColor(5)).toBe(MOUNTAIN_COLORS.summit);
     expect(mountainColor(100)).toBe(MOUNTAIN_COLORS.summit);
-    expect(mountainColor(100, "county")).toBe(MOUNTAIN_COLORS.highest);
+    expect(mountainColor(100, "county")).toBe(MOUNTAIN_COLORS.summit);
     expect(mountainColor(0.49)).toBe(MOUNTAIN_BAND_COLORS[0]);
     expect(mountainColor(0.5)).toBe(MOUNTAIN_BAND_COLORS[1]);
     expect(mountainColor(0.99)).toBe(MOUNTAIN_BAND_COLORS[1]);
     expect(mountainColor(1)).toBe(MOUNTAIN_BAND_COLORS[2]);
-    for (const magnitude of [0, 0.5, 1, 2.3213, 3.9, 4]) {
+    for (const magnitude of [0, 0.5, 1, 2.3213, 3.9]) {
       expect(mountainColor(magnitude, "tract")).toBe(mountainColor(magnitude, "county"));
     }
     expect(COMMUNITY_GROUP_COLORS).toHaveLength(10);
-    expect(communityGroupColor(1)).toBe("#7fa87e");
-    expect(communityGroupColor(10)).toBe("#b14a3c");
+    expect(communityGroupColor(1)).toBe(COMMUNITY_GROUP_COLORS[0]);
+    expect(communityGroupColor(10)).toBe(COMMUNITY_GROUP_COLORS[9]);
     expect(communityGroupColor(1.5)).toBeNull();
     expect(communityGroupColor(null)).toBeNull();
     expect(costOfLivingColor(80)).toBe(costOfLivingColor(70));
@@ -414,6 +427,10 @@ describe("score semantics", () => {
     expect(homeBuyingPowerColor(0)).not.toBe(homeBuyingPowerColor(100));
     expect(homeBuyingPowerColor(-1)).toBeNull();
     expect(homeBuyingPowerColor(101)).toBeNull();
+    expect(countyFitColor(0)).not.toBe(countyFitColor(1));
+    expect(countyFitColor(-1e-9)).toBeNull();
+    expect(countyFitColor(1 + 1e-9)).toBeNull();
+    expect(countyFitColor(null)).toBeNull();
     expect(communityLabel({ ...county, community_conditions_group: null })).toBe("Not grouped");
     expect(mountainLabel(tract)).toBe("M2.32");
     expect(mountainRarityLabel(0, "county")).toBe("≈ top 100% of U.S. counties by base exposure");
@@ -422,8 +439,8 @@ describe("score semantics", () => {
     expect(mountainRarityLabel(5, "tract")).toBe("≈ top 0.001% of U.S. tracts by base exposure");
   });
   it("uses high-contrast half-magnitude mountain bands", () => {
-    expect(scoreColor(12.5)).toBe("#a2ac64");
-    expect(scoreColor(37.5)).toBe("#cbac39");
+    expect(scoreColor(12.5)).toBe(MAP_COLORS.low);
+    expect(scoreColor(37.5)).toBe(MAP_COLORS.below);
     for (const boundary of [20, 40, 60, 80]) {
       expect(scoreColor(boundary - 0.1)).not.toBe(scoreColor(boundary + 0.1));
     }
@@ -432,9 +449,14 @@ describe("score semantics", () => {
     }
     const femaColors = new Set(Array.from({ length: 10_001 }, (_, index) => scoreColor(index / 100)));
     const mountainColors = new Set(Array.from({ length: 501 }, (_, index) => mountainColor(index / 100)));
-    expect(femaColors.size).toBeGreaterThan(5);
-    expect(femaColors.size).toBeLessThanOrEqual(256);
+    const costColors = new Set(Array.from({ length: 401 }, (_, index) => costOfLivingColor(80 + index / 10)));
+    const homeColors = new Set(Array.from({ length: 10_001 }, (_, index) => homeBuyingPowerColor(index / 100)));
+    const fitColors = new Set(Array.from({ length: 1_001 }, (_, index) => countyFitColor(index / 1000)));
+    expect(femaColors.size).toBe(5);
     expect(mountainColors.size).toBe(11);
+    expect(costColors.size).toBe(8);
+    expect(homeColors.size).toBe(5);
+    expect(fitColors.size).toBe(5);
   });
   it("changes color at every exact half-magnitude boundary and only clamps the upper endpoint", () => {
     for (let band = 1; band < MOUNTAIN_BAND_COLORS.length; band += 1) {
@@ -443,8 +465,8 @@ describe("score semantics", () => {
       expect(mountainColor(boundary, "tract")).toBe(MOUNTAIN_BAND_COLORS[band]);
     }
     expect(mountainColor(4 - 1e-9, "county")).toBe(MOUNTAIN_BAND_COLORS[7]);
-    expect(mountainColor(4, "county")).toBe(MOUNTAIN_BAND_COLORS[8]);
-    expect(mountainColor(4 + 1e-9, "county")).toBe(MOUNTAIN_BAND_COLORS[8]);
+    expect(mountainColor(4, "county")).toBe(MOUNTAIN_COLORS.summit);
+    expect(mountainColor(4 + 1e-9, "county")).toBe(MOUNTAIN_COLORS.summit);
     expect(mountainColor(5 - 1e-9, "tract")).toBe(MOUNTAIN_BAND_COLORS[9]);
     expect(mountainColor(5, "tract")).toBe(MOUNTAIN_BAND_COLORS[10]);
     expect(mountainColor(5 + 1e-9, "tract")).toBe(MOUNTAIN_BAND_COLORS[10]);
@@ -452,13 +474,13 @@ describe("score semantics", () => {
     expect(mountainColor(-1e-9, "county")).toBeNull();
   });
   it("shares every county color with tracts while retaining the tract-only summit bands", () => {
-    for (let band = 0; band <= 8; band += 1) {
+    for (let band = 0; band <= 7; band += 1) {
       const magnitude = band / 2;
       expect(mountainColor(magnitude, "county")).toBe(MOUNTAIN_BAND_COLORS[band]);
       expect(mountainColor(magnitude, "county")).toBe(mountainColor(magnitude, "tract"));
     }
-    expect(COUNTY_MOUNTAIN_COLOR_SCALE).toEqual(MOUNTAIN_BAND_COLORS.slice(0, 9));
-    expect(MOUNTAIN_COLOR_SCALE.slice(9)).toEqual(MOUNTAIN_BAND_COLORS.slice(9));
+    expect(COUNTY_MOUNTAIN_COLOR_SCALE).toEqual([...MOUNTAIN_BAND_COLORS.slice(0, 8), MOUNTAIN_COLORS.summit]);
+    expect(MOUNTAIN_COLOR_SCALE.slice(10)).toEqual([MOUNTAIN_COLORS.summit]);
   });
   it("keeps legend intervals aligned with map colors and separates the terminal cap", () => {
     const tractScale = metricColorScale("mountain", "tract");
@@ -466,7 +488,7 @@ describe("score semantics", () => {
     expect(tractScale.gradient).toContain(`${mountainColor(4.9235, "tract")} 90% 100%`);
     expect(tractScale.gradient).not.toContain(MOUNTAIN_BAND_COLORS[10]);
     expect(countyScale.gradient).toContain(`${mountainColor(3.4973, "county")} 75% 87.5%`);
-    expect(countyScale.gradient).not.toContain(MOUNTAIN_BAND_COLORS[8]);
+    expect(countyScale.gradient).not.toContain(MOUNTAIN_COLORS.summit);
   });
   it("formats approximate peer rarity at release extrema and rejects invalid magnitudes", () => {
     expect(mountainRarityLabel(3.4973, "county"))
@@ -485,9 +507,12 @@ describe("score semantics", () => {
     expect(scoreColor(100.1)).toBeNull();
     expect(mountainColor(100.1)).toBe(MOUNTAIN_COLORS.summit);
     expect(Array.from({ length: 10 }, (_, index) => communityGroupColor(index + 1)))
-      .toEqual(COMMUNITY_GROUP_COLORS);
+      .toEqual([...COMMUNITY_GROUP_COLORS]);
     for (const invalid of [Number.NEGATIVE_INFINITY, Number.POSITIVE_INFINITY, Number.NaN, 0, 1.5, 11]) {
       expect(communityGroupColor(invalid)).toBeNull();
+    }
+    for (const invalid of [Number.NEGATIVE_INFINITY, Number.POSITIVE_INFINITY, Number.NaN, -0.1, 1.1]) {
+      expect(countyFitColor(invalid)).toBeNull();
     }
   });
   it("uses the fixed shared scales on the map independently of unrelated metric values", () => {
@@ -1080,19 +1105,20 @@ it("renders the map as the only primary UI with all retained controls", async ()
   expect(within(exports).getByRole("link", { name: "Tracts Parquet" })).toHaveAttribute("href", "/api/v3/exports/places.parquet");
   expect(within(exports).getByRole("link", { name: "Counties CSV" })).toHaveAttribute("href", "/api/v3/exports/counties.csv");
   expect(within(exports).getByRole("link", { name: "Counties Parquet" })).toHaveAttribute("href", "/api/v3/exports/counties.parquet");
-  const legend = screen.getByLabelText("Continuous Residential Hazard Exposure color scale, higher is worse");
+  const legend = screen.getByLabelText("Stepped Residential Hazard Exposure color scale with 5 classes, higher is worse");
   expect(legend).toHaveTextContent("not property-level risk");
   expect(legend.querySelector(".legend-gradient")).toHaveStyle({
     backgroundImage: expect.stringContaining("linear-gradient"),
   });
   expect(within(legend).getByRole("img", {
-    name: "Residential Hazard Exposure continuous color ramp from 0 to 100",
+    name: "Residential Hazard Exposure stepped color scale with 5 classes from 0 to 100",
   })).toBeVisible();
   for (const tick of ["0", "20", "40", "60", "80", "100"]) {
     expect(within(legend).getByText(tick)).toBeVisible();
   }
   expect(within(legend).getByText("Unranked")).toBeVisible();
   expect(legend.querySelector(".missing-key .hatched")).toHaveAttribute("aria-hidden", "true");
+  expect(screen.queryByLabelText(/^Continuous /)).not.toBeInTheDocument();
   expect(screen.getByRole("img", { name: /focusable USA tract Residential Hazard Exposure map/i })).toBeVisible();
   expect(screen.queryByRole("table")).not.toBeInTheDocument();
   expect(screen.queryByText("Next")).not.toBeInTheDocument();
@@ -1166,13 +1192,13 @@ it("renders Cost of Living and Home Costs legends and a five-card detail", async
   await screen.findAllByText("1 tracts interactive", {}, { timeout: 3000 });
   selectLayer("cost-of-living");
   const costLegend = await screen.findByLabelText(
-    "Cost of Living color scale from 80 to 120, lower is better, U.S. equals 100",
+    "Stepped Cost of Living color scale with 8 classes from 80 to 120, lower is better, U.S. equals 100",
   );
   expect(within(costLegend).getByText("100 · U.S.")).toBeVisible();
   expect(costLegend).toHaveTextContent("BEA RPP · 2024");
   selectLayer("home-costs");
   expect(await screen.findByLabelText(
-    "Home Costs national buying power percentile color scale, higher is better",
+    "Stepped Home Costs national buying power percentile color scale with 5 classes, higher is better",
   )).toHaveTextContent("asking-market indicator");
   fireEvent.click(screen.getByRole("button", { name: "Search" }));
   fireEvent.change(screen.getByLabelText("Street address"), { target: { value: "1 Main St, Boulder, CO" } });
@@ -1271,7 +1297,7 @@ it("keeps an unavailable Home Costs layer selectable and explains the local impo
   await screen.findByText("HouseHunter");
   selectLayer("home-costs");
   const legend = await screen.findByLabelText(
-    "Home Costs national buying power percentile color scale, higher is better",
+    "Stepped Home Costs national buying power percentile color scale with 5 classes, higher is better",
   );
   expect(layerButton()).toHaveAccessibleName("Map layer: Home Costs — Realtor.com / ACS");
   expect(legend).toHaveTextContent("Unavailable in this snapshot");
@@ -1298,7 +1324,7 @@ it("keeps the committed legend and accessible map description aligned during met
   expect(screen.getByText("Updating Mountain Magnitude map…")).toBeVisible();
   expect(canvas).toHaveAttribute("aria-busy", "true");
   expect(canvas).toHaveAccessibleName(/tract Residential Hazard Exposure map/i);
-  expect(screen.getByLabelText("Continuous Residential Hazard Exposure color scale, higher is worse")).toBeVisible();
+  expect(screen.getByLabelText("Stepped Residential Hazard Exposure color scale with 5 classes, higher is worse")).toBeVisible();
   expect(screen.queryByLabelText(/Stepped Mountain Magnitude color scale/)).not.toBeInTheDocument();
 
   expect(await screen.findByLabelText(
@@ -1319,9 +1345,9 @@ it("commits only the final metric after rapid successive map changes", async () 
   selectLayer("community-conditions");
 
   expect(canvas).toHaveAttribute("aria-busy", "true");
-  expect(screen.getByLabelText("Continuous Residential Hazard Exposure color scale, higher is worse")).toBeVisible();
+  expect(screen.getByLabelText("Stepped Residential Hazard Exposure color scale with 5 classes, higher is worse")).toBeVisible();
   const finalLegend = await screen.findByLabelText(
-    "Continuous Community Conditions color scale, Group 1 is healthiest",
+    "Stepped Community Conditions color scale with 10 classes, Group 1 is healthiest",
   );
   expect(finalLegend).toBeVisible();
   await waitFor(() => expect(canvas).toHaveAttribute("aria-busy", "false"));
@@ -1417,11 +1443,11 @@ it("switches to Community Conditions and browses county groups without changing 
   selectLayer("community-conditions");
   await waitFor(() => expect(window.location.hash).toContain("metric=community-conditions"));
   const legend = await screen.findByLabelText(
-    "Continuous Community Conditions color scale, Group 1 is healthiest",
+    "Stepped Community Conditions color scale with 10 classes, Group 1 is healthiest",
   );
   expect(legend).toBeVisible();
   expect(within(legend).getByRole("img", {
-    name: "Community Conditions color ramp from Group 1 to Group 10",
+    name: "Community Conditions stepped color scale from Group 1 to Group 10",
   })).toBeVisible();
   for (const tick of ["1", "3", "5", "7", "10"]) {
     expect(within(legend).getByText(tick)).toBeVisible();
