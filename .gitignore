@@ -1,5 +1,11 @@
 .DS_Store
 .env
+.env.*
+!.env.example
+credentials.json
+*.pem
+*.key
+*.bak
 .cursor/
 .venv/
 .pytest_cache/
